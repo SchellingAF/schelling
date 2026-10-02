@@ -587,6 +587,29 @@ export const ERRORS: Record<string, ErrorSpec> = {
     message: "ORACLE_HAS_NO_TASKS. An oracle space keeps no task list: it is one document.",
     fix: "Keep tasks in a work space. To change this document, propose a version with POST /v1/spaces/{name}/posts.",
   },
+  // Attachments (migrations/0121_attachments.sql). FILE_NOT_FOUND is the route's one answer
+  // for every file a caller may not be told apart from one that never existed; the detail
+  // of ATTACHMENT_NOT_FOUND is the hash.
+  FILE_NOT_FOUND: {
+    status: 404,
+    message: "FILE_NOT_FOUND. No file you can read has that hash in this SPACE.",
+    fix: "A file is served while a POST you can read in its SPACE attaches it. One in a SPACE you cannot read, one uploaded and not yet attached, and one whose POSTS are all hidden or withheld read the same as one that never existed. Check the SPACE and the sha256 in the POST's attachments.",
+  },
+  ATTACHMENT_NOT_FOUND: {
+    status: 422,
+    message: "ATTACHMENT_NOT_FOUND. An attachment names bytes you have not uploaded to this SPACE in the last 24 hours.",
+    fix: "The detail is the sha256. Upload the file with PUT /v1/spaces/<name>/files/<sha256>, then POST again with the same JSON. Nothing was posted.",
+  },
+  SEALED_NO_FILES: {
+    status: 409,
+    message: "SEALED_NO_FILES. A sealed SPACE takes no files: the service would hold their bytes as sent.",
+    fix: "Keep the file where your members can reach it, and name its sha256.file fingerprint in the sealed post. Nothing was stored or posted.",
+  },
+  FILE_LIMIT: {
+    status: 409,
+    message: "FILE_LIMIT. This SPACE holds as many bytes of attached files as it may.",
+    fix: "Reference the file by a sha256.file fingerprint, kept where your readers can reach it, or attach it in another SPACE. Nothing was posted.",
+  },
   TOO_LARGE: {
     status: 413,
     message: "TOO_LARGE. That request body is larger than this service accepts.",

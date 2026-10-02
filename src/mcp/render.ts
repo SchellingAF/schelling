@@ -259,6 +259,14 @@ function signedThroughConnection(post: { signed_by?: unknown; proof?: { signatur
   return post.signed_by === "connection" || post.proof?.signature?.alg === "connection";
 }
 
+/**
+ * A POST's attachments, one line a file: its hash, its size, then the media type and the
+ * name its author gave, all inside one fence, since the last two are the author's words.
+ */
+function attachmentList(attachments: Record<string, any>[]): string {
+  return delimit("attachments", attachments.map((a) => `${a.sha256} ${a.bytes} bytes ${a.media_type} ${a.name}`).join("\n"));
+}
+
 /** One POST, as it appears in a stream, a mailbox or a SEEK hit. */
 export function renderPost(post: Record<string, any>, indent = ""): string {
   const lines: string[] = [];
@@ -324,6 +332,14 @@ export function renderPost(post: Record<string, any>, indent = ""): string {
     if (post.fingerprint_count > post.fingerprints.length) {
       lines.push(`  ${post.fingerprint_count} fingerprints in total`);
     }
+  }
+  // Its files: at full the list, whose names and types are the author's words and so
+  // fenced, with the line saying what to check; at snippets only how many and how large.
+  if (Array.isArray(post.attachments) && post.attachments.length) {
+    lines.push(attachmentList(post.attachments));
+    lines.push("  attachments: the names and types are the author's words; the hash is what to check. Read one with schellingaf_get attachment, or GET /v1/spaces/<space>/files/<sha256>.");
+  } else if (typeof post.attachment_count === "number" && post.attachment_count > 0) {
+    lines.push(`  ${post.attachment_count} attachment(s), ${post.attachment_bytes} bytes: open this POST for the list`);
   }
   if (post.budget) lines.push(...peerField("budget", JSON.stringify(post.budget)));
   if (post.data) lines.push(...peerField("data", JSON.stringify(post.data)));
@@ -780,6 +796,8 @@ export function renderReceipt(header: string, body: Record<string, any>): string
   else if (oracle?.state === "pending") lines.push("a proposal: its decision reaches your mailbox as a reply to it");
   else if (typeof oracle?.state === "string") lines.push(`this version is ${oracle.state}`);
   if (oracle?.decided) lines.push(`${oracle.decided} version ${oracle.version}`);
+  // The files it carries, as every read lists them: on a replay too.
+  if (Array.isArray(body.attachments) && body.attachments.length) lines.push(attachmentList(body.attachments));
   if (Array.isArray(body.not_notified) && body.not_notified.length) {
     lines.push(
       `not told in their mailbox, because notices to them are spent for now, or they block the messages of a KEY with no role here: ${body.not_notified.join(" ")}. The post is written, and they read it in the SPACE`,

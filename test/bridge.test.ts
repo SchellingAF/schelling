@@ -4,13 +4,13 @@
 
 import { test, before, after, describe } from "node:test";
 import assert from "node:assert/strict";
-import { createPrivateKey, generateKeyPairSync, randomUUID, sign as signBytes, type KeyObject } from "node:crypto";
+import { createHash, createPrivateKey, generateKeyPairSync, randomUUID, sign as signBytes, type KeyObject } from "node:crypto";
 import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, linkSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { getRequestListener } from "@hono/node-server";
 import { cloneDatabase, setUp, type Fixture } from "./helpers.ts";
 import { openDb, type Db } from "../src/db/sql.ts";
@@ -21,6 +21,8 @@ import { allowStreamsAgain, endAllStreams, streamsOpen } from "../src/mcp/listen
 import { defuse } from "../src/mcp/render.ts";
 import { serverIdentity } from "../src/mcp/server.ts";
 import { bridgeScript } from "../src/surface/plugin.ts";
+import { ERRORS } from "../src/db/errors.ts";
+import { ATTACHMENT_LIMITS } from "../src/surface/vocabulary.ts";
 import { sweep } from "./lib/sweep.ts";
 import { DISGUISED_MARKERS, FORGED_MARKERS, ORDINARY } from "./lib/fence.ts";
 
@@ -37,6 +39,8 @@ let home: string;
 /** A service that lies: when set, what it answers to a GET, rewritten, as an operator
  *  could, to hold the bridge to what it must not believe. */
 let tamper: ((path: string, json: any) => any) | null = null;
+/** The same for a file's bytes: when set, what a GET of a file answers, rewritten. */
+let tamperBytes: ((bytes: Buffer) => Buffer) | null = null;
 /** How many times anything asked this service for its capabilities. */
 let capabilitiesAsked = 0;
 /** How many of the next asks for the capabilities are answered 503, as a service whose
@@ -81,6 +85,10 @@ const opened = setUp(async () => {
       }
     }
     const res = await app.fetch(req, env as never);
+    if (tamperBytes && req.method === "GET" && res.ok && new URL(req.url).pathname.includes("/files/")) {
+      const told = tamperBytes(Buffer.from(await res.arrayBuffer()));
+      return new Response(told, { status: res.status, headers: { "content-type": res.headers.get("content-type") ?? "" } });
+    }
     if (!tamper || req.method !== "GET" || !(res.headers.get("content-type") ?? "").includes("application/json")) return res;
     const told = tamper(new URL(req.url).pathname, await res.json());
     return new Response(JSON.stringify(told), { status: res.status, headers: { "content-type": "application/json" } });
@@ -117,9 +125,10 @@ function run(args: string[], extra: Record<string, string> = {}): Promise<{ code
   });
 }
 
-/** A running bridge, and a way to send it one message and wait for the answer. */
-function start(extra: Record<string, string> = {}) {
-  const child = spawn(process.execPath, [BRIDGE], { env: { ...env(), ...extra } }) as ChildProcessWithoutNullStreams;
+/** A running bridge, and a way to send it one message and wait for the answer; run in
+ *  `cwd`, the directory whose files it may attach, when one is given. */
+function start(extra: Record<string, string> = {}, cwd?: string) {
+  const child = spawn(process.execPath, [BRIDGE], { env: { ...env(), ...extra }, ...(cwd ? { cwd } : {}) }) as ChildProcessWithoutNullStreams;
   let buffered = "";
   const waiting = new Map<number, (message: any) => void>();
   const seen: any[] = [];
@@ -1157,6 +1166,311 @@ describe("the bridge, signing", () => {
       }
     } finally {
       await bridge.stop();
+    }
+  });
+});
+
+describe("the bridge, files", () => {
+  const sha = (bytes: string | Buffer) => createHash("sha256").update(bytes).digest("hex");
+  const FILE = ATTACHMENT_LIMITS.fileBytes;
+  /** A directory for a bridge to run in, holding these files. */
+  const workDir = (label: string, files: Record<string, string | Buffer> = {}) => {
+    const dir = mkdtempSync(join(tmpdir(), `schellingaf-${label}-`));
+    for (const [name, content] of Object.entries(files)) {
+      mkdirSync(join(dir, name, ".."), { recursive: true });
+      writeFileSync(join(dir, name), content);
+    }
+    return dir;
+  };
+  const initialize = (bridge: ReturnType<typeof start>) =>
+    bridge.ask("initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "test", version: "0" } });
+  const createSpace = async (bridge: ReturnType<typeof start>, name: string, extra: Record<string, unknown> = {}) => {
+    const made = await bridge.ask("tools/call", { name: "schellingaf_space_control", arguments: {
+      action: "create", name, title: "files through the bridge", categories: ["general"], ...extra,
+    } });
+    assert.equal(made.result.isError, undefined, JSON.stringify(made));
+  };
+
+  test("holds its file limits, its token budgets and the service's words for files to the service's own", () => {
+    const source = readFileSync(SOURCE, "utf8");
+    const constant = (name: string) => source.match(new RegExp(`const ${name} =\\s*("[^"]*"|\\d+);`))?.[1];
+    assert.equal(Number(constant("FILE_BYTES")), ATTACHMENT_LIMITS.fileBytes);
+    assert.equal(Number(constant("FILES_PER_POST")), ATTACHMENT_LIMITS.perPost);
+    // The two refusals the bridge says for the service are written where it raises them, so
+    // the copy review carries them; each must be the service's words exactly.
+    for (const code of ["SEALED_NO_FILES", "FILE_NOT_FOUND"] as const) {
+      const words = `${ERRORS[code]!.message} ${ERRORS[code]!.fix}`;
+      assert.ok(source.includes(`new Refusal(${JSON.stringify(words)})`), `the bridge raises ${code} with the service's words`);
+    }
+    const connector = readFileSync(new URL("../src/mcp/server.ts", import.meta.url), "utf8");
+    for (const [here, there] of [["BUDGET_DEFAULT", "MCP_BUDGET_DEFAULT"], ["BUDGET_MAX", "MCP_BUDGET_MAX"]] as const) {
+      const theirs = connector.match(new RegExp(`const ${there} = (\\d+);`))?.[1];
+      assert.ok(theirs, there);
+      assert.equal(constant(here), theirs, here);
+    }
+  });
+
+  test("uploads a post's files, given as text or by a path inside its directory, and signs over each hash", async () => {
+    const notes = "notes the bridge attaches\n";
+    const binary = Buffer.from([0, 1, 2, 255, 254, 0, 10]);
+    const inline = `inline words ${process.pid}\n`;
+    const work = workDir("files-ok", { "notes.txt": notes, "sub/data.bin": binary });
+    const who = elsewhere("files-ok");
+    const space = `bridge-files-${process.pid}`;
+    const bridge = start(who, work);
+    try {
+      await initialize(bridge);
+      // What an agent is told of a file it attaches, and of a file it saves.
+      const listed = await bridge.ask("tools/list", {});
+      const tool = (name: string) => listed.result.tools.find((t: any) => t.name === name);
+      assert.match(tool("schellingaf_post").inputSchema.properties.attachments.description, /in a public SPACE anyone can fetch it, and no request removes it$/);
+      assert.match(tool("schellingaf_get").inputSchema.properties.save_as.description, /never a name a tool runs by itself$/);
+
+      await createSpace(bridge, space);
+      const kept = keptBy(who);
+      const post = {
+        space, kind: "obs", body: "notes.txt, inline.txt and data.bin", idempotency_key: "files-1",
+        fingerprints: [{ scheme: "git.commit", value: "c0ffee1234" }],
+        attachments: [
+          { path: "notes.txt", media_type: "text/plain" },
+          { text: inline, name: "inline.txt", media_type: "text/plain" },
+          { path: join("sub", "data.bin") },
+        ],
+      };
+      const sent = connectorPosts;
+      const posted = await bridge.ask("tools/call", { name: "schellingaf_post", arguments: post });
+      assert.equal(posted.result.isError, undefined, JSON.stringify(posted));
+      assert.equal(connectorPosts - sent, 1, "the post went more than once");
+      const id = posted.result.structuredContent.post_id;
+      const one = await readAs(kept.token, `/v1/posts/${id}`);
+      assert.equal(one.signed, true, JSON.stringify(one));
+      // In the order given; a path's name its base name, its type octet-stream unless given.
+      assert.deepEqual(one.attachments.map(({ sha256, name, media_type }: any) => ({ sha256, name, media_type })), [
+        { sha256: sha(notes), name: "notes.txt", media_type: "text/plain" },
+        { sha256: sha(inline), name: "inline.txt", media_type: "text/plain" },
+        { sha256: sha(binary), name: "data.bin", media_type: "application/octet-stream" },
+      ]);
+      // Each hash is a fingerprint, beside the agent's own, so the KEY's signature covers it.
+      assert.deepEqual(
+        one.fingerprints.map((f: any) => `${f.scheme} ${f.value}`).sort(),
+        ["git.commit c0ffee1234", ...[notes, inline, binary].map((b) => `sha256.file ${sha(b)}`)].sort(),
+      );
+      const checked = spawnSync(process.execPath, [new URL("../content/verify-post.mjs", import.meta.url).pathname], { input: JSON.stringify(one), encoding: "utf8" });
+      assert.equal(checked.status, 0, checked.stdout + checked.stderr);
+      // The same call again is the same post.
+      const again = await bridge.ask("tools/call", { name: "schellingaf_post", arguments: post });
+      assert.equal(again.result.isError, undefined, JSON.stringify(again));
+      assert.equal(again.result.structuredContent.post_id, id);
+    } finally {
+      await bridge.stop();
+      rmSync(work, { recursive: true, force: true });
+    }
+  });
+
+  test("reads a file whole and checks its hash before cutting it, and save_as writes it to a new file", async () => {
+    const notes = "éé notes the bridge reads back\n";
+    const binary = Buffer.from([0, 1, 2, 255, 254, 0, 11]);
+    const work = workDir("files-read", { "notes.txt": notes, "data.bin": binary });
+    const who = elsewhere("files-read");
+    const space = `bridge-files-read-${process.pid}`;
+    const bridge = start(who, work);
+    try {
+      await initialize(bridge);
+      await createSpace(bridge, space);
+      const kept = keptBy(who);
+      const posted = await bridge.ask("tools/call", { name: "schellingaf_post", arguments: {
+        space, kind: "obs", body: "two files", attachments: [{ path: "notes.txt", media_type: "text/plain" }, { path: "data.bin" }],
+      } });
+      assert.equal(posted.result.isError, undefined, JSON.stringify(posted));
+      const id = posted.result.structuredContent.post_id;
+      const at = (hash: string) => `${origin}/v1/spaces/${space}/files/${hash}`;
+      const size = Buffer.byteLength(notes);
+      const head = (hash: string, bytes: number, type: string) => [
+        `reading as ${kept.peer_id}`,
+        `file ${hash} in "${space}": ${bytes} bytes, ${type}`,
+        `checked here, by the bridge: the ${bytes} bytes fetched have the SHA-256 asked for`,
+      ];
+      for (const how of [{ space }, { post_id: id }]) {
+        const sent = connectorPosts;
+        const read = await bridge.ask("tools/call", { name: "schellingaf_get", arguments: { attachment: sha(notes), ...how } });
+        assert.equal(read.result.isError, undefined, JSON.stringify(read));
+        assert.equal(connectorPosts, sent, "the connector read the file, not the bridge");
+        assert.equal(textOf(read), [...head(sha(notes), size, "text/plain; charset=utf-8"), `<<<peer file>>>\n${notes}\n<<<end file>>>`].join("\n"));
+        assert.deepEqual(read.result.structuredContent, { space, sha256: sha(notes), bytes: size, type: "text/plain; charset=utf-8", truncated: false, text: notes });
+      }
+      // Cut to the budget, three bytes a token, on the byte a character starts at.
+      const cut = await bridge.ask("tools/call", { name: "schellingaf_get", arguments: { attachment: sha(notes), space, token_budget: 1 } });
+      assert.equal(textOf(cut), [
+        ...head(sha(notes), size, "text/plain; charset=utf-8"),
+        "<<<peer file>>>\né\n<<<end file>>>",
+        `cut at 2 of ${size} bytes: ask again with a larger token_budget, or fetch the whole file at ${at(sha(notes))}`,
+      ].join("\n"));
+      // Bytes that are not text are described, never shown.
+      const bin = await bridge.ask("tools/call", { name: "schellingaf_get", arguments: { attachment: sha(binary), post_id: id } });
+      assert.equal(textOf(bin), [
+        ...head(sha(binary), binary.length, "application/octet-stream"),
+        `${binary.length} bytes that are not text: fetch them at ${at(sha(binary))}, or with the bridge's save_as`,
+      ].join("\n"));
+      // A file the post does not attach, through the post, in the service's words.
+      const other = await bridge.ask("tools/call", { name: "schellingaf_get", arguments: { attachment: sha("not attached"), post_id: id } });
+      assert.equal(textOf(other), `${ERRORS.FILE_NOT_FOUND!.message} ${ERRORS.FILE_NOT_FOUND!.fix}`);
+      // A call the bridge does not read itself goes to the connector, which says what is wrong.
+      const mixed = await bridge.ask("tools/call", { name: "schellingaf_get", arguments: { attachment: sha(notes), space, post_ids: [id] } });
+      assert.match(textOf(mixed), /^INVALID_REQUEST\. attachment reads one file, and takes no post_ids\./);
+
+      // save_as: a new file, checked against the hash, in the directory the bridge runs in.
+      const saved = await bridge.ask("tools/call", { name: "schellingaf_get", arguments: { attachment: sha(binary), space, save_as: "copy.bin" } });
+      assert.equal(saved.result.isError, undefined, JSON.stringify(saved));
+      assert.match(textOf(saved), new RegExp(`^wrote ${binary.length} bytes to .*copy\\.bin: their SHA-256 is ${sha(binary)}, the hash asked for$`));
+      assert.deepEqual(readFileSync(join(work, "copy.bin")), binary);
+      const refusedSave = async (save_as: string, expected: string) => {
+        const out = await bridge.ask("tools/call", { name: "schellingaf_get", arguments: { attachment: sha(binary), space, save_as } });
+        assert.equal(out.result.isError, true, JSON.stringify(out));
+        assert.equal(textOf(out), expected);
+      };
+      await refusedSave("copy.bin", "INVALID_REQUEST. save_as names a file that exists, and the bridge writes only a new one. Nothing was written.");
+      assert.deepEqual(readFileSync(join(work, "copy.bin")), binary, "an existing file was written over");
+      await refusedSave(join("..", `escaped-${process.pid}.bin`), "INVALID_REQUEST. save_as is outside the directory the bridge runs in, and the bridge writes files there only. Nothing was written.");
+      assert.equal(existsSync(join(work, "..", `escaped-${process.pid}.bin`)), false);
+      await refusedSave(".hidden.bin", "INVALID_REQUEST. save_as has a part starting with a dot, which the bridge never writes. Nothing was written.");
+      await refusedSave(join("nowhere", "x.bin"), "INVALID_REQUEST. save_as names a folder that does not exist. Nothing was written.");
+
+      // A service that answers other bytes than the hash asked for is caught here, and
+      // nothing of them is shown or written.
+      tamperBytes = (bytes) => {
+        const changed = Buffer.from(bytes);
+        changed[changed.length - 2] = changed[changed.length - 2]! ^ 1;
+        return changed;
+      };
+      try {
+        const lied = await bridge.ask("tools/call", { name: "schellingaf_get", arguments: { attachment: sha(notes), space } });
+        assert.equal(lied.result.isError, true, JSON.stringify(lied));
+        assert.match(textOf(lied), new RegExp(`^BRIDGE_FAILED\\. The bridge could not read this: the bytes fetched for ${sha(notes)} have the SHA-256 [0-9a-f]{64}\\. Nothing was sent\\.$`));
+        const lostSave = await bridge.ask("tools/call", { name: "schellingaf_get", arguments: { attachment: sha(binary), space, save_as: "tampered.bin" } });
+        assert.match(textOf(lostSave), /^BRIDGE_FAILED\. The bridge could not save this: /);
+        assert.equal(existsSync(join(work, "tampered.bin")), false);
+      } finally {
+        tamperBytes = null;
+      }
+    } finally {
+      await bridge.stop();
+      rmSync(work, { recursive: true, force: true });
+    }
+  });
+
+  test("reads no file outside its directory, no dot file, no file it keeps and none named like a secret, and takes no name the service refuses", async () => {
+    const canary = `zqxfiles${randomUUID().replaceAll("-", "")}`;
+    const outside = workDir("files-outside", { "outside.txt": `outside ${canary}\n` });
+    const secrets: [string, string][] = [
+      ["chain.pem", "*.pem"], ["server.KEY", "*.key"], ["cert.p12", "*.p12"], ["cert.PFX", "*.pfx"], ["vault.kdbx", "*.kdbx"],
+      ["infra.tfstate", "*.tfstate"], ["deploy.env", "*.env"], ["ID_RSA_old", "id_rsa*"], ["id_ed25519.pub", "id_ed25519*"],
+      ["id_ecdsa", "id_ecdsa*"], ["my-Credentials.txt", "*credential*"], ["TopSecret.md", "*secret*"],
+      ["prod.tfvars", "*.tfvars"], ["release.JKS", "*.jks"], ["android.keystore", "*.keystore"],
+      ["history.sqlite3", "*.sqlite*"], ["state.sqlite-wal", "*.sqlite*"], ["cache.db", "*.db"],
+    ];
+    // A private key under a name that says nothing, its first line past the file's start.
+    const pem = `notes first\n${"-".repeat(5)}BEGIN OPENSSH PRIVATE KEY${"-".repeat(5)}\n${canary}\n`;
+    const turned = `rtl${String.fromCharCode(0x202e)}txt.sh`;
+    const work = workDir("files-refused", {
+      "notes.txt": `notes ${canary}\n`,
+      ".hidden/notes.txt": `hidden ${canary}\n`,
+      ".profile": `profile ${canary}\n`,
+      [turned]: `turned ${canary}\n`,
+      "empty.txt": "",
+      "large.txt": Buffer.alloc(FILE + 1, 0x61),
+      "harmless.txt": pem,
+      // Past the first 4096 bytes, the same line is not looked for, and the file is read.
+      "late.txt": `${"a".repeat(4096)}\n${"-".repeat(5)}BEGIN RSA PRIVATE KEY${"-".repeat(5)}\n`,
+      // Zero-width non-joiner and joiner spell words in some scripts: a name may hold them.
+      [`mi${String.fromCharCode(0x200c)}ha${String.fromCharCode(0x200d)}n.txt`]: `joined ${process.pid}\n`,
+      ...Object.fromEntries(secrets.map(([name]) => [name, `secret ${canary}\n`])),
+    });
+    mkdirSync(join(work, "sub"));
+    symlinkSync(join(outside, "outside.txt"), join(work, "link.txt"));
+    symlinkSync(join(work, "server.KEY"), join(work, "innocent.txt"));
+    // This bridge keeps its KEY and its token inside the directory it runs in.
+    const who = { SCHELLINGAF_KEY_FILE: join(work, "keys", "key.pem") };
+    const space = `bridge-files-refused-${process.pid}`;
+    const bridge = start(who, work);
+    try {
+      await initialize(bridge);
+      await bridge.ask("tools/call", { name: "schellingaf_whoami", arguments: {} });
+      await createSpace(bridge, space);
+      // The KEY by another name: the same file, linked.
+      linkSync(join(work, "keys", "key.pem"), join(work, "kept.txt"));
+      const fine = { text: `fine ${canary}\n`, name: "fine.txt", media_type: "text/plain" };
+      const refused = async (file: Record<string, unknown>, expected: string) => {
+        const out = await bridge.ask("tools/call", { name: "schellingaf_post", arguments: { space, kind: "obs", body: "x", attachments: [fine, file] } });
+        assert.equal(out.result.isError, true, JSON.stringify(out));
+        assert.equal(textOf(out), expected, JSON.stringify(file));
+      };
+      const sent = connectorPosts;
+
+      const outsideWords = "INVALID_REQUEST. attachments[1].path is outside the directory the bridge runs in, and the bridge reads files there only. Nothing was sent.";
+      for (const path of [join("..", basename(outside), "outside.txt"), join(outside, "outside.txt"), "link.txt"]) await refused({ path }, outsideWords);
+      await refused({ path: join(".hidden", "notes.txt") }, "INVALID_REQUEST. attachments[1].path has a part starting with a dot, which the bridge never reads. Nothing was sent.");
+      const keptWords = "INVALID_REQUEST. attachments[1].path is a file the bridge keeps for its KEY, which it never sends. Nothing was sent.";
+      await refused({ path: "kept.txt" }, keptWords);
+      await refused({ path: join("keys", "token.json") }, keptWords);
+
+      const secretWords = (pattern: string) =>
+        `INVALID_REQUEST. attachments[1].path is named like a secret (${pattern}), and the bridge never reads such a file. Nothing was sent.`;
+      await refused({ path: join("keys", "key.pem") }, secretWords("*.pem"));
+      for (const [name, pattern] of secrets) await refused({ path: name }, secretWords(pattern));
+      // By the name it has, through a link, and whatever name the agent gives it.
+      await refused({ path: "innocent.txt" }, secretWords("*.key"));
+      await refused({ path: "deploy.env", name: "deploy.txt", media_type: "text/plain" }, secretWords("*.env"));
+
+      const nameWords = (taken: boolean) =>
+        `INVALID_REQUEST. attachments[1].name${taken ? ", the path's base name," : ""} has a control or format character, a line break, a slash or backslash, or a leading dot, and the service takes no such name. Nothing was sent.`;
+      await refused({ path: turned }, nameWords(true));
+      await refused({ path: ".profile" }, nameWords(true));
+      const names = [
+        `a${String.fromCharCode(0x202e)}txt.sh`, `a${String.fromCharCode(0x200b)}b.txt`, `a${String.fromCharCode(0xfeff)}b.txt`,
+        `two${String.fromCharCode(10)}lines.txt`, "a/b.txt", "a\\b.txt", ".bashrc",
+        // JSON carries these two unescaped: the call that holds one is still one message.
+        `a${String.fromCharCode(0x2028)}b.txt`, `a${String.fromCharCode(0x2029)}b.txt`,
+      ];
+      for (const name of names) {
+        await refused({ text: `named ${canary}`, name, media_type: "text/plain" }, nameWords(false));
+        await refused({ path: "notes.txt", name, media_type: "text/plain" }, nameWords(false));
+      }
+
+      await refused({ path: "sub" }, "INVALID_REQUEST. attachments[1].path is not a regular file. Nothing was sent.");
+      await refused({ path: "empty.txt" }, `INVALID_REQUEST. attachments[1].path is 0 bytes, and a file is 1 to ${FILE} bytes. Nothing was sent.`);
+      await refused({ path: "large.txt" }, `INVALID_REQUEST. attachments[1].path is ${FILE + 1} bytes, and a file is 1 to ${FILE} bytes. Nothing was sent.`);
+      await refused({ path: "absent.txt" }, "INVALID_REQUEST. attachments[1].path names no file the bridge can read (ENOENT). Nothing was sent.");
+      await refused({ path: "harmless.txt" }, "INVALID_REQUEST. attachments[1].path has a PEM private key's first line in its first 4096 bytes, and the bridge never sends a private key. Nothing was sent.");
+      // No refused post reached the connector.
+      assert.equal(connectorPosts, sent, "a refused post reached the connector");
+
+      // A sealed SPACE takes no files: refused before any file is read, so a path naming
+      // nothing meets the same words, whether the SPACE is sealed or the post asks to be.
+      await eventually(async () => (await readAs(keptBy(who).token, "/v1/me")).encryption_key !== null, "the encryption key published");
+      const sealedSpace = `bridge-files-sealed-${process.pid}`;
+      await createSpace(bridge, sealedSpace, { visibility: "sealed" });
+      const sealedSent = connectorPosts;
+      for (const args of [{ space: sealedSpace }, { space, sealed: true }]) {
+        const out = await bridge.ask("tools/call", { name: "schellingaf_post", arguments: { ...args, kind: "obs", body: "x", attachments: [fine, { path: "absent.txt" }] } });
+        assert.equal(out.result.isError, true, JSON.stringify(out));
+        assert.equal(textOf(out), `${ERRORS.SEALED_NO_FILES!.message} ${ERRORS.SEALED_NO_FILES!.fix}`);
+      }
+      assert.equal(connectorPosts, sealedSent, "a post with files reached the connector for a sealed SPACE");
+
+      // And no file's bytes, not even the one listed before the file refused, reached the service.
+      assert.deepEqual(await sweep(fixture.owner, canary), []);
+
+      // What the rules leave alone goes: a name with a zero-width joiner, and a key's first
+      // line past where the bridge looks.
+      const joined = `mi${String.fromCharCode(0x200c)}ha${String.fromCharCode(0x200d)}n.txt`;
+      const taken = await bridge.ask("tools/call", { name: "schellingaf_post", arguments: { space, kind: "obs", body: "two files", attachments: [{ path: joined }, { path: "late.txt" }] } });
+      assert.equal(taken.result.isError, undefined, JSON.stringify(taken));
+      const shown = await readAs(keptBy(who).token, `/v1/posts/${taken.result.structuredContent.post_id}`);
+      assert.deepEqual(shown.attachments.map((a: any) => a.name), [joined, "late.txt"]);
+    } finally {
+      await bridge.stop();
+      rmSync(work, { recursive: true, force: true });
+      rmSync(outside, { recursive: true, force: true });
     }
   });
 });

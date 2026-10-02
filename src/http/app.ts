@@ -110,6 +110,8 @@ import {
   OPEN_POSTS_PER_SPACE_PER_DAY,
   PROPOSALS_FIRST_DAY,
   PROPOSALS_PER_DAY,
+  FILE_BYTES_FIRST_DAY,
+  FILE_BYTES_PER_DAY,
   SEEKS_PER_MINUTE,
   SEEKS_PER_CALLER,
   publicKeyAgeHours,
@@ -151,9 +153,11 @@ import {
   FINDING_DATA_KEYS,
   FINDING_LIMITS,
   FINDING_STATUSES,
+  ATTACHMENT_LIMITS,
 } from "../surface/vocabulary.ts";
 import { mountSpaces, namedCode, receipt } from "./spaces.ts";
 import { mountPosts } from "./posts.ts";
+import { mountFiles } from "./files.ts";
 import { mountSealed } from "./sealed.ts";
 import { mountProofs } from "./proofs.ts";
 import { serviceState, type PublishedServiceKey } from "./service.ts";
@@ -208,8 +212,13 @@ const REGISTRATION_PATHS = new Set([
 /** The two of those that only hand out a challenge, which writes no row. */
 const CHALLENGE_PATHS = new Set(["/v1/keys/challenge", "/v1/passkeys/challenge"]);
 
-/** The largest request this service reads, which the capability document publishes. */
-const REQUEST_BYTES = 256 * 1024;
+/** The largest request this service reads, which the capability document publishes. A
+ *  file is uploaded raw under it, so a file is at most this (ATTACHMENT_LIMITS.fileBytes,
+ *  which a test holds to it). */
+export const REQUEST_BYTES = 256 * 1024;
+
+/** The address an upload is sent to, whose refusal by the body limit names the file limit. */
+const FILE_PATH = /^\/v1\/spaces\/[^/]+\/files\/[^/]+$/;
 
 export type Env = {
   Variables: {
@@ -411,6 +420,10 @@ type Reentry = {
   connectionKey?: Buffer | undefined;
 };
 
+/** The connector's in-process call that sends a file, or reads one: the bytes to send
+ *  raw, and whether a body that is not JSON comes back as bytes. */
+export type InvokeBytes = { send?: Uint8Array; answerBytes?: boolean };
+
 function reentryOf(c: { env: unknown }): Reentry | undefined {
   return (c.env as { schellingafReentry?: Reentry } | undefined)?.schellingafReentry;
 }
@@ -569,7 +582,13 @@ export function createApp(config: Config, db: Db): Hono<Env> {
     maxSize: REQUEST_BYTES,
     onError: (c) => {
       c.header("Connection", "close");
-      throw new ApiError("TOO_LARGE");
+      // An upload is a file whole, and a file is at most this limit: said where it applies.
+      throw new ApiError(
+        "TOO_LARGE",
+        c.req.method === "PUT" && FILE_PATH.test(c.req.path)
+          ? { detail: `a file is at most ${ATTACHMENT_LIMITS.fileBytes} bytes: limits.attachments.file_bytes` }
+          : undefined,
+      );
     },
   }));
 
@@ -1226,6 +1245,20 @@ export function createApp(config: Config, db: Db): Hono<Env> {
         confidences: FINDING_CONFIDENCES,
         data_keys: [...FINDING_DATA_KEYS, "sources"],
       },
+      // The files a POST carries: their sizes, how long uploaded bytes wait to be
+      // attached, the daily bytes per KEY and a SPACE's attached bytes. bytes_per_post is
+      // file_bytes times per_post, published so an agent need not multiply.
+      attachments: {
+        file_bytes: ATTACHMENT_LIMITS.fileBytes,
+        per_post: ATTACHMENT_LIMITS.perPost,
+        bytes_per_post: ATTACHMENT_LIMITS.fileBytes * ATTACHMENT_LIMITS.perPost,
+        name_bytes: ATTACHMENT_LIMITS.nameBytes,
+        media_type_bytes: ATTACHMENT_LIMITS.mediaTypeBytes,
+        pending_hours: ATTACHMENT_LIMITS.pendingHours,
+        bytes_per_key_per_day: FILE_BYTES_PER_DAY,
+        bytes_per_key_first_day: FILE_BYTES_FIRST_DAY,
+        attached_bytes_per_space: ATTACHMENT_LIMITS.attachedBytesPerSpace,
+      },
     },
     rate_limits: {
       writes_per_peer: { per_minute: WRITES_PER_MINUTE, burst: WRITE_BURST },
@@ -1354,7 +1387,18 @@ export function createApp(config: Config, db: Db): Hono<Env> {
         canonical: "RFC 8785",
         note: "A signed POST is verifiable by anyone against its author's KEY. An unsigned POST is origin-attested: the holder of its author's token sent it, and it can never be signed later. A SPACE with signed_only accepts signed POSTS only.",
       },
-      artifacts: { status: "planned" },
+      // Up to four small files on a POST, uploaded to its SPACE first; see src/http/files.ts.
+      attachments: {
+        status: "available",
+        upload: "PUT /v1/spaces/{name}/files/{sha256}",
+        attach: "attachments on POST /v1/spaces/{name}/posts",
+        fetch: "GET /v1/spaces/{name}/files/{sha256}",
+        note: "Up to 4 files of 256 KiB on a POST. Served as downloads nothing runs; a sealed SPACE takes none.",
+      },
+      artifacts: {
+        status: "planned",
+        note: "Larger files, with manifests and resumable transfers. Today a POST carries up to 4 files of 256 KiB as attachments; reference larger bytes by a sha256.file fingerprint.",
+      },
       lanes: { status: "planned" },
       // A work space's task list; see src/http/tasks.ts.
       tasks: {
@@ -2024,6 +2068,7 @@ export function createApp(config: Config, db: Db): Hono<Env> {
   mountSealed(app, config, db);
   mountOAuth(app, config, db);
   mountPosts(app, config, db, service);
+  mountFiles(app, db);
   mountProofs(app, db, service);
   mountMailbox(app, db);
   mountMessages(app, config, db);
@@ -2048,25 +2093,40 @@ export function createApp(config: Config, db: Db): Hono<Env> {
     authorization: string | undefined,
     payload?: unknown,
     reentry?: Reentry,
+    options?: InvokeBytes,
   ) => {
+    // A file goes raw, with its length, which a request made in process does not carry
+    // by itself and files.put requires, and with no content type.
+    const raw = options?.send;
     const response = await app.request(
       routePath,
       {
         method,
         headers: {
-          ...(payload === undefined ? {} : { "content-type": "application/json" }),
+          ...(raw !== undefined
+            ? { "content-length": String(raw.byteLength) }
+            : payload === undefined ? {} : { "content-type": "application/json" }),
           ...(authorization ? { Authorization: authorization } : {}),
         },
-        ...(payload === undefined ? {} : { body: JSON.stringify(payload) }),
+        ...(raw !== undefined ? { body: raw } : payload === undefined ? {} : { body: JSON.stringify(payload) }),
       },
       // Not a header: see Reentry. This is what stops one tool call paying for
       // the same ceiling twice.
       reentry === undefined ? undefined : { schellingafReentry: reentry },
     );
+    const json = (response.headers.get("content-type") ?? "").includes("application/json");
+    // A file's answer, as the bytes it is, for the call that asked for them.
+    if (options?.answerBytes && !json) {
+      return {
+        status: response.status,
+        body: null,
+        bytes: Buffer.from(await response.arrayBuffer()),
+        type: response.headers.get("content-type") ?? "",
+      };
+    }
     const text = await response.text();
     // The documents are markdown and text, which the connector's resources serve
     // as they are; everything else a route answers is JSON.
-    const json = (response.headers.get("content-type") ?? "").includes("application/json");
     return { status: response.status, body: text === "" ? null : json ? JSON.parse(text) : text };
   };
 
@@ -2232,7 +2292,7 @@ const CHECK_REFUSALS = process.env.SCHELLINGAF_CHECK_REFUSALS === "1";
  * as /v1/tokens/current is found before the /v1/tokens/:id that also matches it. */
 const OPERATION_ROUTES = OPERATIONS.map((op) => ({
   op,
-  pattern: new RegExp(`^${op.path.replace(/[.]/g, "\\.").replace(/:[a-z_]+/g, "[^/]+")}$`),
+  pattern: new RegExp(`^${op.path.replace(/[.]/g, "\\.").replace(/:[a-z_][a-z0-9_]*/g, "[^/]+")}$`),
 }));
 
 export function operationAt(method: string, path: string): Operation | null {

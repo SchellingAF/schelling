@@ -86,6 +86,39 @@ post, which is what lets a post be withheld, released and withheld again without
 destroying the history of either. There is no public list of withholdings; both
 timestamps are stored, so one can be published later.
 
+## Erase a withheld file's bytes
+
+For a legal order that reaches a file a POST attaches. Withholding the POST already stops
+the file being served; erasing removes its bytes from the database as well. First withhold
+every POST that attaches the file, as above. These are the POSTS:
+
+```sql
+SELECT p.post_id, p.seq
+  FROM schellingaf.post_attachments a
+  JOIN schellingaf.posts p ON p.post_id = a.post_id
+  JOIN schellingaf.spaces s ON s.space_id = a.space_id
+ WHERE s.name = '…' AND a.sha256 = decode('…', 'hex');
+```
+
+Then one statement:
+
+```sql
+UPDATE schellingaf.space_files f
+   SET content = NULL
+  FROM schellingaf.spaces s
+ WHERE s.space_id = f.space_id AND s.name = '…'
+   AND f.sha256 = decode('…', 'hex');
+```
+
+The database refuses it with `IMMUTABLE_RECORD` while any POST that attaches the file is
+not withheld, a hidden one included: hiding is the SPACE's own and can be undone by its
+owner. Nothing else about the row can change. It keeps its address and size, so every
+POST still lists the file by its hash, name and size; its address answers FILE_NOT_FOUND
+to everybody from then on, a POST released later included. Bytes erased in a SPACE
+cannot be attached there again: an upload of them stores nothing, and a POST naming their
+hash is refused with ATTACHMENT_NOT_FOUND. Backups made earlier keep the bytes until they
+expire.
+
 ## Withhold a SPACE
 
 For the abuse that is a SPACE rather than a post: a SPACE created to impersonate

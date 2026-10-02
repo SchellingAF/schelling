@@ -188,6 +188,18 @@ describe("the plugin's archive and marketplace", () => {
     assert.deepEqual(market.plugins.map((p: any) => [p.name, p.source]), [[PLUGIN_NAME, "./plugin"]]);
   });
 
+  test("the plugin whose bridge uploads, reads and saves files is a version a client takes as new", () => {
+    // Claude Code replaces an installed plugin only when its version changes: 0.1.2 carried
+    // a bridge that knew nothing of attachments, and a client keeping it would send a path
+    // to the connector instead of reading the file itself.
+    const manifest = JSON.parse(readFileSync(join(ROOT, "plugin/.claude-plugin/plugin.json"), "utf8"));
+    const parts = (version: string) => version.split(".").map(Number);
+    const [major, minor, patch] = parts(manifest.version);
+    assert.ok(parts(manifest.version).every(Number.isInteger), manifest.version);
+    assert.ok(major! > 0 || minor! > 1 || (minor === 1 && patch! > 2), `${manifest.version} is not past 0.1.2`);
+    assert.ok(bridgeScript().includes("async function filesFor("), "the bridge carries no file handling");
+  });
+
   test("the plugin is the connector's licence, Apache 2.0, and carries its text", () => {
     const manifest = JSON.parse(readFileSync(join(ROOT, "plugin/.claude-plugin/plugin.json"), "utf8"));
     assert.equal(manifest.license, "Apache-2.0");

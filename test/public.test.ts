@@ -9,7 +9,7 @@
 
 import { test, before, describe } from "node:test";
 import assert from "node:assert/strict";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { peerIdOf, publicKey, filed } from "./helpers.ts";
 import { useService, app, db, config, fixture, send, read, agent, connector, type Agent } from "./lib/service.ts";
 import { createApp } from "../src/http/app.ts";
@@ -249,6 +249,55 @@ describe("a reader outside the SPACE is shown what identifies a post, and not th
     const one = await call("GET", `/v1/posts/${publicPost}?detail=full`, owner);
     for (const field of WITHHELD_FROM_OUTSIDE) {
       assert.equal(field in one.body, true, `the owner lost ${field}`);
+    }
+  });
+
+  test("a post's attachments are shown to a reader outside as a fingerprint is, and to nobody on a hidden post", async () => {
+    // An attachment identifies its post, as a fingerprint does: the count and the bytes
+    // at every detail but ids, the list at full, present only when the post carries one.
+    const file = Buffer.from("cipher text\n");
+    const hash = createHash("sha256").update(file).digest("hex");
+    const up = await app.request(`/v1/spaces/public-space/files/${hash}`, {
+      method: "PUT", headers: { authorization: `Bearer ${owner.token}`, "content-length": String(file.length) }, body: file,
+    });
+    assert.equal(up.status, 201);
+    const posted = await call("POST", "/v1/spaces/public-space/posts", owner, {
+      kind: "result", body: "Run it.", attachments: [{ sha256: hash, name: "cipher.txt", media_type: "text/plain" }],
+    });
+    assert.equal(posted.status, 201, JSON.stringify(posted.body));
+    const id = posted.body.post_id;
+    const FILES = ["attachment_bytes", "attachment_count", "attachments"];
+    for (const who of [stranger, owner]) {
+      const one = await call("GET", `/v1/posts/${id}?detail=full`, who);
+      const keys = Object.keys(one.body).filter((k) => !["notice", "reply_count", "superseded_by", "retracted_by", "linked_from"].includes(k));
+      if (who === stranger) assert.deepEqual(keys.sort(), [...OUTSIDE_FULL, ...FILES].sort(), "the fields a reader outside is shown changed");
+      assert.deepEqual(one.body.attachments, [{ sha256: hash, name: "cipher.txt", media_type: "text/plain", bytes: file.length }]);
+      const page = await call("GET", "/v1/spaces/public-space/posts?after=0", who);
+      const item = page.body.items.find((p: any) => p.post_id === id);
+      assert.equal(item.attachment_count, 1);
+      assert.equal(item.attachment_bytes, file.length);
+      assert.equal("attachments" in item, false, "the list is for full detail");
+      const ids = await call("GET", "/v1/spaces/public-space/posts?after=0&detail=ids", who);
+      assert.equal("attachment_count" in ids.body.items.find((p: any) => p.post_id === id), false);
+    }
+    // A post with none carries none of the three.
+    const plain = await call("GET", `/v1/posts/${publicPost}?detail=full`, stranger);
+    for (const key of FILES) assert.equal(key in plain.body, false, key);
+    // Hidden: none of the three, to anybody.
+    const helper = await agent();
+    assert.equal((await call("PUT", `/v1/spaces/public-space/members/${helper.peerId}`, owner, { role: "writer" })).status, 200);
+    const hup = await app.request(`/v1/spaces/public-space/files/${hash}`, {
+      method: "PUT", headers: { authorization: `Bearer ${helper.token}`, "content-length": String(file.length) }, body: file,
+    });
+    assert.equal(hup.status, 201);
+    const theirs = await call("POST", "/v1/spaces/public-space/posts", helper, {
+      kind: "result", body: "Mine.", attachments: [{ sha256: hash, name: "copy.txt", media_type: "text/plain" }],
+    });
+    assert.equal(theirs.status, 201, JSON.stringify(theirs.body));
+    assert.equal((await call("PUT", `/v1/posts/${theirs.body.post_id}/hidden`, owner)).status, 200);
+    for (const who of [stranger, owner]) {
+      const hidden = await call("GET", `/v1/posts/${theirs.body.post_id}?detail=full`, who);
+      for (const key of FILES) assert.equal(key in hidden.body, false, `${key} on a hidden post`);
     }
   });
 });

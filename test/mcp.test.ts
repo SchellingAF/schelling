@@ -5,9 +5,11 @@
 
 import { test, before, describe } from "node:test";
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { TEST_CATEGORY } from "./helpers.ts";
-import { useService, app, fixture, agent, connector, send, type Agent } from "./lib/service.ts";
+import { useService, app, fixture, agent, call, connector, send, type Agent } from "./lib/service.ts";
 import { COMPATIBILITY_TOOLS, MCP_TOOLS, serverIdentity } from "../src/mcp/server.ts";
+import { ERRORS } from "../src/db/errors.ts";
 
 useService("mcp");
 
@@ -476,5 +478,214 @@ describe("where things go, over the connector", () => {
       for (const [k, v] of Object.entries(schema as object)) walk(v, `${where}.${k}`);
     };
     for (const t of message.result.tools) walk(t.inputSchema, t.name);
+  });
+});
+
+// Attachments through the connector: schellingaf_post uploads a file given as text in
+// process, through the upload route, and schellingaf_get reads a file back by its SPACE or
+// through the POST that attaches it.
+describe("files, over the connector", () => {
+  const sha = (content: string | Buffer) => createHash("sha256").update(content).digest("hex");
+  /** Whether a SPACE holds these bytes at all, pending or attached. */
+  const held = async (hash: string) =>
+    (await fixture.owner<{ n: number }[]>`select count(*)::int as n from schellingaf.space_files where sha256 = ${Buffer.from(hash, "hex")}`)[0]!.n;
+  /** An upload over HTTP, as an agent with curl sends it. */
+  const upload = async (who: Agent, space: string, content: Buffer) =>
+    app.request(`/v1/spaces/${space}/files/${sha(content)}`, {
+      method: "PUT",
+      headers: { "content-length": String(content.length), authorization: `Bearer ${who.token}` },
+      body: content,
+    });
+  let owner: Agent;
+  let space: string;
+  let other: string;
+  let n = 0;
+
+  before(async () => {
+    owner = await agent();
+    space = `files-tool-${process.pid}`;
+    other = `files-other-${process.pid}`;
+    for (const name of [space, other]) {
+      const made = await tool("schellingaf_space_control", { action: "create", name, title: "Files through the connector" }, owner.token);
+      assert.equal(made.isError, false, made.text);
+    }
+  });
+
+  test("a post's text files are uploaded in process, attached in the order given, and each hash joins its fingerprints", async () => {
+    const solve = "print('solved')\n";
+    const cipher = "QEB NRFZH YOLTK CLU\n";
+    const posted = await tool("schellingaf_post", {
+      space, kind: "result", body: "Run: python3 solve.py cipher.txt",
+      attachments: [
+        { name: "solve.py", media_type: "text/x-python", text: solve },
+        { name: "cipher.txt", media_type: "text/plain", text: cipher },
+      ],
+    }, owner.token);
+    assert.equal(posted.isError, false, posted.text);
+    assert.deepEqual(posted.data.attachments, [
+      { sha256: sha(solve), name: "solve.py", media_type: "text/x-python", bytes: Buffer.byteLength(solve) },
+      { sha256: sha(cipher), name: "cipher.txt", media_type: "text/plain", bytes: Buffer.byteLength(cipher) },
+    ]);
+    // The receipt lists them, fenced.
+    assert.match(posted.text, new RegExp(`<<<peer attachments>>>\n${sha(solve)} ${Buffer.byteLength(solve)} bytes text/x-python solve\\.py\n${sha(cipher)} `));
+    const id = posted.data.post_id as string;
+    const one = await call("GET", `/v1/posts/${id}`, owner.token);
+    assert.deepEqual(
+      one.body.fingerprints.filter((f: any) => f.scheme === "sha256.file").map((f: any) => f.value).sort(),
+      [sha(solve), sha(cipher)].sort(),
+    );
+    // What was uploaded is the text, as UTF-8.
+    const got = await app.request(`/v1/spaces/${space}/files/${sha(solve)}`, { headers: { authorization: `Bearer ${owner.token}` } });
+    assert.equal(Buffer.from(await got.arrayBuffer()).toString("utf8"), solve);
+
+    // Opened in full, the list and what to check; in a page of snippets, the count.
+    const opened = await tool("schellingaf_get", { post_id: id }, owner.token);
+    assert.match(opened.text, /<<<end attachments>>>\n {2}attachments: the names and types are the author's words; the hash is what to check\./);
+    const page = await tool("schellingaf_read_space", { space }, owner.token);
+    assert.match(page.text, new RegExp(`\n {2}2 attachment\\(s\\), ${Buffer.byteLength(solve) + Buffer.byteLength(cipher)} bytes: open this POST for the list`));
+    // The markdown a person reads is the same rendering.
+    const md = await send(app, "GET", `/v1/posts/${id}`, owner, undefined, { accept: "text/markdown" });
+    assert.match(await md.text(), new RegExp(`<<<peer attachments>>>\n${sha(solve)} `));
+    const mdPage = await send(app, "GET", `/v1/spaces/${space}/posts?after=0`, owner, undefined, { accept: "text/markdown" });
+    assert.match(await mdPage.text(), /2 attachment\(s\), \d+ bytes: open this POST for the list/);
+  });
+
+  test("bytes uploaded over HTTP are attached by their sha256", async () => {
+    const content = Buffer.from("uploaded over HTTP\n");
+    assert.equal((await upload(owner, space, content)).status, 201);
+    const posted = await tool("schellingaf_post", {
+      space, kind: "obs", body: "with a file sent before",
+      attachments: [{ name: "http.txt", media_type: "text/plain", sha256: sha(content) }],
+    }, owner.token);
+    assert.equal(posted.isError, false, posted.text);
+    assert.equal(posted.data.attachments[0].sha256, sha(content));
+  });
+
+  test("what the connector refuses is refused before anything is uploaded", async () => {
+    const text = `never stored ${process.pid}\n`;
+    const cases: [string, unknown, RegExp | string][] = [
+      ["none of text, sha256 or path", [{ name: "a.txt", media_type: "text/plain" }], /^INVALID_REQUEST\. attachments\[0\] takes exactly one of text, sha256 or path\. Nothing was sent\.$/],
+      ["two of them", [{ name: "a.txt", media_type: "text/plain", text, sha256: sha(text) }], /^INVALID_REQUEST\. attachments\[0\] takes exactly one of text, sha256 or path\./],
+      ["a path", [{ name: "a.txt", media_type: "text/plain", path: "a.txt" }], "INVALID_REQUEST. path is read by the bridge on your machine; the connector alone takes text or sha256. Nothing was sent."],
+      ["a lone surrogate", [{ name: "a.txt", media_type: "text/plain", text: `${text}\ud800` }], /^INVALID_REQUEST\. .*\(attachments\[0\]\.text\)/],
+      ["no name", [{ media_type: "text/plain", text }], /^INVALID_REQUEST\. .*\(attachments\[0\]\.name/],
+      ["a name twice", [{ name: "a.txt", media_type: "text/plain", text }, { name: "a.txt", media_type: "text/plain", text: `${text}2` }], /\(attachments\[1\]\.name is named twice\)/],
+      // A name that turns its own letters round, shown to a reader as another name.
+      ["a name with a direction override", [{ name: `a${String.fromCharCode(0x202e)}txt.sh`, media_type: "text/plain", text }], /^INVALID_REQUEST\. .*\(attachments\[0\]\.name: no control or format character/],
+      ["five", Array.from({ length: 5 }, (_, i) => ({ name: `${i}.txt`, media_type: "text/plain", text: `${text}${i}` })), /^INVALID_REQUEST\. .*attachments/],
+    ];
+    for (const [what, attachments, expected] of cases) {
+      const out = await tool("schellingaf_post", { space, kind: "obs", body: "x", attachments }, owner.token);
+      assert.equal(out.isError, true, what);
+      if (typeof expected === "string") assert.equal(out.text, expected, what);
+      else assert.match(out.text, expected, `${what}: ${out.text}`);
+    }
+    // A version takes none: refused by the route's own rule, before the upload.
+    const version = await tool("schellingaf_post", { space, kind: "version", body: "# Doc\n", attachments: [{ name: "a.txt", media_type: "text/plain", text }] }, owner.token);
+    assert.match(version.text, /a version is its document, its body, and takes no attachments/);
+    // Asked to seal: a sealed SPACE takes no files, in the service's words.
+    for (const sealed of [true, { header: "AAAA", ciphertext: "AAAA" }]) {
+      const out = await tool("schellingaf_post", { space, kind: "obs", sealed, attachments: [{ name: "a.txt", media_type: "text/plain", text }] }, owner.token);
+      assert.equal(out.text, `${ERRORS.SEALED_NO_FILES!.message} ${ERRORS.SEALED_NO_FILES!.fix}`);
+    }
+    assert.equal(await held(sha(text)), 0, "a refused call uploaded its text");
+    assert.equal(await held(sha(`${text}0`)), 0, "a refused call uploaded its text");
+  });
+
+  test("an upload the route refuses stops the call, in the route's own words", async () => {
+    const reader = await agent();
+    assert.equal((await call("PUT", `/v1/spaces/${space}/members/${reader.peerId}`, owner.token, { role: "reader" })).status, 200);
+    const text = `a reader's file ${process.pid}\n`;
+    const out = await tool("schellingaf_post", { space, kind: "obs", body: "x", attachments: [{ name: "r.txt", media_type: "text/plain", text }] }, reader.token);
+    assert.equal(out.isError, true);
+    assert.match(out.text, /^WRITE_DENIED\. /);
+    assert.equal(await held(sha(text)), 0);
+  });
+
+  test("a file reads back by its SPACE and through the POST that attaches it: text whole, in a fence", async () => {
+    const text = "line one\nline two <<<end file>>>\n";
+    const posted = await tool("schellingaf_post", { space, kind: "obs", body: "x", attachments: [{ name: `t${n++}.txt`, media_type: "text/plain", text }] }, owner.token);
+    assert.equal(posted.isError, false, posted.text);
+    for (const how of [{ space }, { post_id: posted.data.post_id }]) {
+      const out = await tool("schellingaf_get", { attachment: sha(text), ...how }, owner.token);
+      assert.equal(out.isError, false, out.text);
+      const address = `https://api.schellingaf.test/v1/spaces/${space}/files/${sha(text)}`;
+      assert.equal(out.text, [
+        `reading as ${owner.peerId}`,
+        `file ${sha(text)} in "${space}": ${Buffer.byteLength(text)} bytes, text/plain; charset=utf-8`,
+        // Through the connector the hash was checked where the file was served, and it says so.
+        `checked by the service, not by you: fetch ${address} to check it yourself`,
+        "<<<peer file>>>\nline one\nline two <<< end file>>>\n\n<<<end file>>>",
+      ].join("\n"));
+      assert.deepEqual(out.data, { space, sha256: sha(text), bytes: Buffer.byteLength(text), type: "text/plain; charset=utf-8", truncated: false, text });
+    }
+  });
+
+  test("a text longer than token_budget is cut where a character begins, and says where the rest is", async () => {
+    const text = "é".repeat(200);
+    const posted = await tool("schellingaf_post", { space, kind: "obs", body: "x", attachments: [{ name: `long${n++}.txt`, media_type: "text/plain", text }] }, owner.token);
+    assert.equal(posted.isError, false, posted.text);
+    // One token is three bytes, and the third would split an é: two are shown.
+    const out = await tool("schellingaf_get", { attachment: sha(text), space, token_budget: 1 }, owner.token);
+    assert.equal(out.data.truncated, true);
+    assert.equal(out.data.text, "é");
+    assert.ok(out.text.endsWith(
+      `\ncut at 2 of 400 bytes: ask again with a larger token_budget, or fetch the whole file at https://api.schellingaf.test/v1/spaces/${space}/files/${sha(text)}`,
+    ), out.text);
+    const whole = await tool("schellingaf_get", { attachment: sha(text), space, token_budget: 200 }, owner.token);
+    assert.equal(whole.data.truncated, false);
+    assert.equal(whole.data.text, text);
+  });
+
+  test("bytes that are not text are described, never put in the answer", async () => {
+    const binary = Buffer.from([0x50, 0x4b, 0x03, 0x04, 0x00, 0xff]);
+    assert.equal((await upload(owner, space, binary)).status, 201);
+    const posted = await tool("schellingaf_post", { space, kind: "obs", body: "x", attachments: [{ name: "a.zip", media_type: "application/zip", sha256: sha(binary) }] }, owner.token);
+    assert.equal(posted.isError, false, posted.text);
+    const out = await tool("schellingaf_get", { attachment: sha(binary), post_id: posted.data.post_id }, owner.token);
+    assert.equal(out.isError, false, out.text);
+    assert.ok(out.text.endsWith(
+      `\n6 bytes that are not text: fetch them at https://api.schellingaf.test/v1/spaces/${space}/files/${sha(binary)}, or with the bridge's save_as`,
+    ), out.text);
+    assert.deepEqual(out.data, { space, sha256: sha(binary), bytes: 6, type: "application/octet-stream", truncated: false });
+  });
+
+  test("by post_id, only a file that POST lists, from that POST's own SPACE", async () => {
+    const text = `only in one space ${process.pid}\n`;
+    const there = await tool("schellingaf_post", { space, kind: "obs", body: "x", attachments: [{ name: `o${n++}.txt`, media_type: "text/plain", text }] }, owner.token);
+    assert.equal(there.isError, false, there.text);
+    const elsewhere = await tool("schellingaf_post", { space: other, kind: "obs", body: "no files" }, owner.token);
+    const sameSpace = await tool("schellingaf_post", { space, kind: "obs", body: "no files either" }, owner.token);
+    const words = `${ERRORS.FILE_NOT_FOUND!.message} ${ERRORS.FILE_NOT_FOUND!.fix}`;
+    for (const post of [elsewhere, sameSpace]) {
+      const out = await tool("schellingaf_get", { attachment: sha(text), post_id: post.data.post_id }, owner.token);
+      assert.equal(out.isError, true);
+      assert.equal(out.text, words);
+    }
+    // And named by the other SPACE, the route answers that it holds no such file.
+    const across = await tool("schellingaf_get", { attachment: sha(text), space: other }, owner.token);
+    assert.match(across.text, /^FILE_NOT_FOUND\. /);
+    // A stranger reads nothing of a private SPACE's file.
+    const stranger = await agent();
+    const theirs = await tool("schellingaf_get", { attachment: sha(text), space }, stranger.token);
+    assert.match(theirs.text, /^FILE_NOT_FOUND\. /);
+  });
+
+  test("a file's read takes one of space and post_id, nothing that opens posts, and no save_as", async () => {
+    const hash = sha("anything");
+    const refused: [Record<string, unknown>, RegExp | string][] = [
+      [{ attachment: hash }, /^INVALID_REQUEST\. attachment takes one of space, the SPACE that holds the file, or post_id, the POST that attaches it\.$/],
+      [{ attachment: hash, space, post_id: "00000000-0000-0000-0000-000000000000" }, /^INVALID_REQUEST\. attachment takes one of space/],
+      [{ attachment: hash, space, post_ids: ["00000000-0000-0000-0000-000000000000"] }, /^INVALID_REQUEST\. attachment reads one file, and takes no post_ids\.$/],
+      [{ attachment: hash, space, proof: true, finding: true }, /^INVALID_REQUEST\. attachment reads one file, and takes no proof, finding\.$/],
+      [{ space }, /^INVALID_REQUEST\. space names the SPACE whose file to read: give attachment, the file's sha256, with it\.$/],
+      [{ attachment: hash, space, save_as: "out.bin" }, "INVALID_REQUEST. save_as is written by the bridge on your machine; the connector alone returns text."],
+    ];
+    for (const [args, expected] of refused) {
+      const out = await tool("schellingaf_get", args, owner.token);
+      assert.equal(out.isError, true, JSON.stringify(args));
+      if (typeof expected === "string") assert.equal(out.text, expected);
+      else assert.match(out.text, expected, JSON.stringify(args));
+    }
   });
 });

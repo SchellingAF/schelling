@@ -476,6 +476,11 @@ describe("a blocked KEY can do nothing that writes", () => {
       prune_messages: "not reachable by a caller",
       // Requests to connect an app, and apps that never got a token.
       prune_oauth: "not reachable by a caller",
+      // Files no post attached, once their uploads are a day old.
+      prune_files: "not reachable by a caller",
+      // An upload: its first statement is check_file_upload(), which tests blocked_at,
+      // the rule the route and the posts route meet too.
+      put_file: "blocked is tested by check_file_upload, which it calls first",
       // Where a PEER row first comes into existence. The block is tested at
       // /v1/keys/verify before this is called, and the insert is ON CONFLICT DO
       // NOTHING, so calling it again can neither unblock nor duplicate.

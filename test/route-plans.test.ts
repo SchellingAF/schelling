@@ -17,7 +17,9 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { PORT } from "./bootstrap.ts";
+import { createHash } from "node:crypto";
+import postgres from "postgres";
+import { PORT, SUPERUSER } from "./bootstrap.ts";
 import { filed } from "./helpers.ts";
 import { useService, app, fixture, agent, send, read, type Agent } from "./lib/service.ts";
 import { allowReadQueryWatch, watchReadQueries } from "../src/db/sql.ts";
@@ -677,6 +679,109 @@ describe("the reads the service actually issues", () => {
 async function call(method: string, path: string, who: Agent, body?: unknown) {
   return read(await send(app, method, path, who, filed(method, path, body), { "content-type": "application/json" }));
 }
+
+// ── a post's files ───────────────────────────────────────────────────────────
+
+describe("a file's fetch and attach_files() find their rows through an index", () => {
+  // A file on every post of planned-space, uploaded by its owner, so a walk of the files,
+  // the uploads, the attachments or the fingerprints is unmistakable in a plan.
+  before(async () => {
+    await fixture.owner`
+      insert into schellingaf.space_files (space_id, sha256, content, bytes, is_text, attached)
+      select s.space_id, sha256(x.c), x.c, octet_length(x.c), true, true
+        from schellingaf.spaces s cross join generate_series(1, ${POSTS}) g
+             cross join lateral (select convert_to('file ' || g, 'UTF8') as c) x
+       where s.name = 'planned-space'`;
+    await fixture.owner`
+      insert into schellingaf.file_uploads (space_id, sha256, uploader_id)
+      select f.space_id, f.sha256, decode(${owner.peerId}, 'hex')
+        from schellingaf.space_files f join schellingaf.spaces s on s.space_id = f.space_id
+       where s.name = 'planned-space'`;
+    await fixture.owner`
+      insert into schellingaf.post_attachments (post_id, ord, space_id, sha256, name, media_type, bytes)
+      select p.post_id, 1, p.space_id, sha256(x.c), 'file-' || p.seq || '.txt', 'text/plain', octet_length(x.c)
+        from schellingaf.posts p join schellingaf.spaces s on s.space_id = p.space_id
+             cross join lateral (select convert_to('file ' || p.seq, 'UTF8') as c) x
+       where s.name = 'planned-space' and p.seq <= ${POSTS}`;
+    await fixture.owner`
+      insert into schellingaf.post_fingerprints (post_id, space_id, scheme, value)
+      select a.post_id, a.space_id, 'sha256.file', encode(a.sha256, 'hex')
+        from schellingaf.post_attachments a join schellingaf.spaces s on s.space_id = a.space_id
+       where s.name = 'planned-space'`;
+    await fixture.owner`analyze`;
+  });
+
+  test("a file's fetch probes the file by its key and the posts attaching it by their index", async () => {
+    const address = createHash("sha256").update("file 400").digest("hex");
+    const plan = await genericPlanAll(statementFor(await sent(`/v1/spaces/planned-space/files/${address}`, owner), "space_files f"));
+    assert.match(plan, /space_files_pkey/, plan);
+    assert.match(plan, /post_attachments_file_idx/, plan);
+    assert.doesNotMatch(plan, /Seq Scan on (space_files|post_attachments|posts)\b/, plan);
+  });
+
+  test("attach_files() reads the post, its fingerprints, the files and their uploads by key, under a generic plan", async () => {
+    // A pending upload, and a post naming it, written without its attachment rows; then
+    // attach_files() called as the post route calls it, inside a transaction rolled back,
+    // with auto_explain logging every statement it runs. Loading that takes a superuser.
+    // planned-space's posts were written without their chain, so the post goes elsewhere;
+    // a generic plan is the same for every SPACE.
+    const made = await call("POST", "/v1/spaces", owner, { name: "attaching-space", title: "Attaching" });
+    assert.equal(made.status, 201, JSON.stringify(made.body));
+    const content = "a file for the plan";
+    const hash = createHash("sha256").update(content).digest("hex");
+    await fixture.owner`
+      insert into schellingaf.space_files (space_id, sha256, content, bytes, is_text)
+      select s.space_id, decode(${hash}, 'hex'), convert_to(${content}, 'UTF8'), ${Buffer.byteLength(content)}, true
+        from schellingaf.spaces s where s.name = 'attaching-space'`;
+    await fixture.owner`
+      insert into schellingaf.file_uploads (space_id, sha256, uploader_id)
+      select s.space_id, decode(${hash}, 'hex'), decode(${owner.peerId}, 'hex')
+        from schellingaf.spaces s where s.name = 'attaching-space'`;
+    const posted = await call("POST", "/v1/spaces/attaching-space/posts", owner, {
+      kind: "result", body: "Rests on a file.", fingerprints: [{ scheme: "sha256.file", value: hash }],
+    });
+    assert.equal(posted.status, 201, JSON.stringify(posted.body));
+
+    type PlanNode = { [field: string]: any; Plans?: PlanNode[] };
+    const nodesOf = (plan: PlanNode): PlanNode[] => [plan, ...(plan.Plans ?? []).flatMap(nodesOf)];
+    const logged: string[] = [];
+    const su = postgres({ ...SUPERUSER, database: fixture.name, onnotice: (n) => logged.push(n.message ?? "") });
+    try {
+      await su`load 'auto_explain'`;
+      for (const setting of ["log_min_duration = 0", "log_nested_statements = on", "log_format = json", "log_level = notice"]) {
+        await su.unsafe(`set auto_explain.${setting}`);
+      }
+      await su
+        .begin(async (tx) => {
+          await tx.unsafe("set local role schellingaf_api");
+          await tx.unsafe("set local plan_cache_mode = force_generic_plan");
+          const attachments = [{ sha256: hash, name: "plan.txt", media_type: "text/plain" }];
+          await tx`select schellingaf.attach_files(${posted.body.post_id}::uuid, decode(${owner.peerId}, 'hex'),
+                                                   ${tx.json(attachments)}, false, 24, 268435456)`;
+          throw new Error("roll back");
+        })
+        .catch((error: Error) => {
+          if (error.message !== "roll back") throw error;
+        });
+    } finally {
+      await su.end({ timeout: 5 });
+    }
+    const plans = logged
+      .filter((m) => m.includes("{"))
+      .map((m) => JSON.parse(m.slice(m.indexOf("{"))) as { "Query Text": string; Plan: PlanNode });
+    const nodes = plans.flatMap((p) => nodesOf(p.Plan));
+    const read = new Set(nodes.map((n) => n["Relation Name"]).filter(Boolean));
+    for (const table of ["posts", "post_fingerprints", "space_files", "file_uploads"]) {
+      assert.ok(read.has(table), `attach_files() read no ${table}: ${[...read].join(", ")}`);
+    }
+    const walked = (plan: PlanNode) =>
+      nodesOf(plan)
+        .filter((n) => n["Node Type"] === "Seq Scan" && ["posts", "post_fingerprints", "space_files", "file_uploads", "post_attachments"].includes(n["Relation Name"]))
+        .map((n) => n["Relation Name"]);
+    const walks = plans.filter((p) => walked(p.Plan).length).map((p) => `${walked(p.Plan).join(", ")} in: ${p["Query Text"].replace(/\s+/g, " ")}`);
+    assert.deepEqual(walks, []);
+  });
+});
 
 // ── the operator's report ────────────────────────────────────────────────────
 

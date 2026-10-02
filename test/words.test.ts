@@ -14,7 +14,7 @@ import { OPERATIONS } from "../src/surface/operations.ts";
 import { buildOpenApi } from "../src/surface/openapi.ts";
 
 /** A request field whose name says a KEY writes words into it. */
-const WORD_FIELD = /^(title|body|description|message|label|tags|client_name|note|reason|text)$/;
+const WORD_FIELD = /^(title|body|description|message|label|tags|client_name|note|reason|text|file)$/;
 
 /** The free-text fields of each write's request, by operation id, from the OpenAPI
  *  description: strings with no pattern, format or closed set, and their paths. */
@@ -38,7 +38,11 @@ function requestWords(): Map<string, string[]> {
     for (const [method, op] of Object.entries(ops)) {
       if (method === "get" || !op?.requestBody) continue;
       const found = new Set<string>();
-      for (const c of Object.values(op.requestBody.content ?? {}) as any[]) walk(c.schema, "", found, 0);
+      for (const [type, c] of Object.entries(op.requestBody.content ?? {}) as [string, any][]) {
+        // A body sent as raw bytes is a file, and a file may hold words.
+        if (type === "application/octet-stream") found.add("file");
+        else walk(c.schema, "", found, 0);
+      }
       out.set(op.operationId, [...found].filter((f) => WORD_FIELD.test(f.replace(/\[\]/g, "").split(".").pop() ?? "")));
     }
   }

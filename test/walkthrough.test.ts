@@ -6,7 +6,7 @@
 
 import { test, before, after, describe } from "node:test";
 import assert from "node:assert/strict";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { once } from "node:events";
 import type { Server } from "node:http";
 import { connect, type AddressInfo } from "node:net";
@@ -197,6 +197,54 @@ describe("a request refused for its size closes its connection", () => {
     }
     assert.deepEqual(failures, []);
   });
+
+  test("a file over its limit gets its 413 naming the file limit, a refusal sent before the body is read closes too, and the pool goes on", async () => {
+    const uploader = await agent();
+    const made = await call("POST", "/v1/spaces", uploader.token, { name: `files-${process.pid}`, title: "Files" });
+    assert.equal(made.status, 201, JSON.stringify(made.body));
+    const address = (body: Uint8Array) => createHash("sha256").update(body).digest("hex");
+    const failures: string[] = [];
+    for (let round = 0; round < 10; round++) {
+      try {
+        const file = randomBytes(300 * 1024);
+        const big = await fetch(`${origin}/v1/spaces/files-${process.pid}/files/${address(file)}`, {
+          method: "PUT",
+          headers: { authorization: `Bearer ${uploader.token}` },
+          body: file,
+        });
+        const refusal = (await big.json()) as any;
+        assert.equal(big.status, 413);
+        assert.equal(refusal.error.code, "TOO_LARGE");
+        assert.equal(refusal.error.detail, "a file is at most 262144 bytes: limits.attachments.file_bytes");
+        assert.equal(big.headers.get("connection"), "close");
+      } catch (error) {
+        failures.push(`round ${round}, the oversized file: ${(error as any)?.cause?.code ?? (error as Error).message}`);
+      }
+      try {
+        // Refused for its SPACE before a byte of the body is read.
+        const file = randomBytes(200 * 1024);
+        const early = await fetch(`${origin}/v1/spaces/nowhere-${process.pid}/files/${address(file)}`, {
+          method: "PUT",
+          headers: { authorization: `Bearer ${uploader.token}` },
+          body: file,
+        });
+        const refusal = (await early.json()) as any;
+        assert.equal(early.status, 404);
+        assert.equal(refusal.error.code, "SPACE_NOT_FOUND");
+        assert.equal(early.headers.get("connection"), "close");
+      } catch (error) {
+        failures.push(`round ${round}, the early refusal: ${(error as any)?.cause?.code ?? (error as Error).message}`);
+      }
+      try {
+        const next = await fetch(`${origin}/v1/capabilities`);
+        await next.arrayBuffer();
+        assert.equal(next.status, 200);
+      } catch (error) {
+        failures.push(`round ${round}, the request after them: ${(error as any)?.cause?.code ?? (error as Error).message}`);
+      }
+    }
+    assert.deepEqual(failures, []);
+  });
 });
 
 describe("a body that stops arriving is the caller's malformed request", () => {
@@ -216,6 +264,8 @@ describe("a body that stops arriving is the caller's malformed request", () => {
 
   before(async () => {
     writer = await agent();
+    const made = await call("POST", "/v1/spaces", writer.token, { name: "cut-files", title: "Cut files" });
+    assert.equal(made.status, 201, JSON.stringify(made.body));
     server = serve({
       fetch: (request: Request, env: unknown) => {
         const answer = Promise.resolve(app.fetch(request, env as never));
@@ -234,12 +284,14 @@ describe("a body that stops arriving is the caller's malformed request", () => {
   });
 
   // Every route that reads its body itself: the key routes' readJson, readBody (a
-  // new SPACE), the post route, the connector, and the two an app signs in with.
+  // new SPACE), the post route, a file's upload, the connector, and the two an app
+  // signs in with.
   // `refusal` picks out what the route's answer says went wrong.
-  const routes: { path: string; signed?: true; accept?: string; start: string; refusal: (body: any) => unknown; is: unknown }[] = [
+  const routes: { path: string; method?: string; signed?: true; accept?: string; start: string; refusal: (body: any) => unknown; is: unknown }[] = [
     { path: "/v1/keys/challenge", start: '{"public_key":"', refusal: (body) => body.error.code, is: "INVALID_REQUEST" },
     { path: "/v1/spaces", signed: true, start: '{"name":"', refusal: (body) => body.error.code, is: "INVALID_REQUEST" },
     { path: "/v1/spaces/cut-space/posts", signed: true, start: '{"kind":"obs","body":"', refusal: (body) => body.error.code, is: "INVALID_REQUEST" },
+    { path: `/v1/spaces/cut-files/files/${"ab".repeat(32)}`, method: "PUT", signed: true, start: "the first bytes of a file", refusal: (body) => body.error.code, is: "INVALID_REQUEST" },
     { path: "/mcp", accept: "application/json, text/event-stream", start: '{"jsonrpc":"2.0","id":1,"method":"', refusal: (body) => body.error.code, is: -32700 },
     { path: "/oauth/register", start: '{"redirect_uris":["', refusal: (body) => body.error, is: "invalid_client_metadata" },
     { path: "/oauth/token", start: '{"grant_type":"', refusal: (body) => body.error, is: "invalid_request" },
@@ -253,7 +305,7 @@ describe("a body that stops arriving is the caller's malformed request", () => {
       const socket = connect(port, "127.0.0.1");
       await once(socket, "connect");
       socket.write(
-        `POST ${route.path} HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\n` +
+        `${route.method ?? "POST"} ${route.path} HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\n` +
           (route.signed ? `Authorization: Bearer ${writer.token}\r\n` : "") +
           (route.accept ? `Accept: ${route.accept}\r\n` : "") +
           `Content-Length: 100\r\n\r\n${route.start}`,

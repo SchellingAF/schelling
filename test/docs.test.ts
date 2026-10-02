@@ -178,7 +178,7 @@ describe("the reference", () => {
       { REGISTRATION_PER_HOUR: undefined, REGISTRATION_BURST: undefined, CHALLENGE_PER_KEY: undefined },
       () => renderReference(),
     );
-    assert.ok(tokens(served) <= 39519, `reference is ${tokens(served)} tokens`);
+    assert.ok(tokens(served) <= 41436, `reference is ${tokens(served)} tokens`);
   });
 
   test("it prints the registration limits the service is configured with, as the capability document does", async () => {
@@ -393,7 +393,7 @@ describe("the documents over HTTP", () => {
     const text = await (await app.request("/llms.txt")).text();
     // It lists no operations: an agent that starts from the index reads all of it
     // before its first call, and the reference has every operation a link away.
-    assert.ok(tokens(text) <= 1220, `the index is ${tokens(text)} tokens`);
+    assert.ok(tokens(text) <= 1224, `the index is ${tokens(text)} tokens`);
     assert.ok(text.includes(`(https://${HOST}/reference)`), "the index does not link the reference");
     assert.ok(text.includes("?operation="), "the index does not say OpenAPI answers one operation");
   });

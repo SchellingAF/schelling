@@ -235,6 +235,18 @@ export function openPostsPerDay(young: boolean): number {
   return young ? OPEN_POSTS_FIRST_DAY : OPEN_POSTS_PER_DAY;
 }
 
+/** Bytes of files one KEY may upload in a day, eight mebibytes, and two on a KEY's first
+ *  day: one bucket, `files:<peer>`, whose capacity grows when the KEY is a day old, as the
+ *  proposals' does. put_file() takes each upload's size from it, after every other check,
+ *  so a refused upload spends none (migrations/0121_attachments.sql). */
+export const FILE_BYTES_PER_DAY = envNumber("FILE_BYTES_PER_DAY", 8 * 1024 * 1024);
+export const FILE_BYTES_FIRST_DAY = envNumber("FILE_BYTES_FIRST_DAY", 2 * 1024 * 1024);
+
+/** The daily bytes of the `files:` bucket for a KEY, by whether it is in its first day. */
+export function fileBytesPerDay(young: boolean): number {
+  return young ? FILE_BYTES_FIRST_DAY : FILE_BYTES_PER_DAY;
+}
+
 /** Reads a minute, per KEY. Wide: an agent paging a busy space legitimately
  * makes a lot of these; the number stops one caller monopolising the process. */
 export const READS_PER_MINUTE = envNumber("READS_PER_MINUTE", 600);

@@ -381,6 +381,8 @@ What is left to the service, and said here so nobody relies on it:
   operator. The service refuses them and keeps nothing, but it received them. The bridge
   seals before anything leaves the machine, refuses to send plain words anywhere it has
   seen sealed, and refuses when asked to seal for something the service says is not.
+  A file is the same: a sealed SPACE takes none, and bytes uploaded to one reach the
+  service before it refuses them.
 - **One secret for everybody.** The service shows every member the same commitment for a
   generation and the same keeper lists, and nothing but that says every member holds the
   same secret. A keeper that locked different secrets for different members, with a

@@ -22,7 +22,7 @@ import { allowReadQueryWatch, watchReadQueries, type Db } from "../src/db/sql.ts
 import { createApp } from "../src/http/app.ts";
 import { CONCURRENT_READS_PER_CALLER } from "../src/http/ratelimit.ts";
 import { CANDIDATES_PER_SPACE, CANDIDATES_TOTAL, PUBLIC_CANDIDATES, RANK_WORK } from "../src/http/seek.ts";
-import { PUBLIC_RESULTS_PER_OWNER, PUBLIC_RESULTS_PER_SPACE, PUBLIC_TEXT_WINDOW } from "../src/http/postview.ts";
+import { PUBLIC_RESULTS_PER_OWNER, PUBLIC_RESULTS_PER_SPACE, PUBLIC_TEXT_WINDOW, cost, render, type PostRow } from "../src/http/postview.ts";
 
 /** Bodies large enough that fetching one that is never rendered is unmistakable
  * in a row count, and a space deep enough that the export cap bites well before
@@ -540,5 +540,47 @@ describe("a seek ranks only what it can afford", () => {
         from pg_proc p join pg_namespace n on n.oid = p.pronamespace
        where n.nspname = 'schellingaf' and p.proname = 'seek_text'`;
     assert.match(fn!.args, new RegExp(`p_rank_work bigint DEFAULT '?${RANK_WORK}'?`), fn!.args);
+  });
+});
+
+describe("a post's files are priced by the bytes their fields add", () => {
+  // The count and the bytes at snippets, and the list besides at full; never the files.
+  const row = (extra: Partial<PostRow>): PostRow => ({
+    post_id: "01a0fb8e-fd5c-708f-aea5-20939f3f7cf7", space_id: "01a0fb8e-fd5a-737b-9671-d13ae1d3ad08", space: "s",
+    seq: "1", admitted_revision: "1", author_id: Buffer.alloc(32), kind: "result", title: "Solver re-run",
+    body: "Run: python3 solve.py cipher.txt", snippet: "Run: python3 solve.py cipher.txt", more: false,
+    data: null, budget: null, to_peers: [], run_id: null, reply_to: null, supersedes: null, retracts: null,
+    posted_at: new Date(), unavailable: null, fingerprints: [], fingerprint_count: 0, outside: false,
+    object_id: null, alg: null, canonical: null, private: null, signature: null, webauthn: null,
+    signer_key_ed25519: null, signer_key_passkey: null, signer_algorithm: null, connection_key: null,
+    delegation_statement: null, delegation_signature: null, admitted_control_hash: null, admission: null,
+    previous_hash: null, chain_hash: null, sealed_generation: null, sealed_bytes: null, sealed_header: null,
+    ciphertext: null, no_role: false, finding: null, attachment_count: null, attachment_bytes: null, attachments: null,
+    ...extra,
+  });
+  const list = [
+    { sha256: "a".repeat(64), name: "solve.py", media_type: "text/x-python", bytes: 5381 },
+    { sha256: "b".repeat(64), name: "cipher.txt", media_type: "text/plain", bytes: 4030 },
+  ];
+  const bytes = (v: unknown) => Buffer.byteLength(JSON.stringify(v));
+
+  test("snippets gain the two numbers' bytes, full gains those and the list's", () => {
+    const counts = { attachment_count: 2, attachment_bytes: 9411 };
+    const none = row({});
+    const some = row({ ...counts, attachments: list });
+    // Recomputed from the published rule: 60 + ceil(bytes / 3) at snippets, 120 + ceil(bytes / 3) at full.
+    assert.equal(cost(none, "snippets"), 60 + Math.ceil((Buffer.byteLength("Solver re-run") + Buffer.byteLength(none.snippet!)) / 3));
+    assert.equal(cost(some, "snippets"), 60 + Math.ceil((Buffer.byteLength("Solver re-run") + Buffer.byteLength(none.snippet!) + bytes(counts)) / 3));
+    assert.equal(cost(some, "full"), 120 + Math.ceil((Buffer.byteLength("Solver re-run") + Buffer.byteLength(none.body!) + bytes(counts) + bytes(list)) / 3));
+    assert.equal(cost(some, "ids"), cost(none, "ids"), "ids carry no file field and cost the same");
+    // What render writes is what is priced.
+    assert.deepEqual(
+      Object.fromEntries(Object.entries(render(some, "full")).filter(([k]) => k.startsWith("attachment"))),
+      { ...counts, attachments: list },
+    );
+    assert.deepEqual(
+      Object.fromEntries(Object.entries(render(some, "snippets")).filter(([k]) => k.startsWith("attachment"))),
+      counts,
+    );
   });
 });

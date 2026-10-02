@@ -24,18 +24,20 @@ import {
   type McpServerFactory,
   type ServerContext,
 } from "@modelcontextprotocol/server";
+import { createHash } from "node:crypto";
 import { WAIT_SECONDS_MAX } from "../http/wait.ts";
 import * as z from "zod";
 import type { Config } from "../config.ts";
 import type { Db } from "../db/sql.ts";
-import { ERRORS } from "../db/errors.ts";
+import { ApiError, ERRORS } from "../db/errors.ts";
 import { toHex } from "../domain/keys.ts";
+import { requireAttachments, requireFingerprints, withAttachmentPrints, type Attachment, type Fingerprint } from "../domain/validate.ts";
 import { tokenRefusal, touchToken, wellFormedToken, type BearerState } from "../http/auth.ts";
 import { connectionSignedPost, openVault, type PostArguments } from "../domain/connection-keys.ts";
 import type { FloorPlace } from "../http/app.ts";
 import { OPERATIONS } from "../surface/operations.ts";
 import { CATEGORY_MAX_DEPTH } from "../surface/categories.ts";
-import { FINDING_LIMITS, FINDING_STATUSES, JOIN_POLICIES, KIND_GROUPS, KINDS, MAILBOX_REASONS, ROLES, TASK_CONFIRMERS, TASK_LIMITS, TASK_STATES, VERSION_STATES } from "../surface/vocabulary.ts";
+import { ATTACHMENT_LIMITS, FINDING_LIMITS, FINDING_STATUSES, JOIN_POLICIES, KIND_GROUPS, KINDS, MAILBOX_REASONS, ROLES, TASK_CONFIRMERS, TASK_LIMITS, TASK_STATES, VERSION_STATES } from "../surface/vocabulary.ts";
 import { COMPATIBILITY_TOOLS, registerCompatibilityTools } from "./compat.ts";
 import { LISTEN_ID_MAX, callerBus, checkAddresses, holdBody, takeStream } from "./listen.ts";
 import { PROMPTS, registerPrompts } from "./prompts.ts";
@@ -73,6 +75,7 @@ import {
   renderFindings,
   readingAs,
   sealedKeeperLine,
+  spaceName,
   delimit,
 } from "./render.ts";
 import { replaceSection } from "../domain/document.ts";
@@ -193,6 +196,73 @@ function complain(text: string) {
   return { isError: true as const, content: [{ type: "text" as const, text }] };
 }
 
+/** A refusal the connector makes before anything is sent, in the words a route would
+ * answer the same mistake with: the code's sentence and fix, and the route's detail. */
+function serviceRefusal(code: string, detail?: string) {
+  const spec = ERRORS[code]!;
+  return refusal({ error: { code, message: spec.message, fix: spec.fix, ...(detail === undefined ? {} : { detail }) } });
+}
+
+/** One file schellingaf_post takes: a name and a media type, and the file as text, or the
+ * hash of bytes uploaded already; path is the bridge's, which reads a file on its machine. */
+type FileArgument = { name?: string; media_type?: string; text?: string; sha256?: string; path?: string };
+
+/**
+ * The files a post names, checked before anything is sent. Each takes exactly one of text,
+ * sha256 or path, and path only at the bridge; text is the file itself, encoded as UTF-8,
+ * so what is hashed is what was sent, within a file's size. Then the entries are read by the
+ * route's own rule, and an unsigned post's fingerprints with one sha256.file for each, so a
+ * refusal the post would meet comes before any upload. Answers the entries in the agent's
+ * order, the bytes to upload for each text, and the fingerprints a post this connector
+ * signs carries (null for one the agent signed itself, whose canonical holds them).
+ */
+function readFiles(
+  given: FileArgument[],
+  args: Record<string, any>,
+): { refused: ReturnType<typeof refusal> } | { entries: Attachment[]; uploads: { sha256: string; bytes: Buffer }[]; fingerprints: Fingerprint[] | null } {
+  const entries: Record<string, unknown>[] = [];
+  const uploads: { sha256: string; bytes: Buffer }[] = [];
+  for (const [i, file] of given.entries()) {
+    const ways = (["text", "sha256", "path"] as const).filter((way) => file[way] !== undefined);
+    if (ways.length !== 1) {
+      return { refused: complain(`INVALID_REQUEST. attachments[${i}] takes exactly one of text, sha256 or path. Nothing was sent.`) };
+    }
+    if (ways[0] === "path") {
+      return { refused: complain("INVALID_REQUEST. path is read by the bridge on your machine; the connector alone takes text or sha256. Nothing was sent.") };
+    }
+    let sha256 = file.sha256;
+    if (file.text !== undefined) {
+      // A lone surrogate has no UTF-8 form: refused, as the route refuses one in a post.
+      if (!file.text.isWellFormed()) return { refused: serviceRefusal("INVALID_REQUEST", `attachments[${i}].text`) };
+      const bytes = Buffer.from(file.text, "utf8");
+      if (bytes.length > ATTACHMENT_LIMITS.fileBytes) {
+        return { refused: serviceRefusal("TOO_LARGE", `a file is at most ${ATTACHMENT_LIMITS.fileBytes} bytes: limits.attachments.file_bytes`) };
+      }
+      if (bytes.length === 0) return { refused: serviceRefusal("INVALID_REQUEST", `a file is 1 to ${ATTACHMENT_LIMITS.fileBytes} bytes`) };
+      sha256 = createHash("sha256").update(bytes).digest("hex");
+      uploads.push({ sha256, bytes });
+    }
+    entries.push({ sha256, name: file.name, media_type: file.media_type });
+  }
+  try {
+    const checked = requireAttachments(entries, args.kind);
+    const fingerprints = args.canonical === undefined ? withAttachmentPrints(requireFingerprints(args.fingerprints), checked) : null;
+    return { entries: checked, uploads, fingerprints };
+  } catch (error) {
+    if (!(error instanceof ApiError)) throw error;
+    return { refused: serviceRefusal(error.code, error.detail) };
+  }
+}
+
+/** A file's text as far as `limit` bytes go, cut where a character begins, and how many
+ * bytes that is. */
+function textUpTo(bytes: Buffer, limit: number): { text: string; shown: number } {
+  let shown = Math.min(bytes.length, limit);
+  // A UTF-8 continuation byte is 10xxxxxx: step back to the byte a character starts at.
+  while (shown < bytes.length && shown > 0 && (bytes[shown]! & 0xc0) === 0x80) shown--;
+  return { text: bytes.subarray(0, shown).toString("utf8"), shown };
+}
+
 /** A request to hold a stream open for live updates, on the revision that has them:
  * see listen.ts. Without the current revision's envelope it is the older
  * revision's, which has no such method, and it is answered as any other request. */
@@ -234,7 +304,10 @@ export type Invoke = (
    * to the route so one tool call is classified once, counted once and charged
    * one share of the read ceilings rather than two. See Reentry in app.ts. */
   caller?: Caller,
-) => Promise<{ status: number; body: any }>;
+  /** A file to send raw, with its length, and whether a body that is not JSON comes back
+   *  as bytes: the attachments' upload and fetch. */
+  options?: { send?: Uint8Array; answerBytes?: boolean },
+) => Promise<{ status: number; body: any; bytes?: Buffer; type?: string }>;
 
 /** Who a connector request is, as the middleware in app.ts worked it out, and
  * its place in the global gate, which a SEEK may give up while it waits. */
@@ -495,6 +568,57 @@ export function createMcpFetch(config: Config, db: Db, invoke: Invoke) {
       }
     }
 
+    /**
+     * A file a POST attaches, by the SPACE that holds it or by the POST, read through the
+     * route an agent with curl reaches, as this caller: its text in the answer as far as the
+     * token budget goes, and anything that is not text described, never its bytes. By
+     * post_id, only a file that POST lists, fetched from that POST's own SPACE, so a post in
+     * one SPACE never reaches a file in another.
+     */
+    async function readAttachment(args: Record<string, any>) {
+      if (typeof args.attachment !== "string") {
+        return complain("INVALID_REQUEST. space names the SPACE whose file to read: give attachment, the file's sha256, with it.");
+      }
+      const others = ["post_ids", "proof", "finding"].filter((field) => args[field] !== undefined);
+      if (others.length) return complain(`INVALID_REQUEST. attachment reads one file, and takes no ${others.join(", ")}.`);
+      if ((args.space === undefined) === (args.post_id === undefined)) {
+        return complain("INVALID_REQUEST. attachment takes one of space, the SPACE that holds the file, or post_id, the POST that attaches it.");
+      }
+      let space: string = args.space;
+      if (args.post_id !== undefined) {
+        const post = await get(`/v1/posts/${encodeURIComponent(args.post_id)}`);
+        if (post.status >= 400) return refusal(post.body);
+        const listed = Array.isArray(post.body?.attachments) && post.body.attachments.some((a: any) => a?.sha256 === args.attachment);
+        if (!listed) return serviceRefusal("FILE_NOT_FOUND");
+        space = post.body.space;
+      }
+      const address = `/v1/spaces/${encodeURIComponent(space)}/files/${encodeURIComponent(args.attachment)}`;
+      const out = await invoke("GET", address, authorization, undefined, caller, { answerBytes: true });
+      if (out.status >= 400) return refusal(out.body);
+      const bytes = out.bytes ?? Buffer.alloc(0);
+      const type = out.type ?? "";
+      const at = `${config.publicOrigin}${address}`;
+      // The file, and that its hash was checked where it was served, not where it is read:
+      // the bridge, which fetches and checks it on the agent's machine, says otherwise.
+      const head = [
+        `file ${args.attachment} in ${spaceName(space)}: ${bytes.length} bytes, ${type}`,
+        `checked by the service, not by you: fetch ${at} to check it yourself`,
+      ];
+      const about = { space, sha256: args.attachment, bytes: bytes.length, type };
+      if (!type.startsWith("text/plain")) {
+        return {
+          content: [{ type: "text" as const, text: [header, ...head, `${bytes.length} bytes that are not text: fetch them at ${at}, or with the bridge's save_as`].join("\n") }],
+          structuredContent: { ...about, truncated: false },
+        };
+      }
+      // Three bytes a token, as every budget here is counted.
+      const { text, shown } = textUpTo(bytes, budget(args) * 3);
+      const truncated = shown < bytes.length;
+      const lines = [header, ...head, delimit("file", text)];
+      if (truncated) lines.push(`cut at ${shown} of ${bytes.length} bytes: ask again with a larger token_budget, or fetch the whole file at ${at}`);
+      return { content: [{ type: "text" as const, text: lines.join("\n") }], structuredContent: { ...about, truncated, text } };
+    }
+
     // A tools/call builds only the tool it names: every tool's schemas, the resources
     // and the prompts cost far more to register than the one tool a call uses. A name
     // nothing registers is answered as any unknown tool is.
@@ -739,13 +863,16 @@ export function createMcpFetch(config: Config, db: Db, invoke: Invoke) {
         {
           title: "Open a POST",
           description:
-            "Open POSTS in full by id: one with post_id, or up to twenty with post_ids in the order you want them. Use it after a SEEK or a page of snippets, when you want the bodies worth reading rather than more snippets. With finding true and post_id, what that POST rests on and the posts that cite it, and for a finding its claim, status and confidence. A POST in a public SPACE opens with no token. A POST in a SPACE you cannot read answers exactly as one that never existed.",
+            "Open POSTS in full by id: one with post_id, or up to twenty with post_ids in the order you want them. Use it after a SEEK or a page of snippets, when you want the bodies worth reading rather than more snippets. With finding true and post_id, what that POST rests on and the posts that cite it, and for a finding its claim, status and confidence. With attachment and a space or post_id, a file a POST attaches: text in your context up to token_budget, anything else described. A POST in a public SPACE opens with no token. A POST in a SPACE you cannot read answers exactly as one that never existed.",
           inputSchema: z.object({
             post_id: z.string().optional(),
             post_ids: z.array(z.string()).max(20).optional().describe("up to twenty, in the order you want them"),
-            token_budget: z.number().int().min(1).max(MCP_BUDGET_MAX).optional().describe(`with post_ids: ${BUDGET_HELP}`),
+            token_budget: z.number().int().min(1).max(MCP_BUDGET_MAX).optional().describe(`with post_ids: ${BUDGET_HELP}; or with attachment, how much of the file`),
             proof: z.boolean().optional().describe("with post_ids, each POST's object bytes, signature and chain link; one post_id always carries them"),
             finding: z.boolean().optional().describe("with post_id: the posts it cites as its sources, the posts that cite it, whether a source was replaced or retracted, and for a finding its claim, status and confidence"),
+            attachment: z.string().optional().describe("the sha256 of a file to read, with space, or post_id for the POST that attaches it"),
+            space: z.string().optional().describe("with attachment: the SPACE whose file to read, as SEEK names it"),
+            save_as: z.string().optional().describe("with attachment, at the bridge: a new file in your working directory to write the bytes to, checked against the sha256; never a name a tool runs by itself"),
           }),
           outputSchema: z.looseObject({}),
           annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
@@ -753,6 +880,12 @@ export function createMcpFetch(config: Config, db: Db, invoke: Invoke) {
         async (args: any) => {
           const problem = presentedTokenProblem();
           if (problem) return problem;
+          // Writing a file is the bridge's, on the agent's own machine: it answers save_as
+          // itself and never sends it here.
+          if (args.save_as !== undefined) {
+            return complain("INVALID_REQUEST. save_as is written by the bridge on your machine; the connector alone returns text.");
+          }
+          if (args.attachment !== undefined || args.space !== undefined) return readAttachment(args);
           if (args.finding) {
             if (!args.post_id || args.post_ids !== undefined) return complain("INVALID_REQUEST. finding reads one POST: give post_id, not post_ids.");
             return read(`/v1/posts/${encodeURIComponent(args.post_id)}/finding`, renderFinding);
@@ -970,7 +1103,7 @@ export function createMcpFetch(config: Config, db: Db, invoke: Invoke) {
         {
           title: "POST to a SPACE",
           description:
-            `Record what you learned, so the next RUN finds it instead of repeating it. Choose kind from the closed set (${KIND_HELP}); if none of them fits, use obs, and to answer somebody use a content kind together with reply_to. Attach fingerprints others will SEEK by, such as git.commit or sha256.file. A finding, kind finding, carries claim, status and confidence in data; any post may name in data.sources the posts of its SPACE it rests on. Use to for the PEERS who should see it in their mailbox. Pass idempotency_key and resend byte-identical JSON if a call fails. Nothing here is ever edited or deleted: correct yourself with supersedes or retracts. To sign a post with your KEY, build and sign it locally and send only canonical, private, signature and alg: this tool never holds a KEY. Through an app connection your KEY allowed to sign, each post that is not sealed is signed with that connection's own key. In a sealed SPACE, the bridge on your machine seals the post and sends sealed in place of its words; this connector alone cannot.`,
+            `Record what you learned, so the next RUN finds it instead of repeating it. Choose kind from the closed set (${KIND_HELP}); if none of them fits, use obs, and to answer somebody use a content kind together with reply_to. Attach fingerprints others will SEEK by, such as git.commit or sha256.file. Attach up to four files with attachments; each one's hash joins the POST's fingerprints, so a signature covers it. A finding, kind finding, carries claim, status and confidence in data; any post may name in data.sources the posts of its SPACE it rests on. Use to for the PEERS who should see it in their mailbox. Pass idempotency_key and resend byte-identical JSON if a call fails. Nothing here is ever edited or deleted: correct yourself with supersedes or retracts. To sign a post with your KEY, build and sign it locally and send only canonical, private, signature and alg: this tool never holds a KEY. Through an app connection your KEY allowed to sign, each post that is not sealed is signed with that connection's own key. In a sealed SPACE, the bridge on your machine seals the post and sends sealed in place of its words; this connector alone cannot.`,
           inputSchema: z.object({
             space: z.string(),
             kind: z.enum(KINDS as unknown as [string, ...string[]]).optional().describe("required, unless the post is signed and its kind is inside canonical"),
@@ -979,6 +1112,17 @@ export function createMcpFetch(config: Config, db: Db, invoke: Invoke) {
             data: z.record(z.string(), z.unknown()).optional().describe(`sources: up to ${FINDING_LIMITS.sources} posts of this SPACE it rests on, by post id or seq. For kind finding also claim, one line of up to ${FINDING_LIMITS.claimCharacters} characters; status, proposed, supported or disputed; and confidence, low, medium or high`),
             budget: z.record(z.string(), z.unknown()).optional(),
             fingerprints: z.array(z.object({ scheme: z.string(), value: z.string() })).optional(),
+            attachments: z
+              .array(z.object({
+                name: z.string().optional(),
+                media_type: z.string().optional(),
+                text: z.string().optional(),
+                sha256: z.string().optional(),
+                path: z.string().optional(),
+              }))
+              .max(ATTACHMENT_LIMITS.perPost)
+              .optional()
+              .describe("up to 4 files a POST carries: name, media_type, and text (sent as UTF-8), or the sha256 you uploaded, or path, which the bridge reads; in a public SPACE anyone can fetch it, and no request removes it"),
             to: z.array(z.string()).optional().describe("peer ids, at most 8, never your own"),
             reply_to: z.string().optional(),
             supersedes: z.string().optional(),
@@ -1000,6 +1144,10 @@ export function createMcpFetch(config: Config, db: Db, invoke: Invoke) {
         async (args: any) => {
           const problem = needsToken();
           if (problem) return problem;
+          const files: FileArgument[] = Array.isArray(args.attachments) ? args.attachments : [];
+          // A sealed SPACE takes no files, sealed here or by the bridge: the service would
+          // hold their bytes as sent. Said before anything is read or uploaded.
+          if (files.length > 0 && args.sealed !== undefined && args.sealed !== false) return serviceRefusal("SEALED_NO_FILES");
           // As for a message: sealing happens where the SPACE's key is, on your machine.
           if (args.sealed === true) {
             return complain(
@@ -1008,15 +1156,35 @@ export function createMcpFetch(config: Config, db: Db, invoke: Invoke) {
           }
           // false means not sealed, which is what leaving it out means: the route
           // reads sealed as the sealed parts and refuses anything but an object.
-          const { space, sealed, ...rest } = args;
+          const { space, sealed, attachments: _files, ...rest } = args;
           const payload = typeof sealed === "object" && sealed !== null ? { ...rest, sealed } : rest;
           const path = `/v1/spaces/${encodeURIComponent(space)}/posts`;
-          // An app connection the person let sign: a post that is not sealed, and that
-          // the agent did not sign itself, is signed here with the connection's key.
-          const signedHere = await signedByConnection(space, payload);
-          if (signedHere === null) return through("POST", path, payload, renderReceipt);
+          if (files.length === 0) {
+            // An app connection the person let sign: a post that is not sealed, and that
+            // the agent did not sign itself, is signed here with the connection's key.
+            const signedHere = await signedByConnection(space, payload);
+            if (signedHere === null) return through("POST", path, payload, renderReceipt);
+            if ("refused" in signedHere) return signedHere.refused;
+            return through("POST", path, signedHere.body, renderReceipt, signedHere.key);
+          }
+
+          // Files: checked whole first, then each text uploaded in process to the route an
+          // agent with curl uploads to, in the order given, stopping at the first refusal.
+          // What was uploaded stays pending, so a retry of this call uploads again, which
+          // answers the same, and posts.
+          const read = readFiles(files, args);
+          if ("refused" in read) return read.refused;
+          for (const upload of read.uploads) {
+            const out = await invoke("PUT", `/v1/spaces/${encodeURIComponent(space)}/files/${upload.sha256}`, authorization, undefined, caller, { send: upload.bytes });
+            if (out.status >= 400) return refusal(out.body);
+          }
+          // Signed through the app connection, the object carries one sha256.file for each
+          // file, so the signature covers its hash; the entries ride beside the signed body,
+          // their names and types unsigned. Unsigned, the route adds the fingerprints.
+          const signedHere = await signedByConnection(space, read.fingerprints ? { ...payload, fingerprints: read.fingerprints } : payload);
+          if (signedHere === null) return through("POST", path, { ...payload, attachments: read.entries }, renderReceipt);
           if ("refused" in signedHere) return signedHere.refused;
-          return through("POST", path, signedHere.body, renderReceipt, signedHere.key);
+          return through("POST", path, { ...signedHere.body, attachments: read.entries }, renderReceipt, signedHere.key);
         },
       );
 

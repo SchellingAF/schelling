@@ -8,13 +8,16 @@
 
 import { test, before, describe } from "node:test";
 import assert from "node:assert/strict";
-import { createHash, randomBytes } from "node:crypto";
+import { createHash, randomBytes, sign } from "node:crypto";
 import { filed } from "./helpers.ts";
 import { useService, app, agent, send, read, HOST, type Agent } from "./lib/service.ts";
 import { COMPATIBILITY_TOOLS, DOCUMENT_RESOURCES, MCP_TOOLS, PROMPTS, TEMPLATE_RESOURCES } from "../src/mcp/server.ts";
 import { OPERATIONS } from "../src/surface/operations.ts";
 import { ERRORS } from "../src/db/errors.ts";
 import { referenceParts, renderPrimer, renderReference, sectionNames } from "../src/docs/render.ts";
+import { connectionPublicKey, delegationPreimage, delegationStatementBytes } from "../src/domain/connection-keys.ts";
+import { TOKEN_TTL_DEFAULT_SECONDS } from "../src/domain/protocol.ts";
+import { verifyPost } from "../src/domain/verify.ts";
 
 const SITE = "https://site.schellingaf.test";
 
@@ -69,8 +72,10 @@ async function v1(method: string, path: string, token: string, body?: unknown) {
 }
 
 /** A token for /mcp/connect, as an app is given one when its person says yes: the
- * whole way through for a registered public app, as test/oauth.test.ts walks it. */
-async function connectToken(person: { token: string }): Promise<string> {
+ * whole way through for a registered public app, as test/oauth.test.ts walks it. With
+ * `signs`, the person's Ed25519 KEY allows the app a connection key that signs its posts,
+ * as test/connection-keys.test.ts makes one. */
+async function connectToken(person: { token: string; peerId?: string; privateKey?: import("node:crypto").KeyObject }, signs = false): Promise<string> {
   const connect = `https://${HOST}/mcp/connect`;
   const registered = (await (await app.request("/oauth/register", {
     method: "POST",
@@ -84,7 +89,19 @@ async function connectToken(person: { token: string }): Promise<string> {
     code_challenge: createHash("sha256").update(verifier).digest("base64url"), code_challenge_method: "S256",
   })}`);
   const request = new URL(started.headers.get("location")!).searchParams.get("request")!;
-  const approved = await v1("POST", `/v1/authorizations/${request}/approve`, person.token);
+  let allowed: unknown;
+  if (signs) {
+    const seed = randomBytes(32);
+    const notBefore = Math.floor(Date.now() / 1000);
+    const statement = delegationStatementBytes({
+      peerId: person.peerId!, key: connectionPublicKey(seed).toString("hex"), connection: request,
+      notBefore, notAfter: notBefore + TOKEN_TTL_DEFAULT_SECONDS + 3600,
+    });
+    const signature = sign(null, delegationPreimage(statement), person.privateKey!).toString("hex");
+    allowed = { connection_key: { statement: statement.toString("base64url"), signature: { alg: "ed25519", signature }, seed: seed.toString("base64url") } };
+  }
+  const approved = await v1("POST", `/v1/authorizations/${request}/approve`, person.token, allowed);
+  if (signs) assert.equal(approved.body.connection_key, "kept", JSON.stringify(approved.body));
   const code = new URL(approved.body.redirect_to).searchParams.get("code")!;
   const issued = (await (await app.request("/oauth/token", {
     method: "POST",
@@ -636,6 +653,67 @@ describe("search and fetch, under ChatGPT's names", () => {
     const out = await tool("fetch", { id: "../v1/me" }, outsiderApp, AT);
     assert.equal(out.result.isError, true);
     assert.match(out.result.content[0].text, /^POST_NOT_FOUND/);
+  });
+});
+
+describe("files, through the tools that post and open", () => {
+  test("schellingaf_post and schellingaf_get take files in the words given them, each argument's at most 25 words", async () => {
+    const { result } = await call("tools/list");
+    const tools = new Map<string, any>(result.tools.map((t: any) => [t.name, t]));
+    const post = tools.get("schellingaf_post");
+    const get = tools.get("schellingaf_get");
+    const words = (text: string) => text.trim().split(/\s+/).length;
+    // Each in the words proposed for it, at most 25 words; attachments and save_as each
+    // gained a clause from the privacy check that carries them past it, which the owner sees.
+    const expected: Record<string, [any, string, number]> = {
+      "schellingaf_post attachments": [post, "up to 4 files a POST carries: name, media_type, and text (sent as UTF-8), or the sha256 you uploaded, or path, which the bridge reads; in a public SPACE anyone can fetch it, and no request removes it", 38],
+      "schellingaf_get attachment": [get, "the sha256 of a file to read, with space, or post_id for the POST that attaches it", 17],
+      "schellingaf_get space": [get, "with attachment: the SPACE whose file to read, as SEEK names it", 12],
+      "schellingaf_get save_as": [get, "with attachment, at the bridge: a new file in your working directory to write the bytes to, checked against the sha256; never a name a tool runs by itself", 29],
+    };
+    for (const [at, [tool, text, count]] of Object.entries(expected)) {
+      const described = tool.inputSchema.properties[at.split(" ")[1]!].description as string;
+      assert.equal(described, text, at);
+      assert.equal(words(described), count, at);
+    }
+    assert.ok((get.inputSchema.properties.token_budget.description as string).endsWith("; or with attachment, how much of the file"));
+    assert.ok((post.description as string).includes("Attach up to four files with attachments; each one's hash joins the POST's fingerprints, so a signature covers it."));
+    assert.ok((get.description as string).includes("With attachment and a space or post_id, a file a POST attaches: text in your context up to token_budget, anything else described."));
+    // Four at most, each a name, a media type and one way to the bytes. No tool was added for them.
+    const files = post.inputSchema.properties.attachments;
+    assert.equal(files.maxItems, 4);
+    assert.deepEqual(Object.keys(files.items.properties).sort(), ["media_type", "name", "path", "sha256", "text"]);
+    assert.equal(MCP_TOOLS.some((name) => /file|attach/.test(name)), false);
+  });
+
+  test("a post an app connection signs carries each file's hash in its signed object, and verifies", async () => {
+    const person = await agent();
+    const appToken = await connectToken(person, true);
+    const space = `surface-files-${process.pid}`;
+    assert.equal((await v1("POST", "/v1/spaces", person.token, { name: space, title: "Files signed through an app" })).status, 201);
+    const text = "#!/bin/sh\necho signed through the app\n";
+    const hash = createHash("sha256").update(text).digest("hex");
+    const args = {
+      space, kind: "result", body: "Run the script.", idempotency_key: "signed-files-1",
+      fingerprints: [{ scheme: "git.commit", value: "c0ffee1234" }],
+      attachments: [{ name: "run.sh", media_type: "text/x-sh", text }],
+    };
+    const out = await tool("schellingaf_post", args, appToken, "/mcp/connect");
+    assert.equal(out.result.isError, undefined, JSON.stringify(out));
+    assert.equal(out.result.structuredContent.signed, true);
+    assert.equal(out.result.structuredContent.signed_by, "connection");
+    assert.deepEqual(out.result.structuredContent.attachments, [{ sha256: hash, name: "run.sh", media_type: "text/x-sh", bytes: Buffer.byteLength(text) }]);
+    // The hash is inside what was signed, beside the agent's own fingerprint; the name is not.
+    const one = await v1("GET", `/v1/posts/${out.result.structuredContent.post_id}`, person.token);
+    const object = JSON.parse(Buffer.from(one.body.proof.canonical, "base64url").toString("utf8"));
+    assert.deepEqual(object.fingerprints, [{ scheme: "git.commit", value: "c0ffee1234" }, { scheme: "sha256.file", value: hash }]);
+    assert.equal(JSON.stringify(object).includes("run.sh"), false);
+    assert.deepEqual(verifyPost(one.body, { rpId: "site.schellingaf.test", origins: [SITE] }), []);
+    // The same call again is the same post, its files with it.
+    const again = await tool("schellingaf_post", args, appToken, "/mcp/connect");
+    assert.equal(again.result.isError, undefined, JSON.stringify(again));
+    assert.equal(again.result.structuredContent.replayed, true);
+    assert.deepEqual(again.result.structuredContent.attachments, out.result.structuredContent.attachments);
   });
 });
 

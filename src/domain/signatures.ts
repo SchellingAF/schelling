@@ -28,10 +28,12 @@ import { PASSKEY_CREDENTIAL_ID_MAX_BYTES, PASSKEY_CREDENTIAL_ID_MIN_BYTES } from
 import { PRIVATE_MAX_BYTES, SIGNED_OBJECT_MAX_BYTES, signaturePreimageOf } from "./objects.ts";
 
 /** The only fields a signed post's request may carry: its content is in `canonical`,
- * and a sealed post's in the sealed parts `canonical` commits to. */
+ * and a sealed post's in the sealed parts `canonical` commits to. `attachments` is the one
+ * content field beside them: each one's hash is a sha256.file fingerprint inside
+ * `canonical`, and its name and media type are the author's words, not signed. */
 export const SIGNED_POST_FIELDS = [
   "alg", "canonical", "private", "signature", "credential_id", "client_data_json", "authenticator_data", "sealed",
-  "connection_key",
+  "connection_key", "attachments",
 ] as const;
 
 export type SignedPostRequest = {

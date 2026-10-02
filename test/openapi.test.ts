@@ -51,13 +51,15 @@ async function call(
     query?: Record<string, string | string[]>;
     json?: unknown;
     form?: Record<string, string>;
+    /** A file's bytes, sent raw with their length, as an upload is. */
+    raw?: Buffer;
     token?: string;
     accept?: string;
   } = {},
 ): Promise<{ status: number; body: any; headers: Headers }> {
   const operation = OPERATIONS.find((o) => o.name === op);
   assert.ok(operation, `no operation named ${op}`);
-  const path = operation.path.replace(/:([a-z_]+)/g, (_, k: string) => {
+  const path = operation.path.replace(/:([a-z_][a-z0-9_]*)/g, (_, k: string) => {
     assert.ok(params[k] !== undefined, `${op} needs ${k}`);
     return encodeURIComponent(params[k]!);
   });
@@ -70,9 +72,13 @@ async function call(
   const url = path + (search.size > 0 ? `?${search}` : "");
   const headers: Record<string, string> = { accept: opts.accept ?? "application/json" };
   if (opts.token) headers.authorization = `Bearer ${opts.token}`;
-  let body: string | undefined;
+  let body: string | Buffer | undefined;
   let requestType: string | null = null;
-  if (opts.json !== undefined) {
+  if (opts.raw !== undefined) {
+    requestType = "application/octet-stream";
+    headers["content-length"] = String(opts.raw.length);
+    body = opts.raw;
+  } else if (opts.json !== undefined) {
     requestType = "application/json";
     headers["content-type"] = requestType;
     body = JSON.stringify(opts.json);
@@ -87,7 +93,7 @@ async function call(
   const parsed = text === "" ? null : type === "application/json" ? JSON.parse(text) : text;
   exchanges.push({
     op, method: operation.method, path: operation.path, query, requestType,
-    request: opts.json ?? opts.form ?? null, status: res.status, type, body: parsed,
+    request: opts.json ?? opts.form ?? (opts.raw === undefined ? null : opts.raw.toString("latin1")), status: res.status, type, body: parsed,
   });
   return { status: res.status, body: parsed, headers: res.headers };
 }
@@ -269,6 +275,14 @@ async function scenario() {
   }), 201);
   ok(await call("posts.append", { name: open }, { token: owner.token, json: { kind: "warn", body: "The first finding was wrong.", supersedes: first.post_id } }), 201);
   ok(await call("posts.append", { name: secret }, { token: member.token, json: { kind: "obs", body: "A private note." } }), 201);
+  // A file uploaded, attached and fetched.
+  const solver = Buffer.from("print('solved')\n");
+  const solverHash = sha256(solver).toString("hex");
+  ok(await call("files.put", { name: open, sha256: solverHash }, { token: owner.token, raw: solver }), 201);
+  ok(await call("posts.append", { name: open }, {
+    token: owner.token, json: { kind: "result", body: "Run: python3 solve.py", attachments: [{ sha256: solverHash, name: "solve.py", media_type: "text/x-python" }] },
+  }), 201);
+  ok(await call("files.get", { name: open, sha256: solverHash }));
   await makeCheckpoints(db, serviceKey, { minAgeSeconds: 0 });
 
   ok(await call("posts.read", { name: open }, { query: { after: "0", limit: "50", detail: "full" } }));
@@ -761,7 +775,7 @@ describe("the OpenAPI description", () => {
       assert.match(operation.operationId, /^[a-zA-Z0-9_-]{1,64}$/);
       assert.ok(!ids.has(operation.operationId), `operationId ${operation.operationId} twice`);
       ids.add(operation.operationId);
-      const named = [...op.path.matchAll(/:([a-z_]+)/g)].map((m) => m[1]).sort();
+      const named = [...op.path.matchAll(/:([a-z_][a-z0-9_]*)/g)].map((m) => m[1]).sort();
       const declared = (operation.parameters ?? []).filter((p: any) => p.in === "path").map((p: any) => p.name).sort();
       assert.deepEqual(declared, named, `${op.name}'s path parameters`);
       const expected = op.auth === "none" ? [] : op.auth === "bearer" ? [{ bearer: [] }] : [{}, { bearer: [] }];

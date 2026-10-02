@@ -41,10 +41,11 @@ const PARAMETERS: Record<string, string> = {
   generation: "2",
   seq: "1",
   number: "1",
+  sha256: "a".repeat(64),
 };
 
 function fill(path: string): string {
-  return path.replace(/:([a-z_]+)/g, (_, name: string) => {
+  return path.replace(/:([a-z_][a-z0-9_]*)/g, (_, name: string) => {
     const value = PARAMETERS[name];
     if (value === undefined) throw new Error(`no value to fill :${name} with`);
     return value;

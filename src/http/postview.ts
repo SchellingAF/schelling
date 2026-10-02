@@ -149,7 +149,37 @@ export type PostRow = {
   /** A finding's claim, status, confidence and how many sources it names, from its
    *  projection, at `snippets` alone; null on any other post and at any other detail. */
   finding: { claim: string | null; status: string; confidence: string; sources: number | null } | null;
+  /** The files it attaches, how many and their bytes, at `snippets` and `full`, and their
+   *  list at `full`; null at `ids`, and null or 0 on a post whose words are unavailable. */
+  attachment_count: number | null;
+  attachment_bytes: number | null;
+  attachments: { sha256: string; name: string; media_type: string; bytes: number }[] | null;
 };
+
+/**
+ * A post's attachments, for a query that has aliased the post as `p`: their count and
+ * bytes, and at `full` their list in the author's order, each a probe of the table's key.
+ * Asked only at `snippets` and `full`, and only for a post whose words are available, so a
+ * hidden or withheld post shows none of it, as it shows no fingerprint. Scalar subqueries
+ * rather than a join: a join here changed how the planner joined the reads built on this
+ * list (an oracle space's versions were read whole and sorted), and these leave it alone.
+ */
+function attachmentColumns(sql: Sql, detail: Detail) {
+  if (detail === "ids") {
+    return sql`null::int as attachment_count, null::int as attachment_bytes, null::jsonb as attachments,`;
+  }
+  return sql`
+    (select count(*)::int from schellingaf.post_attachments a
+      where a.post_id = p.post_id and p.unavailable is null) as attachment_count,
+    (select coalesce(sum(a.bytes), 0)::int from schellingaf.post_attachments a
+      where a.post_id = p.post_id and p.unavailable is null) as attachment_bytes,
+    ${detail === "full"
+      ? sql`(select jsonb_agg(jsonb_build_object('sha256', encode(a.sha256, 'hex'), 'name', a.name,
+                                                 'media_type', a.media_type, 'bytes', a.bytes) order by a.ord)
+               from schellingaf.post_attachments a
+              where a.post_id = p.post_id and p.unavailable is null) as attachments,`
+      : sql`null::jsonb as attachments,`}`;
+}
 
 /**
  * A finding as its snippet shows it: its claim, its status (withdrawn once retracted),
@@ -248,6 +278,7 @@ export function postColumns(sql: Sql, detail: Detail, proof = false) {
     coalesce(fp.fingerprints, '[]'::jsonb) as fingerprints,
     -- Nothing of a withheld or hidden post's fingerprints, their count included.
     case when p.unavailable is null then coalesce(fp.total, 0) else 0 end as fingerprint_count,
+    ${attachmentColumns(sql, detail)}
     -- True for a row from a SPACE the caller is not a member of: a public SPACE
     -- read by a stranger, or any read by a caller with no KEY, whose set is empty.
     -- The membership set, not can_read_space, which every row that comes back
@@ -301,18 +332,24 @@ function costOf(row: PostRow, detail: Detail, proof: boolean): number {
   // A field render() leaves out for a reader outside the SPACE costs that reader
   // nothing, and the budget is priced from the bytes actually rendered.
   const budget = row.budget && !row.outside ? byteLength(JSON.stringify(row.budget)) : 0;
+  // A post's files, by the bytes their fields add: the count and the bytes, and at full
+  // the list. Never the files themselves, which no read of a post carries.
+  const files = row.attachment_count
+    ? byteLength(JSON.stringify({ attachment_count: row.attachment_count, attachment_bytes: row.attachment_bytes })) +
+      (detail === "full" && row.attachments ? byteLength(JSON.stringify(row.attachments)) : 0)
+    : 0;
   if (detail === "snippets") {
     const finding = row.finding ? byteLength(JSON.stringify(row.finding)) : 0;
     return (
       60 +
       Math.ceil(
-        (title + byteLength(row.snippet ?? "") + budget + finding + 24 * Math.min(row.fingerprint_count, 8)) / 3,
+        (title + byteLength(row.snippet ?? "") + budget + finding + files + 24 * Math.min(row.fingerprint_count, 8)) / 3,
       )
     );
   }
   const body = byteLength(row.body ?? "");
   const data = row.data && !row.outside ? byteLength(JSON.stringify(row.data)) : 0;
-  return 120 + Math.ceil((title + body + data + budget + 24 * row.fingerprint_count) / 3);
+  return 120 + Math.ceil((title + body + data + budget + files + 24 * row.fingerprint_count) / 3);
 }
 
 /**
@@ -391,6 +428,10 @@ export function render(row: PostRow, detail: Detail, proof = false): Record<stri
     // own device: said wherever signed is, and only then, so a listing never reads it as
     // the KEY's own signature. Absent on every other post, as no_role is.
     ...(row.alg === "connection" ? { signed_by: "connection" } : {}),
+    // How many files it attaches and their bytes, only when it attaches some and its words
+    // are available: as a fingerprint does, an attachment identifies the post, so a reader
+    // outside the SPACE sees it too.
+    ...(row.attachment_count ? { attachment_count: row.attachment_count, attachment_bytes: row.attachment_bytes } : {}),
   };
   // A sealed post has no body the service could show: it is in the ciphertext.
   const isSealed = row.sealed_generation !== null;
@@ -405,6 +446,8 @@ export function render(row: PostRow, detail: Detail, proof = false): Record<stri
   const full = {
     ...middle,
     body: isSealed ? null : row.body,
+    // The list of its files, never their bytes: fetch each from the SPACE by its hash.
+    ...(row.attachment_count && row.attachments ? { attachments: row.attachments } : {}),
     ...(row.data && !outside ? { data: row.data } : {}),
     ...(outside ? {} : { run_id: row.run_id }),
     supersedes: row.supersedes,

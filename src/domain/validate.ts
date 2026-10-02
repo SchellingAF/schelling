@@ -15,6 +15,7 @@ import {
   type Category,
 } from "../surface/categories.ts";
 import {
+  ATTACHMENT_LIMITS,
   FINDING_CONFIDENCES,
   FINDING_LIMITS,
   FINDING_STATUSES,
@@ -320,6 +321,91 @@ export function requireFingerprints(value: unknown): Fingerprint[] {
     a.scheme === b.scheme ? (a.value < b.value ? -1 : 1) : a.scheme < b.scheme ? -1 : 1,
   );
   return out;
+}
+
+/** One file a POST carries, as its author names it: the hash of its bytes, and a name and
+ *  a media type that are the author's words, kept by the service and never served as a
+ *  header or a file name. */
+export type Attachment = { sha256: string; name: string; media_type: string };
+
+/** A media type as an attachment's label: lowercase type/subtype, no parameters. */
+const MEDIA_TYPE = /^[a-z0-9][a-z0-9!#$&^_.+-]*\/[a-z0-9][a-z0-9!#$&^_.+-]*$/;
+
+/** A control (C0, C1 or DEL) or a format character, such as a direction override or a
+ *  zero-width space, or a line or paragraph separator: what makes a name read as another.
+ *  The zero-width non-joiner and joiner are allowed: Persian and Indic names need them. */
+const HIDDEN_OR_CONTROL = /(?![\u200c\u200d])[\p{Cc}\p{Cf}\u2028\u2029]/u;
+
+/**
+ * A post's `attachments`: up to four `{sha256, name, media_type}`, in the author's order,
+ * which every read keeps. Absent, null and empty are the same as none. Read by one rule for
+ * an unsigned and a signed post alike; a version takes none, since it cannot be hidden in an
+ * oracle space and its files could never be taken out of reads.
+ */
+export function requireAttachments(value: unknown, kind?: string): Attachment[] {
+  if (value === undefined || value === null) return [];
+  if (!Array.isArray(value)) throw new ApiError("INVALID_REQUEST", { detail: "attachments is a list" });
+  if (value.length === 0) return [];
+  if (value.length > ATTACHMENT_LIMITS.perPost) {
+    throw new ApiError("INVALID_REQUEST", { detail: `attachments: at most ${ATTACHMENT_LIMITS.perPost}` });
+  }
+  if (kind === "version") {
+    throw new ApiError("INVALID_REQUEST", { detail: "a version is its document, its body, and takes no attachments" });
+  }
+  const hashes = new Set<string>();
+  const names = new Set<string>();
+  const out: Attachment[] = [];
+  for (const [i, item] of value.entries()) {
+    const at = `attachments[${i}]`;
+    const o = asObject(item, `${at} is an object with sha256, name and media_type`);
+    for (const key of Object.keys(o)) {
+      if (key !== "sha256" && key !== "name" && key !== "media_type") {
+        throw new ApiError("INVALID_REQUEST", { detail: `${at}.${key} is not a field of an attachment` });
+      }
+    }
+    const sha256 = o.sha256;
+    if (typeof sha256 !== "string" || sha256.length !== 64 || !HEX_ONLY.test(sha256)) {
+      throw new ApiError("INVALID_REQUEST", { detail: `${at}.sha256 is 64 lowercase hex characters` });
+    }
+    const name = requireString(o.name, `${at}.name`, ATTACHMENT_LIMITS.nameBytes);
+    if (HIDDEN_OR_CONTROL.test(name) || name.includes("/") || name.includes("\\") || name.startsWith(".")) {
+      throw new ApiError("INVALID_REQUEST", {
+        detail: `${at}.name: no control or format character, no slash or backslash, and no leading dot`,
+      });
+    }
+    const mediaType = requireString(o.media_type, `${at}.media_type`, ATTACHMENT_LIMITS.mediaTypeBytes, 3);
+    if (!MEDIA_TYPE.test(mediaType)) {
+      throw new ApiError("INVALID_REQUEST", { detail: `${at}.media_type is a lowercase type/subtype, no parameters` });
+    }
+    if (hashes.has(sha256)) throw new ApiError("INVALID_REQUEST", { detail: `${at}.sha256 is named twice` });
+    if (names.has(name)) throw new ApiError("INVALID_REQUEST", { detail: `${at}.name is named twice` });
+    hashes.add(sha256);
+    names.add(name);
+    out.push({ sha256, name, media_type: mediaType });
+  }
+  return out;
+}
+
+/**
+ * An unsigned post's fingerprints with one sha256.file for each attachment it lacks,
+ * deduplicated and sorted as requireFingerprints sorts them, so the content hash is
+ * computed over the list the post is stored with and a byte-identical retry hashes the
+ * same. The added ones count toward the thirty-two.
+ */
+export function withAttachmentPrints(fingerprints: Fingerprint[], attachments: Attachment[]): Fingerprint[] {
+  if (attachments.length === 0) return fingerprints;
+  const merged = [...fingerprints];
+  for (const a of attachments) {
+    if (!merged.some((f) => f.scheme === "sha256.file" && f.value === a.sha256)) {
+      merged.push({ scheme: "sha256.file", value: a.sha256 });
+    }
+  }
+  if (merged.length > 32) {
+    throw new ApiError("INVALID_REQUEST", { detail: "fingerprints and one sha256.file for each attachment: at most 32 in all" });
+  }
+  return merged.sort((a, b) =>
+    a.scheme === b.scheme ? (a.value < b.value ? -1 : 1) : a.scheme < b.scheme ? -1 : 1,
+  );
 }
 
 /** `to`: at most eight, deduped, sorted bytewise, and never the author. */

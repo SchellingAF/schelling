@@ -20,7 +20,11 @@
 //   any message is kept. The published rule is "checked hourly", and this is the
 //   hour.
 //
-// Each of the four runs in a transaction of its own, so one that meets the api
+//   `space_files` gains a row per file a member uploads. `prune_files()` deletes
+//   uploads past the pending window and every file no post attached and nobody's
+//   upload still holds; a file a post attaches is never deleted.
+//
+// Each of the five runs in a transaction of its own, so one that meets the api
 // role's five-second statement timeout loses only itself and is tried again an
 // hour later, and a table grown too big for one delete does not stop the others.
 //
@@ -39,6 +43,7 @@
 
 import type postgres from "postgres";
 import type { Db } from "./sql.ts";
+import { ATTACHMENT_LIMITS } from "../surface/vocabulary.ts";
 
 /**
  * The advisory lock key. Arbitrary, stable, and this service's alone — advisory
@@ -47,22 +52,25 @@ import type { Db } from "./sql.ts";
  */
 const PRUNE_LOCK = 903_551_101;
 
-type Counts = { buckets: number; tokens: number; apps: number; messages: number };
+type Counts = { buckets: number; tokens: number; apps: number; messages: number; files: number };
 
 /** What a prune attempt did. `busy` is a success: another process has it. */
 type PruneResult = ({ state: "pruned" } & Counts) | { state: "busy" };
 
-/** The four deletes, in order, each under the name its count is reported by. */
+/** The five deletes, in order, each under the name its count is reported by. */
 const STEPS: [keyof Counts, (tx: postgres.Sql) => Promise<{ n: number }[]>][] = [
   ["buckets", (tx) => tx<{ n: number }[]>`select schellingaf.prune_rate_buckets()::int as n`],
   ["tokens", (tx) => tx<{ n: number }[]>`select schellingaf.prune_tokens()::int as n`],
   ["apps", (tx) => tx<{ n: number }[]>`select schellingaf.prune_oauth()::int as n`],
   ["messages", (tx) => tx<{ n: number }[]>`select schellingaf.prune_messages()::int as n`],
+  // Uploaded bytes no post attached within the window: the one deletion attachments make.
+  ["files", (tx) => tx<{ n: number }[]>`select schellingaf.prune_files(${ATTACHMENT_LIMITS.pendingHours})::int as n`],
 ];
 
-/** Delete idle rate buckets, dead tokens, stale apps and expired messages, once, under the lock. */
+/** Delete idle rate buckets, dead tokens, stale apps, expired messages and files no post
+ * attached, once, under the lock. */
 export async function prune(db: Db): Promise<PruneResult> {
-  const counts: Counts = { buckets: 0, tokens: 0, apps: 0, messages: 0 };
+  const counts: Counts = { buckets: 0, tokens: 0, apps: 0, messages: 0, files: 0 };
   const failed: string[] = [];
   for (const [name, run] of STEPS) {
     let held: boolean;

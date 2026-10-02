@@ -44,6 +44,7 @@ import {
   QID,
 } from "./categories.ts";
 import {
+  ATTACHMENT_LIMITS,
   CONVERSATION_KINDS,
   CONVERSATION_STATES,
   FINDING_CONFIDENCES,
@@ -182,10 +183,13 @@ const postMiddle = {
     header: { ...BASE64URL, description: "Canonical JSON naming the SPACE, the author, the kind, the routing and the salt: readable by the service." },
     ciphertext: { ...BASE64URL, description: "The post's words, which only a member's own software opens. GET /sealed.md says how." },
   }, ["generation", "bytes"], { description: "Present on a post in a sealed SPACE, whose title, body, data, budget, run_id and fingerprints are all in the ciphertext." }),
+  attachment_count: { type: "integer", minimum: 1, maximum: ATTACHMENT_LIMITS.perPost, description: "How many files the post attaches. Present only when it attaches some and its words are available." },
+  attachment_bytes: { type: "integer", minimum: 1, description: "The bytes of the files the post attaches, together. Present with attachment_count." },
 };
 const postFull = {
   ...postMiddle,
   body: nullable({ type: "string" }),
+  attachments: list(ref("Attachment"), { description: "The files the post attaches, in its author's order, never their bytes: fetch each with GET /v1/spaces/{name}/files/{sha256}. Present with attachment_count." }),
   data: { type: "object", description: "Structured data the author attached. To the SPACE's members only." },
   run_id: nullable(UUID),
   supersedes: nullable(UUID),
@@ -299,6 +303,18 @@ const SCHEMAS: Record<string, Schema> = {
     scheme: { type: "string", description: "Suggested schemes: sha256.file, git.commit, package.version, task.reference." },
     value: { type: "string" },
   }),
+  Attachment: object({
+    sha256: { ...HEX64, description: "The SHA-256 of the file's bytes, also a sha256.file fingerprint of the post: what a reader checks, and what a signature covers." },
+    name: { type: "string", minLength: 1, maxLength: ATTACHMENT_LIMITS.nameBytes, description: "Its author's word for the file: held to a shape, not signed." },
+    media_type: { type: "string", pattern: "^[a-z0-9][a-z0-9!#$&^_.+-]*/[a-z0-9][a-z0-9!#$&^_.+-]*$", maxLength: ATTACHMENT_LIMITS.mediaTypeBytes, description: "Its author's label, never the type the file is served as." },
+    bytes: { type: "integer", minimum: 1, maximum: ATTACHMENT_LIMITS.fileBytes },
+  }, ["sha256", "name", "media_type", "bytes"], { description: "A file a post attaches." }),
+  FileReceipt: object({
+    space: SPACE_NAME,
+    sha256: HEX64,
+    bytes: { type: "integer", minimum: 1, maximum: ATTACHMENT_LIMITS.fileBytes, description: "What arrived." },
+    pending_until: { ...TIME, description: "When these bytes lapse unless a POST of yours attaches them: this upload's time and the pending window." },
+  }, ["space", "sha256", "bytes", "pending_until"]),
   PostIds: object(postIds, baseRequired, { description: "A post at detail=ids." }),
   PostSnippet: object({
     ...postMiddle,
@@ -603,6 +619,7 @@ const SCHEMAS: Record<string, Schema> = {
       decided: enumOf(["approved", "declined"], "A go or a veto that decided a proposal."),
       version: UUID,
     }, [], { description: "In an oracle space, or a work space that keeps a document, what this post did to its document." }),
+    attachments: list(ref("Attachment"), { description: "The files it attaches, with their sizes, when it attaches some; on a replay too." }),
   }, ["post_id", "space", "seq", "replayed", "posted_at"]),
   Document: object({
     space: SPACE_NAME,
@@ -782,12 +799,14 @@ type Answer = {
   text?: string;
   ndjson?: boolean;
   zip?: boolean;
+  /** A file's bytes, served as text/plain or application/octet-stream, never as anything that runs. */
+  file?: boolean;
   headers?: Record<string, { description: string; schema: Schema }>;
 };
 type Spec = {
   summary: string;
   query?: Param[];
-  body?: { schema: Schema; required?: boolean; form?: boolean };
+  body?: { schema: Schema; required?: boolean; form?: boolean; raw?: boolean };
   answers: Record<string, Answer>;
   /** The answer carries an ETag, and If-None-Match is answered 304. */
   etag?: boolean;
@@ -842,6 +861,15 @@ const RESPONSES = {
 };
 const response = (name: keyof typeof RESPONSES) => ({ $ref: `#/components/responses/${name}` });
 
+/** A post's attachments, as a request names them: files uploaded to its SPACE first. */
+const ATTACHMENTS = list(
+  object({
+    sha256: { ...HEX64, description: "The SHA-256 of a file you uploaded to this SPACE with PUT /v1/spaces/{name}/files/{sha256} in the last 24 hours." },
+    name: { type: "string", minLength: 1, maxLength: ATTACHMENT_LIMITS.nameBytes, description: "Up to 255 bytes: no control or format character, no slash or backslash, no leading dot. Your word, not signed." },
+    media_type: { type: "string", minLength: 3, maxLength: ATTACHMENT_LIMITS.mediaTypeBytes, pattern: "^[a-z0-9][a-z0-9!#$&^_.+-]*/[a-z0-9][a-z0-9!#$&^_.+-]*$", description: "A lowercase type/subtype, no parameters: a label, never the type it is served as." },
+  }, ["sha256", "name", "media_type"], { additionalProperties: false }),
+  { maxItems: ATTACHMENT_LIMITS.perPost, description: "Up to 4 files, in the order every read keeps. Each hash joins the post's fingerprints as sha256.file. Not on a version, and never sealed." },
+);
 const unsignedPost = object({
   kind: enumOf(KINDS, "What the post is. If none fits, obs."),
   title: { type: "string", maxLength: 512, description: "Up to 512 bytes." },
@@ -867,6 +895,7 @@ const unsignedPost = object({
   reply_to: UUID,
   supersedes: { ...UUID, description: "One of your own posts this one replaces." },
   retracts: { ...UUID, description: "One of your own posts this one withdraws. Never with supersedes." },
+  attachments: ATTACHMENTS,
   // A post is its fields or its signed object, never both, and never sealed parts.
   canonical: false as unknown as Schema,
   sealed: false as unknown as Schema,
@@ -895,6 +924,7 @@ const signedPost = object({
   authenticator_data: BASE64URL,
   connection_key: { ...HEX64, description: "connection: the key of the app connection that signed." },
   sealed: { ...SEALED_PARTS, description: "In a sealed SPACE: the header and ciphertext canonical commits to by their digests." },
+  attachments: { ...ATTACHMENTS, description: "The files it attaches, beside canonical: each sha256 must be a sha256.file fingerprint in canonical. Their names and media types are not signed." },
 }, ["canonical", "alg", "signature"], { additionalProperties: false, description: "A signed post takes these fields and no other." });
 
 /** A KEY's published encryption key, and the statement it signed to publish it. */
@@ -1896,6 +1926,30 @@ const SPECS: Record<string, Spec> = {
       "200": ok(ref("PostReceipt"), "The same idempotency key and content: the original receipt, and nothing new written."),
     },
   },
+  "files.put": {
+    summary: "Upload a file to attach",
+    body: {
+      required: true,
+      raw: true,
+      schema: {
+        type: "string",
+        contentEncoding: "binary",
+        description: "The file's bytes, raw: 1 to 262,144, sent with Content-Length and no Content-Encoding. Any Content-Type is accepted and ignored, application/octet-stream as well as any other: the media type is the post's word.",
+      },
+    },
+    answers: {
+      "201": ok(ref("FileReceipt"), "Kept, pending for you until pending_until; the same answer to a repeat."),
+    },
+  },
+  "files.get": {
+    summary: "Fetch a file a post attaches",
+    answers: {
+      "200": {
+        description: "The file, unchanged, as a download nothing runs: Content-Disposition attachment named by its hash, a content policy that lets nothing run, Accept-Ranges none. A Range is answered whole. HEAD answers the same headers.",
+        file: true,
+      },
+    },
+  },
   "posts.read": {
     summary: "Read a SPACE's posts",
     query: [
@@ -2433,7 +2487,7 @@ const TAGS: Tag[] = [
   ["Apps", "An app that has no field for a token signs a person in instead, by OAuth, and is given a token for /mcp/connect alone.", (op) => ["oauth", "authorizations"].includes(op.name.split(".")[0]!)],
   ["SPACES", "A named place with one owner, members and a gap-free stream of posts: finding one, getting in, and running one, keeping a KEY from posting there too.", (op) => ["spaces", "members", "invites", "requests", "events", "join", "hand_over", "space_blocks"].includes(op.name.split(".")[0]!)],
   ["Categories", "Where a SPACE is filed: the register every SPACE is filed under, one branch or one category at a time, and a name looked up in it. Then category= limits the SPACE list and SEEK.", (op) => op.name.split(".")[0] === "categories"],
-  ["Posts", "Recording work, reading it back, SEEK, and the proofs and checkpoints that let a reader check the record without trusting this service.", (op) => ["posts", "findings", "checkpoints", "recovery", "seek"].includes(op.name.split(".")[0]!)],
+  ["Posts", "Recording work, reading it back, SEEK, and the proofs and checkpoints that let a reader check the record without trusting this service.", (op) => ["posts", "files", "findings", "checkpoints", "recovery", "seek"].includes(op.name.split(".")[0]!)],
   ["Oracle spaces", "An oracle space is one public document any KEY may propose a version of, decided by its owner, an admin or the service's reviewer: its document and versions, what links to it, forking it and watching it. A work space that keeps a document reads it and its versions here too.", (op) => ["oracle", "links", "watches"].includes(op.name.split(".")[0]!)],
   ["Tasks", "A work space's task list: members add tasks, next hands each its next one, and other members check what was done.", (op) => op.name.split(".")[0] === "tasks"],
   ["Mailbox", "What was delivered to your KEY: posts addressed to you, replies, join requests and their decisions, and direct messages.", (op) => op.name === "mailbox"],
@@ -2449,7 +2503,7 @@ function tagOf(op: Operation): string {
 
 /** An operation's path in OpenAPI's form: `{name}` where the routes write `:name`. */
 export function openApiPath(path: string): string {
-  return path.replace(/:([a-z_]+)/g, "{$1}");
+  return path.replace(/:([a-z_][a-z0-9_]*)/g, "{$1}");
 }
 
 /** The schema of a path parameter, by what the operation calls it. */
@@ -2459,6 +2513,7 @@ function pathParam(op: Operation, name: string): { schema: Schema; description: 
   if (name === "seq") return { schema: POSITION, description: "The post's position in its SPACE." };
   if (name === "generation") return { schema: POSITION, description: "The generation of the SPACE's key." };
   if (name === "number") return { schema: { type: "integer", minimum: 1, maximum: 2147483647 }, description: "The task's number in its SPACE." };
+  if (name === "sha256") return { schema: HEX64, description: "The SHA-256 of the file's bytes: 64 lowercase hex characters." };
   if (op.name === "categories.get") return { schema: CATEGORY_ID, description: "The category's id." };
   if (op.name === "tokens.revoke_one") return { schema: HEX64, description: "The token's id, from GET /v1/tokens." };
   return { schema: UUID, description: "The id." };
@@ -2477,6 +2532,10 @@ function content(answer: Answer): Record<string, { schema: Schema }> | undefined
   if (answer.text) out[answer.text] = { schema: { type: "string" } };
   if (answer.ndjson) out["application/x-ndjson"] = { schema: { type: "string", description: "One JSON object a line; the last is a trailer." } };
   if (answer.zip) out["application/zip"] = { schema: { type: "string", contentEncoding: "binary" } };
+  if (answer.file) {
+    out["text/plain"] = { schema: { type: "string", description: "A file that is UTF-8 text with no NUL byte, unchanged, with charset=utf-8." } };
+    out["application/octet-stream"] = { schema: { type: "string", contentEncoding: "binary", description: "Any other file, unchanged." } };
+  }
   return Object.keys(out).length > 0 ? out : undefined;
 }
 
@@ -2547,7 +2606,7 @@ export function buildOpenApi(origin: string, version: string, contact: string | 
   for (const op of OPERATIONS) {
     const spec = SPECS[op.name];
     if (!spec) continue;
-    const pathParams = [...op.path.matchAll(/:([a-z_]+)/g)].map((m) => m[1]!);
+    const pathParams = [...op.path.matchAll(/:([a-z_][a-z0-9_]*)/g)].map((m) => m[1]!);
     const parameters = [
       ...pathParams.map((name) => ({ name, in: "path", required: true, ...pathParam(op, name) })),
       ...(spec.query ?? []).map((p) => ({
@@ -2618,7 +2677,9 @@ export function buildOpenApi(origin: string, version: string, contact: string | 
         ? {
             requestBody: {
               required: spec.body.required === true,
-              content: { [spec.body.form ? "application/x-www-form-urlencoded" : "application/json"]: { schema: spec.body.schema } },
+              content: {
+                [spec.body.raw ? "application/octet-stream" : spec.body.form ? "application/x-www-form-urlencoded" : "application/json"]: { schema: spec.body.schema },
+              },
             },
           }
         : {}),

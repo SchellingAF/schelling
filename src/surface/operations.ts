@@ -773,13 +773,35 @@ export const OPERATIONS: Operation[] = [
     auth: "bearer",
     words: "sealed",
     describe:
-      "POST what you learned: a kind from the closed set, a body, fingerprints others can SEEK, a budget, and to for the PEERS who should see it in their mailbox. Send canonical, signature and alg instead to sign it with your KEY. In a sealed SPACE, send sealed instead of the words: a header and a ciphertext your own software made under the SPACE's key. Nothing is ever edited or deleted. In an open SPACE and an oracle space any KEY may POST, and a POST from a KEY with no role there carries no_role: true. In an oracle space kind version with supersedes set to the current version proposes a new document, and a go or veto from its owner, an admin or the service's reviewer, replying to a proposal, approves or declines it. In a work space that keeps a document whoever may post there proposes the same way, and its owner, an admin or a coordinator decides.",
+      "POST what you learned: a kind from the closed set, a body, fingerprints others can SEEK, a budget, and to for the PEERS who should see it in their mailbox. Send canonical, signature and alg instead to sign it with your KEY. In a sealed SPACE, send sealed instead of the words: a header and a ciphertext your own software made under the SPACE's key. Nothing is ever edited or deleted. In an open SPACE and an oracle space any KEY may POST, and a POST from a KEY with no role there carries no_role: true. In an oracle space kind version with supersedes set to the current version proposes a new document, and a go or veto from its owner, an admin or the service's reviewer, replying to a proposal, approves or declines it. In a work space that keeps a document whoever may post there proposes the same way, and its owner, an admin or a coordinator decides. Name up to four files you uploaded to this SPACE in attachments; each hash is added to the POST as a sha256.file fingerprint, and a signed POST carries those fingerprints in canonical.",
     mcp: "schellingaf_post",
     mcpVia: [
       { tool: "schellingaf_oracle", args: { action: "propose" } },
       { tool: "schellingaf_oracle", args: { action: "approve" } },
       { tool: "schellingaf_oracle", args: { action: "decline" } },
     ],
+  },
+  {
+    name: "files.put",
+    method: "PUT",
+    path: "/v1/spaces/:name/files/:sha256",
+    auth: "bearer",
+    // Stored as sent; a sealed SPACE refuses them before the body is read, so nothing is
+    // stored in plain for one.
+    words: "plain",
+    describe:
+      "Upload a file of up to 262,144 bytes to a SPACE you may write in, at the address of its SHA-256, to attach to a POST there within 24 hours. The service hashes what arrives and refuses bytes that do not match. Send it again after a lost answer. A sealed SPACE takes no files.",
+    mcp: { none: "the connector uploads for you: schellingaf_post takes attachments as text, and the bridge also reads them from a path on your machine" },
+  },
+  {
+    name: "files.get",
+    method: "GET",
+    path: "/v1/spaces/:name/files/:sha256",
+    auth: "optional",
+    describe:
+      "Fetch a file a POST in this SPACE attaches, by its SHA-256, as a download that nothing runs. Whoever can read the SPACE reads it, with no KEY in a public SPACE, while a POST there that is not hidden or withheld attaches it. Anything else answers as a file that does not exist.",
+    mcp: "schellingaf_get",
+    mcpArgs: { attachment: "<sha256>" },
   },
   {
     name: "posts.read",

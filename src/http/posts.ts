@@ -27,13 +27,16 @@ import {
   requireFingerprints,
   requireKind,
   requireTo,
+  requireAttachments,
+  withAttachmentPrints,
+  type Attachment,
 } from "../domain/validate.ts";
 import { authorClause, authorOf, boundedNumber, cost, cursor, postColumns, publicSeekablePerDay, detailOr, kindClause, kindsOf, readDenied, render, tokenBudget, type Detail, type PostRow, withinBudget } from "./postview.ts";
 import { charge, emptyOf, LIMITS, OPEN_POSTS_PER_SPACE_PER_DAY, openPostsPerDay, OWN, SHARED, spend } from "./ratelimit.ts";
 import { connectorSignedWith, floorPlace, optionalBearer, requireBearer, type Env } from "./app.ts";
 import { receipt } from "./spaces.ts";
 import { firstDay } from "./auth.ts";
-import { ORACLE_LIMITS } from "../surface/vocabulary.ts";
+import { ATTACHMENT_LIMITS, ORACLE_LIMITS } from "../surface/vocabulary.ts";
 import { headsOf, recordHeads, recordReturned } from "./log.ts";
 import { readWaiting, spaceStream, waitSeconds } from "./wait.ts";
 import { parseDocument } from "../domain/document.ts";
@@ -118,7 +121,9 @@ function fieldReader() {
  * not valid named in one refusal, and last whether a sealed post's fields agree with
  * its header, which then decides them.
  */
-function readUnsignedPost(input: Record<string, unknown>, author: Buffer, sealed: SealedPost | null): PostInput {
+function readUnsignedPost(
+  input: Record<string, unknown>, author: Buffer, sealed: SealedPost | null,
+): PostInput & { attachments: Attachment[] } {
   for (const key of ["alg", "private", "signature", "credential_id", "client_data_json", "authenticator_data", "connection_key"]) {
     if (input[key] !== undefined) {
       throw new ApiError("INVALID_REQUEST", { detail: `${key} belongs to a signed post, which carries canonical` });
@@ -147,6 +152,7 @@ function readUnsignedPost(input: Record<string, unknown>, author: Buffer, sealed
     agrees(requireTo(input.to, author).map(toHex).sort().join(","), sealed.to.join(","), "to");
   }
   const fingerprints = field(() => requireFingerprints(input.fingerprints));
+  const attachments = field(() => requireAttachments(input.attachments, kind));
   const idempotencyKey = field(() => optionalString(input.idempotency_key, "idempotency_key", 128));
   // Each is a uuid parameter of append_post, so its shape is checked here, before
   // the write allowance is spent: a malformed one would reach PostgreSQL as 22P02.
@@ -166,7 +172,29 @@ function readUnsignedPost(input: Record<string, unknown>, author: Buffer, sealed
   if (supersedes && retracts) {
     throw new ApiError("INVALID_REQUEST", { detail: "a post supersedes or retracts, never both" });
   }
-  return { idempotencyKey, kind, title, body, to, replyTo, supersedes, retracts, fingerprints, data, budget, runId };
+  // One sha256.file fingerprint for each attachment, added where the author left it out,
+  // before the object and the content hash are built from the list.
+  return {
+    idempotencyKey, kind, title, body, to, replyTo, supersedes, retracts,
+    fingerprints: withAttachmentPrints(fingerprints, attachments), data, budget, runId, attachments,
+  };
+}
+
+/**
+ * A signed post's attachments: read by the same rule as an unsigned post's, and each
+ * hash already a sha256.file fingerprint in the object its author signed, since the
+ * service adds nothing to signed bytes.
+ */
+function readSignedAttachments(value: unknown, post: PostInput): Attachment[] {
+  const attachments = requireAttachments(value, post.kind);
+  for (const [i, a] of attachments.entries()) {
+    if (!post.fingerprints.some((f) => f.scheme === "sha256.file" && f.value === a.sha256)) {
+      throw new ApiError("INVALID_REQUEST", {
+        detail: `attachments[${i}].sha256 is not a sha256.file fingerprint in canonical: put it there before you sign`,
+      });
+    }
+  }
+  return attachments;
 }
 
 /**
@@ -387,24 +415,42 @@ export function mountPosts(app: Hono<Env>, config: Config, db: Db, service: Serv
     });
     const input = asObject(parseStrictJson(text));
 
+    // A sealed SPACE takes no files, and a sealed post naming any is refused before any
+    // other field is read: plain bytes would sit beside its ciphertext.
+    const sealedAsked = input.sealed !== undefined && input.sealed !== null;
+    if (sealedAsked && Array.isArray(input.attachments) && input.attachments.length > 0) {
+      throw new ApiError("SEALED_NO_FILES");
+    }
     // A sealed post, for a sealed SPACE: its words are in the ciphertext, and what the
     // service acts on is what its header names (content/sealed.md, section 5).
-    const sealed = input.sealed === undefined || input.sealed === null ? null : readSealedPost(input.sealed, toHex(bearer.peerId));
+    const sealed = sealedAsked ? readSealedPost(input.sealed, toHex(bearer.peerId)) : null;
     // A signed post carries its content in the bytes its author signed, and
     // nowhere else: every field is derived from them, and the signature is
-    // checked before anything is spent, as a malformed field is.
+    // checked before anything is spent, as a malformed field is. Its attachments ride
+    // beside them, each hash a sha256.file fingerprint inside them.
     const signed = input.canonical !== undefined ? readSignedPostRequest(input) : null;
-    const post: PostInput = signed !== null
-      ? await readSignedPost(db, config, c.req.param("name"), bearer.peerId, signed, sealed, {
-          signedWith: connectorSignedWith(c),
-          tokenHash: bearer.hash,
-        })
-      : readUnsignedPost(input, bearer.peerId, sealed);
+    let attachments: Attachment[];
+    let post: PostInput;
+    if (signed !== null) {
+      post = await readSignedPost(db, config, c.req.param("name"), bearer.peerId, signed, sealed, {
+        signedWith: connectorSignedWith(c),
+        tokenHash: bearer.hash,
+      });
+      attachments = readSignedAttachments(input.attachments, post);
+    } else {
+      ({ attachments, ...post } = readUnsignedPost(input, bearer.peerId, sealed));
+    }
     // A signed finding's fields are in the private part its author signed, read whole by
     // readSignedPost; held to the same rule as an unsigned one's, before anything is spent.
     // Whether each of its sources is a post of this SPACE is append_post's to say, in the
     // post's transaction (migrations/0114_findings.sql).
     if (signed !== null && sealed === null) requireFinding(post.kind, post.data);
+
+    // A post naming attachments meets the rule an upload meets, before anything is spent:
+    // a KEY that may not upload here, or a sealed SPACE, is refused now.
+    if (attachments.length > 0) {
+      await db.write`select schellingaf.check_file_upload(${c.req.param("name")}, ${bearer.peerId})`;
+    }
 
     const me = toHex(bearer.peerId);
     await spend(c, db, LIMITS.peerWrites(me));
@@ -532,22 +578,49 @@ export function mountPosts(app: Hono<Env>, config: Config, db: Db, service: Serv
         : null;
     // The connection key a post signed with alg connection names, which its object keeps.
     const connectionKey = signed?.signature.alg === "connection" ? signed.signature.connectionKey : null;
-    const [row] = await db.write<{ receipt: Record<string, unknown> }[]>`
+    const appendPost = (sql: typeof db.write) => sql<{ receipt: Record<string, unknown> }[]>`
       select schellingaf.append_post(
         ${name}, ${bearer.peerId}, ${post.kind}, ${post.title}, ${post.body},
-        ${post.data as never}, ${post.budget as never}, ${db.write.array(post.to.map((hex) => Buffer.from(hex, "hex")))}::bytea[],
+        ${post.data as never}, ${post.budget as never}, ${sql.array(post.to.map((hex) => Buffer.from(hex, "hex")))}::bytea[],
         ${post.runId}, ${post.replyTo}, ${post.supersedes}, ${post.retracts},
-        ${db.write.json(post.fingerprints)}, ${post.idempotencyKey}, ${publicSeekablePerDay()},
+        ${sql.json(post.fingerprints)}, ${post.idempotencyKey}, ${publicSeekablePerDay()},
         ${signed?.canonical ?? null}, ${signed?.private ?? null}, ${signed?.signature.alg ?? null},
-        ${signed?.signature.value ?? null}, ${envelope === null ? null : db.write.json(envelope)},
-        ${links === null ? null : db.write.array(links)}::text[],
+        ${signed?.signature.value ?? null}, ${envelope === null ? null : sql.json(envelope)},
+        ${links === null ? null : sql.array(links)}::text[],
         ${config.oracleReviewer ? Buffer.from(config.oracleReviewer, "hex") : null}::bytea,
         ${PENDING_PER_KEY}, ${PENDING_PER_SPACE},
-        ${db.write.array(quiet.map((hex) => Buffer.from(hex, "hex")))}::bytea[],
+        ${sql.array(quiet.map((hex) => Buffer.from(hex, "hex")))}::bytea[],
         ${sealed?.header ?? null}::bytea, ${sealed?.ciphertext ?? null}::bytea,
         ${openPostsPerDay(firstDay(bearer))}, ${OPEN_POSTS_PER_SPACE_PER_DAY}, ${connectionKey}::bytea) as receipt`;
+    // A post's attachment rows, written by attach_files() while append_post's SPACE lock
+    // is held, or on a replay compared with the list the first post stored.
+    const attachFiles = (sql: typeof db.write, postId: unknown, replayed: boolean) => sql<{ list: unknown[] }[]>`
+      select schellingaf.attach_files(
+        ${String(postId)}::uuid, ${bearer.peerId}, ${sql.json(attachments)}, ${replayed},
+        ${ATTACHMENT_LIMITS.pendingHours}, ${ATTACHMENT_LIMITS.attachedBytesPerSpace}) as list`;
 
-    const receipt = row!.receipt;
+    // A post with no attachments is the one statement it always was. One with attachments
+    // is written in one transaction with its rows: both or neither.
+    let receipt: Record<string, unknown>;
+    let attached: unknown[] = [];
+    if (attachments.length === 0) {
+      const [row] = await appendPost(db.write);
+      receipt = row!.receipt;
+      // A retry that drops the list of a post that had one is a conflict, not a replay.
+      if (receipt.replayed === true) {
+        const [compared] = await attachFiles(db.write, receipt.post_id, true);
+        attached = compared!.list;
+      }
+    } else {
+      [receipt, attached] = await db.write.begin(async (tx) => {
+        const sql = tx as unknown as typeof db.write;
+        const [row] = await appendPost(sql);
+        const written = row!.receipt;
+        const [list] = await attachFiles(sql, written.post_id, written.replayed === true);
+        return [written, list!.list] as const;
+      }) as [Record<string, unknown>, unknown[]];
+    }
+    if (attached.length > 0) receipt = { ...receipt, attachments: attached };
     const replayed = receipt.replayed === true;
     // Written to the request log before anything else can fail: these are the
     // numbers a restore has to be reconciled against, and they exist only here.

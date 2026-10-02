@@ -133,6 +133,29 @@ export const TASK_LIMITS = {
 } as const;
 
 /**
+ * Attachments: the files a POST carries, published in the capability document as
+ * `limits.attachments` and printed by the reference. The CHECKs in
+ * migrations/0121_attachments.sql hold fileBytes, perPost, nameBytes and mediaTypeBytes,
+ * and test/attachments.test.ts holds them equal; pendingHours and attachedBytesPerSpace
+ * are passed to the functions, so each is written once. The two daily numbers are rates,
+ * FILE_BYTES_PER_DAY and FILE_BYTES_FIRST_DAY in src/http/ratelimit.ts.
+ */
+export const ATTACHMENT_LIMITS = {
+  /** One file, in bytes: the service's request limit, since a file goes raw. Empty is refused. */
+  fileBytes: 262_144,
+  /** The files one POST carries. */
+  perPost: 4,
+  /** A file's name, in bytes of UTF-8. */
+  nameBytes: 255,
+  /** A media type, in bytes. */
+  mediaTypeBytes: 127,
+  /** How long uploaded bytes wait for their uploader to attach them, in hours. */
+  pendingHours: 24,
+  /** The bytes of the files a SPACE's shown posts attach, each file counted once. */
+  attachedBytesPerSpace: 268_435_456,
+} as const;
+
+/**
  * A finding's status, as its author sets it and every read shows it: proposed, supported
  * or disputed when it is posted or superseded, and withdrawn once it is retracted, which
  * is the only way it reads so. The service never sets one: disputed is the author's word
