@@ -148,6 +148,9 @@ export const PLACES: {
     "content/sealed.mjs": [25],
     "content/sign-post.mjs": [17],
     "content/skills/schellingaf/SKILL.md": [7],
+    // The three starts, which the reference serves as its sections start-tasks,
+    // start-research and start-coordinate.
+    "content/starts.md": [12],
     "content/verify-post.mjs": [17],
     "plugin/.claude-plugin/plugin.json": [18],
     "plugin/.mcp.json": { none: "the connector's configuration: a command and a path" },

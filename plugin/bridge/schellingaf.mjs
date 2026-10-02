@@ -66,6 +66,7 @@
 //   SCHELLINGAF_TOKEN     a token to use instead of minting one; sealing and signing need the KEY too
 //   SCHELLINGAF_STAMP     a stamp file, put before asking to join a sealed SPACE
 //   SCHELLINGAF_UNSIGNED  1 to sign a post only where its SPACE takes only signed posts
+//   SCHELLINGAF_TOOLS     tasks, research or coordinate: list that toolset alone; every tool if unset
 //
 // Two copies may start at once, as a client and its hooks do on a first run: the
 // KEY is made by exactly one of them and read by both, and the token file is
@@ -83,6 +84,10 @@ import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative as relativePath, resolve as resolvePath, sep } from "node:path";
 
 const API = (process.env.SCHELLINGAF_API ?? "https://api.schellingaf.com").replace(/\/+$/, "");
+/** The toolset the service lists, by its name, or every tool. The service holds the sets
+ *  and checks the name; the bridge learns a set's tools from the service's own list. */
+const TOOLSET = process.env.SCHELLINGAF_TOOLS ?? "";
+const CONNECTOR = TOOLSET === "" ? `${API}/mcp` : `${API}/mcp?tools=${encodeURIComponent(TOOLSET)}`;
 const KEY_FILE = process.env.SCHELLINGAF_KEY_FILE ?? join(homedir(), ".schellingaf", "key.pem");
 const TOKEN_FILE = join(dirname(KEY_FILE), "token.json");
 const CHALLENGE_LABEL = "agent-state:token-challenge:v1";
@@ -2878,6 +2883,57 @@ function toolRefused(message, code) {
   return message?.result?.isError === true && new RegExp(`^${code}\\b`).test(message.result.content?.[0]?.text ?? "");
 }
 
+/** The tools the service lists at this connection's address, with a toolset set: the
+ *  last tools/list relayed, or the bridge's own, asked for once and written nowhere. */
+let listedTools = null;
+/** The bridge's own tools/list while it is asked: every call that arrives meanwhile waits
+ *  for this one answer. */
+let listing = null;
+
+/** Why a call goes nowhere, with a toolset set: the service's own words for it, held equal
+ *  to ERRORS.NOT_IN_TOOLSET by test/bridge.test.ts, with the tool and the set filled in. */
+const notInToolset = (tool) =>
+  new Refusal(`NOT_IN_TOOLSET. This connection's toolset leaves that tool out. (${tool} is not in the toolset ${TOOLSET}) Connect again with no set for every tool, or with a set that holds this tool: GET /reference?section=connector names each set's tools. Through the bridge, set SCHELLINGAF_TOOLS the same way, or unset it. Nothing was done.`);
+
+/**
+ * The names of the tools this connection's toolset lists, before any call is prepared:
+ * the bridge keeps no list of its own, so it asks the service when no tools/list was
+ * relayed yet. A list it cannot have throws, and the call is refused with nothing sent.
+ */
+function toolsListed() {
+  if (listedTools) return Promise.resolve(listedTools);
+  listing ??= (async () => {
+    const ask = async (bearer) => fetch(CONNECTOR, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        accept: "application/json, text/event-stream",
+        authorization: `Bearer ${bearer}`,
+        ...(negotiated ? { "MCP-Protocol-Version": negotiated } : {}),
+      },
+      body: JSON.stringify({ jsonrpc: "2.0", id: "schellingaf-bridge-tools", method: "tools/list", params: {} }),
+    });
+    for (let fresh = false; ; fresh = true) {
+      const res = await ask(await token({ fresh }));
+      const names = new Set();
+      let refused = null;
+      for await (const m of messagesOf(res)) {
+        if (!fresh && !process.env.SCHELLINGAF_TOKEN && tokenRefused(m)) refused = "token";
+        else if (m?.error) refused = m.error.message ?? `the service answered ${res.status}`;
+        for (const tool of m?.result?.tools ?? []) names.add(tool?.name);
+      }
+      if (refused === "token") continue;
+      if (refused !== null) throw new Error(refused);
+      if (!res.ok) throw new Error(`the service answered ${res.status}`);
+      listedTools = names;
+      return names;
+    }
+  })().finally(() => {
+    listing = null;
+  });
+  return listing;
+}
+
 async function relay(message) {
   const modern = message?.params?._meta?.["io.modelcontextprotocol/protocolVersion"];
   const name = message?.params?.name ?? message?.params?.uri;
@@ -2904,6 +2960,21 @@ async function relay(message) {
       inFlight.delete(message.id);
     }
   };
+  // With a toolset, a call to a tool it leaves out is answered here: nothing is sent,
+  // read, sealed, signed, uploaded or stamped for it.
+  if (isCall && TOOLSET !== "") {
+    let listed;
+    try {
+      listed = await toolsListed();
+    } catch (error) {
+      refuseHere(error, "check the toolset for");
+      return;
+    }
+    if (!listed.has(name)) {
+      refuseHere(notInToolset(name));
+      return;
+    }
+  }
   if (isCall) {
     try {
       const prepared = await prepare(message);
@@ -2926,7 +2997,7 @@ async function relay(message) {
     }
   }
 
-  const send = async (bearer) => fetch(`${API}/mcp`, {
+  const send = async (bearer) => fetch(CONNECTOR, {
     method: "POST",
     signal: controller.signal,
     headers: {
@@ -2965,6 +3036,15 @@ async function relay(message) {
         if (message.method === "initialize" && m?.id === message.id && typeof m?.result?.protocolVersion === "string") {
           negotiated = m.result.protocolVersion;
         }
+        // The toolset's tools, as the service lists them: which calls are prepared here.
+        if (TOOLSET !== "" && message.method === "tools/list" && m?.id === message.id && Array.isArray(m?.result?.tools)) {
+          const names = message.params?.cursor === undefined ? new Set() : new Set(listedTools ?? []);
+          for (const tool of m.result.tools) names.add(tool?.name);
+          listedTools = names;
+        }
+        // A toolset the service does not have is refused with a status: said to the
+        // person too, since the client may show its error to nobody.
+        if (res.status === 400 && typeof m?.error?.message === "string") say(m.error.message);
         // Opened here, on the way back, wherever a sealed item is in the answer.
         const out = isCall && m?.id === message.id && m.result ? await openAnswer(m).catch((error) => (say(error.message), m)) : m;
         if (out?.id === message.id && out.result && !out.result.isError) {

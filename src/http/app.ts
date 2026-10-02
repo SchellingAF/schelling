@@ -72,7 +72,7 @@ import {
   type SignatureEnvelope,
 } from "../domain/encryption.ts";
 import { asObject, optionalString, parseStrictJson } from "../domain/validate.ts";
-import { COMPATIBILITY_TOOLS, DOCUMENT_RESOURCES, MCP_TOOLS, PROMPTS, TEMPLATE_RESOURCES, createMcpFetch, isListen } from "../mcp/server.ts";
+import { COMPATIBILITY_TOOLS, DOCUMENT_RESOURCES, MCP_TOOLS, PROMPTS, TEMPLATE_RESOURCES, TOOLSETS, createMcpFetch, isListen, type Toolset } from "../mcp/server.ts";
 import { CONNECT_PATH, SCOPES, bearerChallenge, connectResource, mountOAuth, oauthAvailable, resourceMetadataUrl } from "../oauth/routes.ts";
 import { WAIT_SECONDS_MAX, WAITS_PER_CALLER } from "./wait.ts";
 import { jsonText, renderOpenWork } from "../mcp/render.ts";
@@ -155,7 +155,7 @@ import {
   FINDING_STATUSES,
   ATTACHMENT_LIMITS,
 } from "../surface/vocabulary.ts";
-import { mountSpaces, namedCode, receipt } from "./spaces.ts";
+import { mountSpaces, namedCode, receipt, startFor } from "./spaces.ts";
 import { mountPosts } from "./posts.ts";
 import { mountFiles } from "./files.ts";
 import { mountSealed } from "./sealed.ts";
@@ -1714,7 +1714,8 @@ export function createApp(config: Config, db: Db): Hono<Env> {
       if (joined.changed === true && typeof joined.handed_over_by === "string" && typeof joined.name === "string") {
         publishChange({ kind: "access_lost", space: joined.name, peer: joined.handed_over_by });
       }
-      return { joined: receipt(c, named.name, joined) };
+      const start = joined.state === "member" ? await startFor(db, toHex(peer), joined.name, joined.role) : {};
+      return { joined: { ...receipt(c, named.name, joined), ...start } };
     } catch (error) {
       return { join_refused: refusalBody(toApiError(error)) };
     }
@@ -2187,7 +2188,7 @@ export function createApp(config: Config, db: Db): Hono<Env> {
     // protects a well-behaved client from mistaking a stale token for a dead
     // server, and a batch is not what such a client sends.
     let request = c.req.raw;
-    let called: { method?: unknown; params?: { name?: unknown; arguments?: { action?: unknown } } } | undefined;
+    let called: { id?: unknown; method?: unknown; params?: { name?: unknown; arguments?: { action?: unknown } } } | undefined;
     if (c.req.method === "POST") {
       // A body cut off part-way cannot be read, and is answered as one that is not JSON.
       const text = await c.req.text().catch(() => "");
@@ -2217,6 +2218,23 @@ export function createApp(config: Config, db: Db): Hono<Env> {
       // src/mcp/listen.ts.
       request = new Request(c.req.raw.url, { method: "POST", headers: c.req.raw.headers, body: text });
     }
+    // A toolset, at /mcp alone: /mcp/connect takes none, because a query on its address
+    // would not match the resource its tokens are issued for. A set this service does not
+    // have is refused before the SDK sees it, with a status, as the batch is: a client
+    // that names one is misconfigured, not holding a stale token.
+    let toolset: Toolset | undefined;
+    if (!connect) {
+      const named = new URL(c.req.url).searchParams.getAll("tools");
+      if (named.length > 1 || (named.length === 1 && named[0] !== "" && !Object.hasOwn(TOOLSETS, named[0]!))) {
+        const spec = ERRORS.INVALID_REQUEST!;
+        const id = typeof called?.id === "string" || typeof called?.id === "number" ? called.id : null;
+        return c.json(
+          { jsonrpc: "2.0", id, error: { code: -32600, message: `${spec.message} (tools is ${Object.keys(TOOLSETS).slice(0, -1).join(", ")} or ${Object.keys(TOOLSETS).at(-1)}, or absent for every tool) ${spec.fix}` } },
+          400,
+        );
+      }
+      toolset = named[0] ? (named[0] as Toolset) : undefined;
+    }
     // The connection itself, as the Node server hands it over (a request made in
     // process has none), for a stream to hang up on a client that stopped reading
     // and to see what reached the client. Taken alone, so that an open stream keeps
@@ -2238,6 +2256,7 @@ export function createApp(config: Config, db: Db): Hono<Env> {
       // gone: the one sign of a client that left before a stream began to send.
       gone: c.req.raw.signal,
       connect,
+      toolset,
     }, c.get("guessWait") ?? null, called);
     // The two headers every /v1 answer carries, set on the transport's own
     // Response, because Hono drops the headers a middleware prepared when a

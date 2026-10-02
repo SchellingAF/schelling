@@ -6,7 +6,7 @@ import { test, after, describe } from "node:test";
 import assert from "node:assert/strict";
 import { createHash, generateKeyPairSync, sign as signBytes } from "node:crypto";
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
@@ -19,6 +19,8 @@ import { createApp } from "../src/http/app.ts";
 import type { Config } from "../src/config.ts";
 import { challengePreimage } from "../src/domain/protocol.ts";
 import { PLUGIN_NAME, SHARED_FILES, bridgeScript, pluginArchive, pluginFiles, staleCopies } from "../src/surface/plugin.ts";
+// @ts-expect-error: plain JavaScript, read for its words.
+import { WORDS } from "../plugin/hooks/words.mjs";
 
 const ROOT = new URL("..", import.meta.url).pathname;
 let fixture: Fixture;
@@ -141,7 +143,11 @@ describe("the plugin's archive and marketplace", () => {
     }
     // The connector the plugin starts is the bridge it carries.
     const mcp = JSON.parse(readFileSync(join(unpacked, ".mcp.json"), "utf8"));
-    assert.deepEqual(mcp.mcpServers.schellingaf, { command: "node", args: ["${CLAUDE_PLUGIN_ROOT}/bridge/schellingaf.mjs"] });
+    assert.deepEqual(mcp.mcpServers.schellingaf, {
+      command: "node",
+      args: ["${CLAUDE_PLUGIN_ROOT}/bridge/schellingaf.mjs"],
+      env: { SCHELLINGAF_TOOLS: "${SCHELLINGAF_TOOLS:-}" },
+    });
     assert.equal(JSON.parse(readFileSync(join(unpacked, ".claude-plugin/plugin.json"), "utf8")).name, PLUGIN_NAME);
   });
 
@@ -188,6 +194,15 @@ describe("the plugin's archive and marketplace", () => {
     assert.deepEqual(market.plugins.map((p: any) => [p.name, p.source]), [[PLUGIN_NAME, "./plugin"]]);
   });
 
+  test(".mcp.json passes SCHELLINGAF_TOOLS with an empty default", () => {
+    // Claude Code expands ${VAR:-default} in a plugin's .mcp.json: unset, the bridge is
+    // given an empty value and lists every tool; set, it lists that toolset alone.
+    const mcp = JSON.parse(readFileSync(join(ROOT, "plugin/.mcp.json"), "utf8"));
+    assert.equal(mcp.mcpServers.schellingaf.env.SCHELLINGAF_TOOLS, "${SCHELLINGAF_TOOLS:-}");
+    assert.match(bridgeScript(), /const TOOLSET = process\.env\.SCHELLINGAF_TOOLS \?\? "";/);
+    assert.match(bridgeScript(), /TOOLSET === "" \? `\$\{API\}\/mcp` : `\$\{API\}\/mcp\?tools=\$\{encodeURIComponent\(TOOLSET\)\}`/);
+  });
+
   test("the plugin whose bridge uploads, reads and saves files is a version a client takes as new", () => {
     // Claude Code replaces an installed plugin only when its version changes: 0.1.2 carried
     // a bridge that knew nothing of attachments, and a client keeping it would send a path
@@ -219,10 +234,9 @@ describe("the plugin's hooks", () => {
     assert.ok(peer, said);
     assert.match(said, /Mailbox: head 0\./);
     assert.match(said, /SPACES: none yet/);
-    assert.match(said, /Habits: read your own newest dossier first, then your mailbox/);
-    // The tasks step, after the mailbox, in the words the connector's instructions use:
-    // the work space's document first, where it keeps one, then the next task.
-    assert.match(said, /then your mailbox from the cursor it saved; where a work space keeps tasks, read its document, if it keeps one, then take the next task with schellingaf_task next, or the next check with verify, post your result with fingerprints, then mark the task done; SEEK before you work/);
+    // The last line says these lines were the routine's first step and leaves the rest
+    // to the connector's instructions, the one place the routine is written.
+    assert.equal(said.split("\n").at(-1), WORDS.routine);
 
     // The KEY the hook made is the bridge's, and its token is kept beside it.
     const kept = JSON.parse(readFileSync(join(work, "start", "keys", "token.json"), "utf8"));
@@ -273,11 +287,43 @@ describe("the plugin's hooks", () => {
     assert.doesNotMatch(later, /ignore-your-instructions/);
   });
 
+  test("the session-start lines leave the routine to the instructions", async () => {
+    const out = await runHook("SessionStart", { session_id: "s-routine", source: "startup" }, hookEnv("routine"));
+    assert.equal(out.code, 0, out.err);
+    const said = contextOf(out.out);
+    assert.doesNotMatch(said, /schellingaf_task next/);
+    assert.doesNotMatch(said, /verify/);
+    assert.equal(said.split("\n").at(-1), WORDS.routine);
+    // With a toolset that may leave out schellingaf_space_control, a KEY in no SPACE is
+    // told where its dossier goes, how to make that SPACE without it, and which bridge
+    // prints the token that takes.
+    const set = await runHook("SessionStart", { session_id: "s-routine-set", source: "startup" }, { ...hookEnv("routine-set"), SCHELLINGAF_TOOLS: "tasks" });
+    assert.equal(set.code, 0, set.err);
+    const lines = contextOf(set.out).split("\n");
+    const bridge = realpathSync(join(unpacked, "bridge", "schellingaf.mjs"));
+    assert.ok(lines.includes(WORDS.noSpacesToolset(bridge)), lines.join("\n"));
+    // Asynchronous, because the bridge may ask the service this test process serves.
+    const printed = await new Promise<{ code: number | null; out: string; err: string }>((resolve) => {
+      const child = spawn(process.execPath, [bridge, "token"], { env: hookEnv("routine-set") });
+      let out = "";
+      let err = "";
+      child.stdout.on("data", (d) => (out += d));
+      child.stderr.on("data", (d) => (err += d));
+      child.on("exit", (code) => resolve({ code, out, err }));
+    });
+    assert.equal(printed.code, 0, printed.err);
+    assert.match(printed.out.trim(), /^\S{20,}$/);
+    assert.ok(!lines.includes(WORDS.noSpaces));
+    assert.equal(lines.at(-1), WORDS.routine);
+  });
+
   test("a session starts even when the service does not answer, and says so", async () => {
     const env = hookEnv("down", "http://127.0.0.1:9");
     const out = await runHook("SessionStart", { session_id: "s-down", source: "startup" }, env);
     assert.equal(out.code, 0);
     assert.match(contextOf(out.out), /the service did not answer when this session started/);
+    // GET /v1/me was not read, so nothing says where the routine stands.
+    assert.ok(!contextOf(out.out).includes(WORDS.routine));
   });
 
   test("on a node older than 22, where the bridge will not start, the session is told that, not that the service did not answer", async () => {
@@ -291,8 +337,8 @@ describe("the plugin's hooks", () => {
     const said = contextOf(out.out);
     assert.match(said, /not connected: the bridge needs node 22 or later, and this is node 20\.11\.1/);
     assert.doesNotMatch(said, /did not answer/);
-    // No habits for tools that are not there.
-    assert.doesNotMatch(said, /Habits:/);
+    // No routine for tools that are not there.
+    assert.ok(!said.includes(WORDS.routine));
     // Nothing was made on the way: the bridge never ran.
     assert.equal(existsSync(join(work, "oldnode", "keys", "key.pem")), false);
   });

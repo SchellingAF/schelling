@@ -26,7 +26,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { ERRORS } from "../src/db/errors.ts";
 import { OPERATIONS } from "../src/surface/operations.ts";
-import { renderPrimer, renderReference, sectionNames, tokens } from "../src/docs/render.ts";
+import { SECTION_ADDITIONS, renderPrimer, renderReference, sectionNames, tokens } from "../src/docs/render.ts";
 import { loadConfig } from "../src/config.ts";
 import {
   APPROVED,
@@ -72,7 +72,7 @@ describe("the copy under review", () => {
     const face = faceText(text);
     assert.equal(face.match(/^## \d+\. /gm)?.length, 11, "the face is not sections 1 to 11");
     const size = tokens(face);
-    assert.ok(size < 48361, `the face is ${size} tokens; it should stay readable in one sitting`);
+    assert.ok(size < 46328, `the face is ${size} tokens; it should stay readable in one sitting`);
     assert.ok(size > 4000, `the face is only ${size} tokens; something is missing from it`);
     // And it is the face the record holds, read from the same boundary.
     const recorded = readFileSync(APPROVED, "utf8");
@@ -348,6 +348,19 @@ describe("sections 12 on: everything else a reader meets", () => {
     for (const code of Object.keys(ERRORS)) assert.ok(keys.has(`refusals: \`${code}\``), `${code} has no row`);
   });
 
+  test("12: the three starts and every sentence a section of the reference took on are there, line by line", () => {
+    // Both reach a reader only through the reference, so section 12 is where they are read.
+    const section = sectionText(reviewText(), 12);
+    for (const line of read("content/starts.md").split("\n")) {
+      if (line.trim() !== "" && !line.startsWith("#")) assert.ok(section.includes(line), `the start's line is not in section 12: ${line}`);
+    }
+    for (const said of Object.values(SECTION_ADDITIONS)) {
+      for (const passage of typeof said === "string" ? [said] : Array.isArray(said) ? said : Object.values(said)) {
+        for (const line of passage.split("\n")) if (line.trim() !== "") assert.ok(section.includes(line), `the reference's added sentence is not in section 12: ${line}`);
+      }
+    }
+  });
+
   test("13: every block of llms.txt has a passage", async () => {
     const keys = new Set(passagesOf(reviewText(), 13).map((p) => p.key));
     const llms = await (await createApp(EXAMPLE_CONFIG, STUB_DB).request("/llms.txt")).text();
@@ -547,6 +560,13 @@ describe("the approval", () => {
         "Run `npm run copy -- --diff` to see them. If the new wording is right, it needs\n" +
         "approving: that is a deliberate commit, not a regenerated file.",
     );
+  });
+
+  test("npm run copy -- --diff finds nothing changed in the words against themselves", () => {
+    // It pairs passages by their bold key, so a key said twice in one section would
+    // compare the others with one of them and report differences that are not there.
+    const text = reviewText();
+    assert.deepEqual(changedPassages(text, text), []);
   });
 });
 

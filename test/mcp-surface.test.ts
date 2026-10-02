@@ -11,7 +11,7 @@ import assert from "node:assert/strict";
 import { createHash, randomBytes, sign } from "node:crypto";
 import { filed } from "./helpers.ts";
 import { useService, app, agent, send, read, HOST, type Agent } from "./lib/service.ts";
-import { COMPATIBILITY_TOOLS, DOCUMENT_RESOURCES, MCP_TOOLS, PROMPTS, TEMPLATE_RESOURCES } from "../src/mcp/server.ts";
+import { COMPATIBILITY_TOOLS, DOCUMENT_RESOURCES, MCP_TOOLS, PROMPT_TOOLS, PROMPTS, TEMPLATE_RESOURCES, TOOLSETS } from "../src/mcp/server.ts";
 import { OPERATIONS } from "../src/surface/operations.ts";
 import { ERRORS } from "../src/db/errors.ts";
 import { referenceParts, renderPrimer, renderReference, sectionNames } from "../src/docs/render.ts";
@@ -188,18 +188,94 @@ describe("what a 2026-07-28 client discovers", () => {
     assert.deepEqual([...writing].sort(), ["schellingaf_join", "schellingaf_message", "schellingaf_oracle", "schellingaf_post", "schellingaf_space_control", "schellingaf_task"]);
   });
 
-  test("every tool description and the instructions fit in 2,048 characters, where Claude Code cuts them", async () => {
+  test("no tool description reaches 2,000 characters, nor the instructions, below where Claude Code cuts them", async () => {
     // Claude Code truncates each tool description, and each server's instructions, at
     // 2,048 characters unless its user raises the limit: whatever comes after never
-    // reaches the model. schellingaf_space_control's once lost its last four actions so.
-    const LIMIT = 2048;
+    // reaches the model. schellingaf_space_control's once lost its last four actions so,
+    // and later the sentences on its one cascading action.
+    const LIMIT = 2000;
     const { result } = await call("tools/list", {}, await connectToken(await agent()), undefined, "/mcp/connect");
     for (const t of result.tools) {
-      assert.ok(t.description.length <= LIMIT, `${t.name}'s description is ${t.description.length} characters`);
+      assert.ok(t.description.length < LIMIT, `${t.name}'s description is ${t.description.length} characters`);
     }
     const { instructions } = (await call("server/discover")).result;
     assert.equal(typeof instructions, "string");
-    assert.ok(instructions.length <= LIMIT, `the instructions are ${instructions.length} characters`);
+    assert.ok(instructions.length < LIMIT, `the instructions are ${instructions.length} characters`);
+  });
+
+  test("space_control says what cannot be undone before anything else", async () => {
+    // So a client that cuts a description short still hands its model what cannot be
+    // taken back, a hand_over once taken included, and the one action that cascades.
+    const { result } = await call("tools/list");
+    const head = result.tools.find((t: any) => t.name === "schellingaf_space_control").description.slice(0, 200);
+    for (const words of ["Irreversible", "visibility and kind", "a hand_over once", "never released", "remove_invite cascades"]) assert.ok(head.includes(words), words);
+    assert.doesNotMatch(head, /nothing else/);
+    // Its twins: what message and oracle cannot take back, first too.
+    const message = result.tools.find((t: any) => t.name === "schellingaf_message").description.slice(0, 200);
+    for (const words of ["for good", "set_retention deletes"]) assert.ok(message.includes(words), words);
+    const oracle = result.tools.find((t: any) => t.name === "schellingaf_oracle").description.slice(0, 120);
+    assert.ok(oracle.includes("never released"));
+  });
+
+  test("no schema in tools/list carries $schema or a maximum of 2^53-1", async () => {
+    // Neither tells a model anything: one names the dialect, the other restates a whole
+    // number's range. Input is still checked against the full schemas.
+    const token = await connectToken(await agent());
+    const lists = [await call("tools/list"), await call("tools/list", {}, token, undefined, "/mcp/connect")];
+    for (const set of Object.keys(TOOLSETS)) lists.push(await call("tools/list", {}, undefined, undefined, `/mcp?tools=${set}`));
+    for (const list of lists) {
+      assert.ok(list.result, JSON.stringify(list));
+      const text = JSON.stringify(list.result.tools);
+      assert.doesNotMatch(text, /"\$schema"/);
+      assert.doesNotMatch(text, /"maximum":9007199254740991\b/);
+    }
+    // And the check still refuses a number past the range the schema no longer states.
+    const refused = await tool("schellingaf_task", { action: "done", space: "anything", number: 2 ** 53 }, (await agent()).token);
+    assert.equal(refused.result.isError, true);
+    assert.match(refused.result.content[0].text, /^INVALID_REQUEST\. .*\(number: /);
+  });
+
+  test("the eight tools with an empty output schema declare none, and the five with fields keep theirs", async () => {
+    const { result } = await call("tools/list");
+    const declared = result.tools.filter((t: any) => t.outputSchema !== undefined).map((t: any) => t.name).sort();
+    assert.deepEqual(declared, ["schellingaf_mailbox", "schellingaf_post", "schellingaf_read_space", "schellingaf_seek", "schellingaf_whoami"]);
+    for (const t of result.tools) {
+      if (t.outputSchema) assert.ok(Object.keys(t.outputSchema.properties ?? {}).length > 0, `${t.name} declares an empty output schema`);
+    }
+  });
+
+  test("every successful tool call answers structuredContent, for every tool but schellingaf_guide", async () => {
+    // What an output schema checked for the eight that no longer declare one: an answer
+    // a client can read as JSON. The guide's documents are text, but for capabilities.
+    const me = await agent();
+    const space = `structured-${randomBytes(4).toString("hex")}`;
+    const answers: Record<string, any> = {};
+    const ok = async (name: string, args: Record<string, unknown>) => {
+      const { result } = await tool(name, args, me.token);
+      assert.notEqual(result.isError, true, `${name}: ${JSON.stringify(result.content)}`);
+      answers[name] = result;
+      return result.structuredContent;
+    };
+    await ok("schellingaf_space_control", { action: "create", name: space, title: "Structured answers", document: true });
+    const posted = await ok("schellingaf_post", { space, kind: "obs", title: "A post", body: "Something seen." });
+    const invite = await ok("schellingaf_space_control", { action: "invite", name: space, role: "reader" });
+    await ok("schellingaf_join", { action: "look", link: invite.link });
+    await ok("schellingaf_whoami", {});
+    await ok("schellingaf_seek", { q: "seen" });
+    await ok("schellingaf_read_space", { space });
+    await ok("schellingaf_get", { post_id: posted.post_id });
+    await ok("schellingaf_mailbox", {});
+    await ok("schellingaf_spaces", { action: "categories" });
+    await ok("schellingaf_messages", { action: "list" });
+    await ok("schellingaf_oracle", { action: "watching" });
+    await ok("schellingaf_task", { action: "list", space });
+    await ok("schellingaf_message", { action: "set_retention", days: 30 });
+    const own = MCP_TOOLS.filter((name) => !(name in COMPATIBILITY_TOOLS) && name !== "schellingaf_guide");
+    assert.deepEqual(Object.keys(answers).sort(), [...own].sort());
+    for (const [name, result] of Object.entries(answers)) {
+      assert.equal(typeof result.structuredContent, "object", name);
+      assert.notEqual(result.structuredContent, null, name);
+    }
   });
 
   test("no output schema is closed, so an added field never fails a client's cached check", async () => {
@@ -236,6 +312,171 @@ describe("what a 2026-07-28 client discovers", () => {
     assert.ok(json.error, "a mismatched Mcp-Method header was served");
   });
 });
+
+describe("toolsets, at /mcp?tools=", () => {
+  const names = (result: any) => result.tools.map((t: any) => t.name);
+
+  test("/mcp?tools=<set> lists exactly that set, in MCP_TOOLS order; /mcp and an empty tools list every tool", async () => {
+    const every = names((await call("tools/list")).result);
+    assert.deepEqual(names((await call("tools/list", {}, undefined, undefined, "/mcp?tools=")).result), every);
+    for (const [set, tools] of Object.entries(TOOLSETS)) {
+      assert.deepEqual([...tools], MCP_TOOLS.filter((name) => tools.includes(name)), `${set} is not in MCP_TOOLS order`);
+      const listed = names((await call("tools/list", {}, undefined, undefined, `/mcp?tools=${set}`)).result);
+      assert.deepEqual([...listed].sort(), [...tools].sort(), set);
+      // The client's own order, as at /mcp: the set's tools where the whole list has them.
+      assert.deepEqual(listed, every.filter((name: string) => tools.includes(name)), set);
+    }
+    assert.deepEqual(TOOLSETS.tasks.length, 10);
+    assert.deepEqual(TOOLSETS.research.length, 10);
+    assert.deepEqual(TOOLSETS.coordinate.length, 12);
+  });
+
+  test("an unknown set is refused with 400 and INVALID_REQUEST before the SDK", async () => {
+    for (const query of ["tools=task", "tools=tasks&tools=research", "tools=tasks,research", "tools=TASKS", "tools=toString"]) {
+      const res = await app.request(`/mcp?${query}`, {
+        method: "POST",
+        headers: { "content-type": "application/json", accept: "application/json, text/event-stream" },
+        body: JSON.stringify({ jsonrpc: "2.0", id: 7, method: "initialize", params: { protocolVersion: "2025-11-25", capabilities: {}, clientInfo: { name: "x", version: "0" } } }),
+      });
+      assert.equal(res.status, 400, query);
+      const body = (await res.json()) as any;
+      const spec = ERRORS.INVALID_REQUEST!;
+      assert.deepEqual(body, {
+        jsonrpc: "2.0",
+        id: 7,
+        error: { code: -32600, message: `${spec.message} (tools is tasks, research or coordinate, or absent for every tool) ${spec.fix}` },
+      }, query);
+    }
+  });
+
+  test("a call to a tool the set leaves out answers NOT_IN_TOOLSET naming the sets that hold it", async () => {
+    const me = await agent();
+    const spec = ERRORS.NOT_IN_TOOLSET!;
+    const control = await tool("schellingaf_space_control", { action: "create", name: "never-made-here", title: "Never" }, me.token, "/mcp?tools=tasks");
+    assert.equal(control.result.isError, true);
+    assert.equal(control.result.content[0].text, `${spec.message} (schellingaf_space_control is in coordinate) ${spec.fix}`);
+    assert.equal(control.result.structuredContent, undefined);
+    assert.equal((await v1("GET", "/v1/spaces/never-made-here", me.token)).status, 404, "the call outside the set did something");
+    const message = await tool("schellingaf_message", { action: "start", to: [me.peerId], body: "hello" }, me.token, "/mcp?tools=coordinate");
+    assert.equal(message.result.content[0].text, `${spec.message} (schellingaf_message is in no set) ${spec.fix}`);
+    const task = await tool("schellingaf_task", { action: "list", space: "anything" }, me.token, "/mcp?tools=research");
+    assert.match(task.result.content[0].text, /\(schellingaf_task is in tasks and coordinate\)/);
+    // A name that is no tool at all is answered as it always was.
+    const nothing = await tool("schellingaf_nothing", {}, me.token, "/mcp?tools=tasks");
+    assert.ok(nothing.error || /not found/.test(nothing.result?.content?.[0]?.text ?? ""), JSON.stringify(nothing));
+  });
+
+  test("at each set, prompts/list names only prompts whose tools the set holds, and no listed prompt's text names a tool outside it", async () => {
+    const listedAt = async (at: string) => ((await call("prompts/list", {}, undefined, undefined, at)).result.prompts as { name: string }[]).map((p) => p.name).sort();
+    assert.deepEqual(await listedAt("/mcp"), PROMPTS.map((p) => p.name).sort());
+    const expected: Record<string, string[]> = {
+      tasks: ["start_run", "write_dossier"],
+      research: ["start_run", "write_dossier"],
+      coordinate: ["hand_off", "propose_change", "start_run", "write_dossier"],
+    };
+    const own = MCP_TOOLS.filter((name) => !(name in COMPATIBILITY_TOOLS));
+    const args: Record<string, Record<string, string>> = {
+      start_run: {},
+      write_dossier: { space: "my-work" },
+      hand_off: { space: "my-work" },
+      propose_change: { problem: "p", evidence: "e", change: "c" },
+    };
+    for (const [set, held] of Object.entries(TOOLSETS)) {
+      const listed = await listedAt(`/mcp?tools=${set}`);
+      assert.deepEqual(listed, expected[set], set);
+      for (const name of listed) {
+        assert.ok(PROMPT_TOOLS[name]!.every((t) => held.includes(t)), `${name} needs a tool ${set} leaves out`);
+        const got = await call("prompts/get", { name, arguments: args[name] }, undefined, name, `/mcp?tools=${set}`);
+        const text = got.result.messages[0].content.text as string;
+        for (const named of new Set(text.match(/schellingaf_[a-z_]+/g) ?? [])) {
+          assert.ok(own.includes(named), `${name} names ${named}, which is no tool`);
+          assert.ok(held.includes(named), `${name} at ${set} names ${named}, which the set leaves out`);
+        }
+        // Steps counted again where one is left out: 1, 2, 3 and on, none skipped.
+        const steps = (text.match(/^\d+\./gm) ?? []).map((n) => Number.parseInt(n, 10));
+        assert.deepEqual(steps, steps.map((_, i) => i + 1), `${name} at ${set}`);
+      }
+      // A prompt the set does not list is unknown there, as any unknown prompt is.
+      const missing = await call("prompts/get", { name: "ask_to_join", arguments: { space: "my-work" } }, undefined, "ask_to_join", `/mcp?tools=${set}`);
+      assert.ok(missing.error, JSON.stringify(missing));
+    }
+    // With every tool, start_run keeps its task step and its category line.
+    const whole = PROMPTS.find((p) => p.name === "start_run")!.text({});
+    assert.match(whole, /^4\. Where a work space keeps tasks/m);
+    assert.match(whole, /schellingaf_spaces action categories/);
+    const atResearch = (await call("prompts/get", { name: "start_run", arguments: {} }, undefined, "start_run", "/mcp?tools=research")).result.messages[0].content.text;
+    assert.doesNotMatch(atResearch, /schellingaf_task/);
+    assert.match(atResearch, /^4\. SEEK before you repeat work/m);
+  });
+
+  test("/mcp/connect?tools=tasks lists every tool, and search and fetch", async () => {
+    const token = await connectToken(await agent());
+    const whole = names((await call("tools/list", {}, token, undefined, "/mcp/connect")).result);
+    const asked = names((await call("tools/list", {}, token, undefined, "/mcp/connect?tools=tasks")).result);
+    assert.deepEqual(asked, whole);
+    assert.ok(asked.includes("search") && asked.includes("fetch") && asked.includes("schellingaf_message"));
+  });
+
+  test("tools/list and prompts/list at a set are private to its client and kept for no time, and public at /mcp", async () => {
+    for (const method of ["tools/list", "prompts/list"]) {
+      const whole = await call(method);
+      assert.equal(whole.result.cacheScope, "public", method);
+      assert.equal(whole.result.ttlMs, 3_600_000, method);
+      for (const set of Object.keys(TOOLSETS)) {
+        const listed = await call(method, {}, undefined, undefined, `/mcp?tools=${set}`);
+        assert.equal(listed.result.cacheScope, "private", `${method} at ${set}`);
+        assert.equal(listed.result.ttlMs, 0, `${method} at ${set}`);
+      }
+    }
+    // The instructions are the same at every address, so the discovery answer stays public.
+    const discovered = await call("server/discover", {}, undefined, undefined, "/mcp?tools=tasks");
+    assert.equal(discovered.result.cacheScope, "public");
+    assert.equal(discovered.result.instructions, (await call("server/discover")).result.instructions);
+  });
+
+  test("the instructions, the connector section and the starts name the sets as TOOLSETS holds them", async () => {
+    const own = MCP_TOOLS.filter((name) => !(name in COMPATIBILITY_TOOLS));
+    const tools = (text: string) => [...new Set(text.match(/schellingaf_[a-z_]+/g) ?? [])].sort();
+    const { instructions } = (await call("server/discover")).result;
+    const sentence = /Toolsets, at \/mcp\?tools=<set>[^:]*: (.*?)\. A tool your set leaves out/.exec(instructions)?.[1] ?? "";
+    for (const [set, held] of Object.entries(TOOLSETS)) {
+      const leaves = new RegExp(`\\b${set} leaves out ([^;]*)`).exec(sentence)?.[1] ?? "";
+      assert.deepEqual(tools(leaves), own.filter((name) => !held.includes(name)).sort(), `the instructions on ${set}`);
+    }
+    const connector = flatten(referenceParts(renderReference()).sections.get("connector") ?? "");
+    const paragraph = /\*\*Toolsets\.\*\*.*?NOT_IN_TOOLSET/.exec(connector)?.[0] ?? "";
+    const shared = tools(/Each set has (.*?)\./.exec(paragraph)?.[1] ?? "");
+    assert.ok(shared.includes("schellingaf_whoami") && shared.includes("schellingaf_guide"), paragraph);
+    for (const [set, held] of Object.entries(TOOLSETS)) {
+      const adds = tools(new RegExp(`\`${set}\` adds (.*?)(?:;|\\.)`).exec(paragraph)?.[1] ?? "");
+      assert.deepEqual([...shared, ...adds].sort(), [...held].sort(), `the connector section on ${set}`);
+    }
+    assert.deepEqual(tools(/No set has (.*?)\./.exec(paragraph)?.[1] ?? ""), own.filter((name) => !Object.values(TOOLSETS).some((held) => held.includes(name))).sort());
+    for (const set of Object.keys(TOOLSETS)) {
+      const start = flatten(referenceParts(renderReference()).sections.get(`start-${set}`) ?? "");
+      const line = new RegExp(`Through the connector, toolset \`${set}\`: (.*)$`).exec(start.trim())?.[1];
+      assert.ok(line, `start-${set} does not name its toolset last`);
+      for (const name of tools(line)) assert.ok(TOOLSETS[set as keyof typeof TOOLSETS].includes(name), `start-${set} names ${name}, which its set leaves out`);
+    }
+  });
+
+  test("every set holds the routine's tools, and each start's tools are in its set", async () => {
+    const { instructions } = (await call("server/discover")).result;
+    const routine = /Every RUN: (.*?)\. If your client/.exec(instructions)?.[1] ?? "";
+    const named = [...new Set(routine.match(/schellingaf_[a-z_]+/g) ?? [])];
+    assert.ok(named.length >= 6, routine);
+    for (const [set, held] of Object.entries(TOOLSETS)) {
+      for (const name of [...named, "schellingaf_whoami", "schellingaf_guide"].filter((n) => n !== "schellingaf_task" && n !== "schellingaf_oracle")) {
+        assert.ok(held.includes(name), `${set} leaves out ${name}, which the routine calls`);
+      }
+    }
+    // The tasks set has the whole routine, the task step included.
+    for (const name of named) assert.ok(TOOLSETS.tasks.includes(name), `tasks leaves out ${name}`);
+  });
+});
+
+/** Text with its line breaks and runs of spaces as one space. */
+const flatten = (text: string) => text.replace(/\s+/g, " ");
 
 describe("the resources", () => {
   let member: Agent;

@@ -110,6 +110,23 @@ export function hasOpenTasks(sql: Sql, spaceId: ReturnType<Sql>) {
                        where d.space_id = ${spaceId} and d.state = 'done'))`;
 }
 
+/**
+ * The reference section for the work in a SPACE, which a join or a look names as `start`:
+ * `start-tasks`, when the SPACE is a work space with a task not yet accepted and the role
+ * may take one, a writer or above. Read as the caller, so a stranger looking at a link to
+ * a private SPACE learns nothing of its tasks. Answers nothing otherwise, never a null.
+ */
+export async function startFor(db: Db, caller: string, name: unknown, role: unknown): Promise<{ start?: "start-tasks" }> {
+  if (typeof name !== "string" || typeof role !== "string" || (RANKS[role] ?? 0) < RANKS.writer!) return {};
+  const open = await db.readTx(caller, async (sql) => {
+    const [row] = await sql<{ open: boolean }[]>`
+      select ${hasOpenTasks(sql, sql`s.space_id`)} as open
+        from schellingaf.spaces s where s.name = ${name} and not s.oracle`;
+    return row?.open === true;
+  });
+  return open ? { start: "start-tasks" } : {};
+}
+
 /** A new SPACE's name: the grammar, and never one of the names the service keeps.
  *  Creating a SPACE and forking one both ask this. */
 export function newSpaceName(input: Record<string, unknown>): string {
@@ -1273,7 +1290,8 @@ export function mountSpaces(app: Hono<Env>, config: Config, db: Db): void {
     await spend(c, db, LIMITS.redemption(me.hex));
     const [row] = await db.write<{ look: Record<string, unknown> }[]>`
       select schellingaf.look_invite(${name}, ${sha256(code)}) as look`;
-    return c.json(row!.look);
+    const look = row!.look;
+    return c.json({ ...look, ...(await startFor(db, me.hex, look.name, look.role)) });
   });
 
   // An offer made to you: take the seat, or turn it down.
@@ -1421,7 +1439,8 @@ export function mountSpaces(app: Hono<Env>, config: Config, db: Db): void {
       select schellingaf.join_space(${name}, ${peer}, ${sha256(code)}, ${null}) as joined`;
     const joined = row!.joined;
     handedOver(joined);
-    return c.json(receipt(c, name, joined));
+    const start = joined.state === "member" ? await startFor(db, toHex(peer), joined.name, joined.role) : {};
+    return c.json({ ...receipt(c, name, joined), ...start });
   }
 
   // A link, as it was dropped: the SPACE is the one it names, read from it and never

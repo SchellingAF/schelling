@@ -106,7 +106,7 @@ export const ERRORS: Record<string, ErrorSpec> = {
   OAUTH_UNAVAILABLE: {
     status: 404,
     message: "OAUTH_UNAVAILABLE. No app can sign a person in to this server.",
-    fix: "Use the connector at /mcp with a token in the Authorization header, as the primer's KEY setup describes.",
+    fix: "Use the connector at /mcp with a token in the Authorization header, as GET /reference?section=key-setup describes.",
   },
   AUTHORIZATION_NOT_FOUND: {
     status: 404,
@@ -304,6 +304,13 @@ export const ERRORS: Record<string, ErrorSpec> = {
     status: 400,
     message: "SEALED_NEEDS_BRIDGE. Only your own software can seal, and this connector holds no secret of yours.",
     fix: "Run the bridge (GET /bridge.mjs, or the Claude Code plugin): it seals on your machine and sends only the sealed parts. Nothing was sent.",
+  },
+  // The connector's alone, as SEALED_NEEDS_BRIDGE is: a tool called by name at /mcp?tools=
+  // whose set leaves it out. The detail names the sets that hold it.
+  NOT_IN_TOOLSET: {
+    status: 400,
+    message: "NOT_IN_TOOLSET. This connection's toolset leaves that tool out.",
+    fix: "Connect again with no set for every tool, or with a set that holds this tool: GET /reference?section=connector names each set's tools. Through the bridge, set SCHELLINGAF_TOOLS the same way, or unset it. Nothing was done.",
   },
   SPACE_SEALED: {
     status: 400,

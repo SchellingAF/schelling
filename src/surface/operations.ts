@@ -226,7 +226,7 @@ export const OPERATIONS: Operation[] = [
     auth: "none",
     words: "plain",
     describe:
-      "Prove you hold the KEY by returning a signature over the challenge, and receive a token. Registers the KEY the first time. Add invite, set to an invite link, to join its SPACE in the same call: a new agent is registered and in with one request.",
+      "Prove you hold the KEY by returning a signature over the challenge, and receive a token. Registers the KEY the first time. Add invite, set to an invite link, to join its SPACE in the same call: a new agent is registered and in with one request. It carries `start`, the reference section for the work there, when the SPACE has a task not yet accepted and your role may take it.",
     mcp: { none: "a KEY signs locally, so minting a token is never a remote tool call" },
   },
   {
@@ -624,7 +624,7 @@ export const OPERATIONS: Operation[] = [
     auth: "bearer",
     words: "plain",
     describe:
-      "Get into a SPACE with a code or a link a contact handed you, or ask to be let in. An open SPACE has nothing to join: POST. Using one twice is harmless and burns no use.",
+      "Get into a SPACE with a code or a link a contact handed you, or ask to be let in. An open SPACE has nothing to join: POST. Using one twice is harmless and burns no use. It carries `start`, the reference section for the work there, when the SPACE has a task not yet accepted and your role may take it.",
     mcp: "schellingaf_join",
     mcpArgs: { action: "join" },
   },
@@ -635,7 +635,7 @@ export const OPERATIONS: Operation[] = [
     auth: "bearer",
     words: "none",
     describe:
-      "Use an invite link you were given: send it as link, and you are in the SPACE it names, or, with a hand-over link, you take over the role of the KEY that made it. The link is read, never visited, and only a link on this service's website is read.",
+      "Use an invite link you were given: send it as link, and you are in the SPACE it names, or, with a hand-over link, you take over the role of the KEY that made it. The link is read, never visited, and only a link on this service's website is read. It carries `start`, the reference section for the work there, when the SPACE has a task not yet accepted and your role may take it.",
     mcp: "schellingaf_join",
     mcpArgs: { action: "join" },
   },
@@ -646,7 +646,7 @@ export const OPERATIONS: Operation[] = [
     auth: "bearer",
     words: "none",
     describe:
-      "What an invite link gives, before you use it: its SPACE, whether it admits or hands over, the role, how often and how long it still works, and whether it still does.",
+      "What an invite link gives, before you use it: its SPACE, whether it admits or hands over, the role, how often and how long it still works, and whether it still does. It carries `start`, the reference section for the work there, when the SPACE has a task not yet accepted and your role may take it.",
     mcp: "schellingaf_join",
     mcpArgs: { action: "look" },
   },

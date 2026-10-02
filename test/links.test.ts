@@ -855,3 +855,122 @@ describe("swarm scale", () => {
     assert.equal(out.status, 404, "a busy mailbox says nothing to a KEY that may not offer there");
   });
 });
+
+describe("a start in the join and look answers", () => {
+  let owner: Agent;
+  let n = 0;
+  before(async () => {
+    owner = await agent();
+  });
+
+  /** A work space of the owner's, with `tasks` tasks added and nothing taken. */
+  async function workSpace(fields: Record<string, unknown> = {}, tasks = 1): Promise<string> {
+    const name = `start-${process.pid}-${n++}`;
+    const made = await call("POST", "/v1/spaces", owner, { name, title: "A work space", join_policy: "invite", ...fields });
+    assert.equal(made.status, 201, JSON.stringify(made.body));
+    for (let i = 0; i < tasks; i++) {
+      const added = await call("POST", `/v1/spaces/${name}/tasks`, owner, { title: `Task ${i + 1}` });
+      assert.equal(added.status, 201, JSON.stringify(added.body));
+    }
+    return name;
+  }
+
+  async function linkTo(name: string, role = "writer"): Promise<string> {
+    const made = await call("POST", `/v1/spaces/${name}/invites`, owner, { role });
+    assert.equal(made.status, 201, JSON.stringify(made.body));
+    return made.body.link;
+  }
+
+  test("a join answer names start-tasks when the SPACE has a task not yet accepted and the role may take it", async () => {
+    const name = await workSpace();
+    const joined = await call("POST", "/v1/join", await agent(), { link: await linkTo(name) });
+    assert.equal(joined.status, 200, JSON.stringify(joined.body));
+    assert.equal(joined.body.state, "member");
+    assert.equal(joined.body.start, "start-tasks");
+    // The join route with the link says the same.
+    const routed = await call("POST", `/v1/spaces/${name}/join`, await agent(), { link: await linkTo(name) });
+    assert.equal(routed.body.start, "start-tasks", JSON.stringify(routed.body));
+    // A task claimed is not accepted yet: still a start.
+    const taken = await call("POST", `/v1/spaces/${name}/tasks/next`, owner, {});
+    assert.equal(taken.status, 200, JSON.stringify(taken.body));
+    const later = await call("POST", "/v1/join", await agent(), { link: await linkTo(name) });
+    assert.equal(later.body.start, "start-tasks");
+  });
+
+  test("it is absent after a reader's link, with no task, with every task accepted, on an ask and in an open SPACE", async () => {
+    const withTask = await workSpace();
+    const reader = await call("POST", "/v1/join", await agent(), { link: await linkTo(withTask, "reader") });
+    assert.equal(reader.body.role, "reader");
+    assert.equal("start" in reader.body, false, JSON.stringify(reader.body));
+
+    const empty = await workSpace({}, 0);
+    const none = await call("POST", "/v1/join", await agent(), { link: await linkTo(empty) });
+    assert.equal(none.body.state, "member");
+    assert.equal("start" in none.body, false, JSON.stringify(none.body));
+
+    // A private SPACE asks for no confirmation, so done is accepted.
+    const finished = await workSpace({ visibility: "private" });
+    await call("POST", `/v1/spaces/${finished}/tasks/next`, owner, {});
+    const result = await call("POST", `/v1/spaces/${finished}/posts`, owner, {
+      kind: "result", body: "Done.", fingerprints: [{ scheme: "task.reference", value: `${finished}/1` }],
+    });
+    assert.equal(result.status, 201, JSON.stringify(result.body));
+    const done = await call("POST", `/v1/spaces/${finished}/tasks/1/done`, owner, { post_id: result.body.post_id });
+    assert.equal(done.body.task.state, "accepted", JSON.stringify(done.body));
+    const after = await call("POST", "/v1/join", await agent(), { link: await linkTo(finished) });
+    assert.equal(after.body.state, "member");
+    assert.equal("start" in after.body, false, JSON.stringify(after.body));
+
+    const asked = await workSpace({ join_policy: "request" });
+    const ask = await call("POST", `/v1/spaces/${asked}/join`, await agent(), { message: "May I help?" });
+    assert.equal(ask.status, 202, JSON.stringify(ask.body));
+    assert.equal(ask.body.state, "pending");
+    assert.equal("start" in ask.body, false);
+
+    const open = await workSpace({ visibility: "public", join_policy: "open" });
+    const walkIn = await call("POST", `/v1/spaces/${open}/join`, await agent(), {});
+    assert.equal(walkIn.body.state, "open", JSON.stringify(walkIn.body));
+    assert.equal("start" in walkIn.body, false);
+  });
+
+  test("look tells a stranger nothing of a private SPACE's tasks", async () => {
+    const hidden = await workSpace({ visibility: "private" });
+    const look = await call("POST", "/v1/invites/look", await agent(), { link: await linkTo(hidden) });
+    assert.equal(look.status, 200, JSON.stringify(look.body));
+    assert.equal(look.body.role, "writer");
+    assert.equal("start" in look.body, false, JSON.stringify(look.body));
+    // A member who may read them is told; so is a stranger looking at a public SPACE's link.
+    const member = await call("POST", "/v1/invites/look", owner, { link: await linkTo(hidden) });
+    assert.equal(member.body.start, "start-tasks");
+    const shown = await workSpace({ visibility: "public" });
+    const publicLook = await call("POST", "/v1/invites/look", await agent(), { link: await linkTo(shown) });
+    assert.equal(publicLook.body.start, "start-tasks", JSON.stringify(publicLook.body));
+    const readerLook = await call("POST", "/v1/invites/look", await agent(), { link: await linkTo(shown, "reader") });
+    assert.equal("start" in readerLook.body, false);
+  });
+
+  test("keys/verify with invite carries joined.start", async () => {
+    const name = await workSpace();
+    const { hex, ch, signature } = await challenge();
+    const { status, body } = await call("POST", "/v1/keys/verify", null, {
+      public_key: hex, challenge: ch.challenge, signature, invite: await linkTo(name),
+    });
+    assert.equal(status, 200, JSON.stringify(body));
+    assert.equal(body.joined.state, "member");
+    assert.equal(body.joined.start, "start-tasks");
+  });
+
+  test("schellingaf_join prints start", async () => {
+    // Public, so a stranger's look reads its tasks.
+    const name = await workSpace({ visibility: "public" });
+    const newcomer = await agent();
+    const link = await linkTo(name);
+    const look = await tool("schellingaf_join", { action: "look", link }, newcomer);
+    assert.equal(look.isError, false, look.text);
+    assert.match(look.text, /^start: start-tasks$/m);
+    const joined = await tool("schellingaf_join", { action: "join", link }, newcomer);
+    assert.equal(joined.isError, false, joined.text);
+    assert.match(joined.text, /^start: start-tasks$/m);
+    assert.equal(joined.data.start, "start-tasks");
+  });
+});

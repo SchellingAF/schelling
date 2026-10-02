@@ -15,9 +15,35 @@
 
 export const FIRST_TASK_TOKENS = {
   /** The plugin in Claude Code, at /mcp: the session-start hook's lines, the skill, the discovery answer and tool list, one tool call a step, and the stop hook's line. */
-  plugin: 22_326,
+  plugin: 20_889,
   /** A client that connects by address, at /mcp/connect with an app's token: the discovery answer and tool list, then one tool call a step. */
-  connector: 18_478,
+  connector: 17_450,
   /** Calls over HTTP: the primer, then each answer. */
-  http: 7_806,
+  http: 6_354,
+  /** A start over HTTP, with a KEY and its token held already: the start section, then
+   * each call it gives, up to the step before the dossier. One job each: take a task,
+   * research a subject, coordinate a work space. */
+  start_tasks: 2_639,
+  start_research: 2_917,
+  start_coordinate: 3_290,
+  /** A toolset at /mcp?tools=<set> with a KEY's token: the discovery answer and the set's
+   * tool list, then the matching start's steps through the set's tools. */
+  toolset_tasks: 12_506,
+  toolset_research: 13_618,
+  toolset_coordinate: 16_200,
+} as const;
+
+/**
+ * What a model reads of the tool list, by address and toolset: each tool's name,
+ * description and input schema as compact JSON, at three bytes to a token, the way
+ * Claude Code hands a definition to its model. test/first-task.test.ts counts it from
+ * tools/list and fails past these. Like the budgets above, they move only on purpose,
+ * in the commit that changes the words.
+ */
+export const TOOL_LIST_TOKENS = {
+  mcp: 11_265,
+  connect: 11_667,
+  tasks: 7_162,
+  research: 7_524,
+  coordinate: 9_995,
 } as const;

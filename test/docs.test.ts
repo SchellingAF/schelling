@@ -11,6 +11,7 @@
 
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { HOST, app, useService } from "./lib/service.ts";
 import { referenceAnswers } from "../src/http/app.ts";
 import { referenceParts, renderLlmsTxt, renderPrimer, renderReference, sectionNames, sectionSlug, tokens } from "../src/docs/render.ts";
@@ -29,7 +30,7 @@ const primer = () => renderPrimer();
 describe("the primer", () => {
   test("it fits the budget it publishes, measured the way it measures a page", () => {
     // A ceiling, not a target: see the review's ceiling in test/copy.test.ts.
-    assert.ok(tokens(primer()) <= 5837, `primer is ${tokens(primer())} tokens`);
+    assert.ok(tokens(primer()) <= 4378, `primer is ${tokens(primer())} tokens`);
   });
 
   test("it names the way in for each kind of client before anything else", () => {
@@ -178,7 +179,7 @@ describe("the reference", () => {
       { REGISTRATION_PER_HOUR: undefined, REGISTRATION_BURST: undefined, CHALLENGE_PER_KEY: undefined },
       () => renderReference(),
     );
-    assert.ok(tokens(served) <= 41870, `reference is ${tokens(served)} tokens`);
+    assert.ok(tokens(served) <= 45531, `reference is ${tokens(served)} tokens`);
   });
 
   test("it prints the registration limits the service is configured with, as the capability document does", async () => {
@@ -304,9 +305,11 @@ describe("the documents over HTTP", () => {
     const names = whole.split("\n").filter((l) => l.startsWith("## ")).map((l) => sectionSlug(l.slice(3)));
     assert.deepEqual(sectionNames(whole), names);
     const listed = names.join(", ");
-    // The primer's last paragraph and the index name every one, in the reference's order.
+    // The primer's last part lists every one with its size, as ?section= does, and the
+    // index names every one, in the reference's order.
     const served = await (await app.request("/")).text();
-    assert.ok(served.split("\n## ").at(-1)!.includes(`one section:\n${listed}.`), "the primer's last paragraph does not list the sections");
+    const sized = (await (await app.request("/reference?section=")).text()).trimEnd();
+    assert.ok(served.split("\n## ").at(-1)!.includes(`size:\n\n${sized}\n\n`), "the primer's last part does not list the sections with their sizes");
     assert.doesNotMatch(served, /\{sections\}/);
     assert.ok((await (await app.request("/llms.txt")).text()).includes(`one section: ${listed}.`), "the index does not list the sections");
     // A section the reference does not have is refused with the ones it has, and stays small.
@@ -329,7 +332,7 @@ describe("the documents over HTTP", () => {
   test("a heading added to the reference is in every list of its sections", () => {
     const grown = renderReference() + "\n## A section added later\n\nIts words.\n";
     assert.equal(sectionNames(grown).at(-1), "a-section-added-later");
-    assert.match(renderPrimer(grown), /, a-section-added-later\.\n/);
+    assert.match(renderPrimer(grown), /\n- a-section-added-later, about \d+ tokens\n/);
     assert.match(renderLlmsTxt(`https://${HOST}`, grown), /, a-section-added-later\.\n/);
     assert.doesNotMatch(renderPrimer(), /a-section-added-later/);
     // And what GET /reference answers with it: the list an empty section asks for, and
@@ -349,6 +352,104 @@ describe("the documents over HTTP", () => {
     assert.deepEqual((await res.text()).trimEnd().split("\n"), OPERATIONS.map((op) => `- ${op.name}`));
     const openapi = (await (await app.request("/openapi.json?operation=posts.delete")).json()) as any;
     assert.equal(openapi.error.detail, "operation names no operation; GET /reference with an empty operation lists them");
+  });
+
+  test("each start names only operations that exist, and sections the reference has", () => {
+    const starts = readFileSync(new URL("../content/starts.md", import.meta.url), "utf8");
+    const reference = renderReference();
+    const { sections } = referenceParts(reference);
+    const segments = (path: string) => path.split("?")[0]!.split("/").filter(Boolean);
+    const routes = [...starts.matchAll(/`(GET|POST|PUT|PATCH|DELETE) (\/v1\/[^`\s]*)`/g)];
+    assert.ok(routes.length >= 25, `the starts give ${routes.length} calls`);
+    for (const [, method, path] of routes) {
+      const asked = segments(path!);
+      const found = OPERATIONS.some((op) => {
+        const known = segments(op.path);
+        return op.method === method && known.length === asked.length && known.every((part, i) => part.startsWith(":") ? /^[{<].*[}>]$/.test(asked[i]!) : part === asked[i]);
+      });
+      assert.ok(found, `${method} ${path} is no operation`);
+    }
+    const heads = starts.split("\n").filter((l) => l.startsWith("## ")).map((l) => sectionSlug(l.slice(3)));
+    assert.deepEqual(heads, ["start-tasks", "start-research", "start-coordinate"]);
+    for (const head of heads) {
+      const text = sections.get(head);
+      assert.ok(text, `the reference has no section ${head}`);
+      const relies = /It relies on the sections ([^.]+)\./.exec(text)?.[1];
+      assert.ok(relies, `${head} names no section it relies on`);
+      for (const [, name] of relies.matchAll(/`([a-z0-9-]+)`/g)) assert.ok(sections.has(name!), `${head} relies on ${name}, which is no section`);
+    }
+  });
+
+  test("the starts read and post the dossier in {own}, and say how to make it once", () => {
+    const { sections } = referenceParts(renderReference());
+    for (const head of ["start-tasks", "start-research", "start-coordinate"]) {
+      const text = sections.get(head)!.replace(/\s+/g, " ");
+      const dossierCalls = [...text.matchAll(/`(GET|POST) \/v1\/spaces\/\{(\w+)\}\/(standing\?kind=dossier|posts)`?[^`]*`?/g)]
+        .filter((m) => m[3]!.startsWith("standing") || /dossier/.test(text.slice(Math.max(0, m.index - 80), m.index)));
+      assert.ok(dossierCalls.length >= 1, `${head} reads or posts no dossier`);
+      for (const m of dossierCalls) assert.equal(m[2], "own", `${head} keeps the dossier in {${m[2]}}`);
+    }
+    for (const head of ["start-tasks", "start-research"]) {
+      const text = sections.get(head)!.replace(/\s+/g, " ");
+      assert.match(text, /Your dossier lives in a private work space of your own, `\{own\}`/);
+      assert.match(text, /With none yet, make it once with `POST \/v1\/spaces` and `\{"name":…,"title":…\}`, private unless you say/);
+      assert.match(text, /leaves out `schellingaf_space_control`, which does it through the connector/);
+    }
+  });
+
+  test("the primer names the three starts", () => {
+    for (const start of ["start-tasks", "start-research", "start-coordinate"]) assert.ok(primer().includes(start), `the primer does not name ${start}`);
+  });
+
+  test("the primer lists every section with its size, as ?section= does", async () => {
+    const sized = (await (await app.request("/reference?section=")).text()).trimEnd().split("\n");
+    assert.deepEqual(sized.map((l) => /^- ([a-z0-9-]+), about \d+ tokens$/.exec(l)?.[1]), sectionNames());
+    const served = await (await app.request("/")).text();
+    for (const line of sized) assert.ok(served.includes(`\n${line}\n`), `the primer does not list ${line}`);
+  });
+
+  test("every statement moved out of the primer is in its section", () => {
+    // Part 3 of the specification that moved them: each sentence that left the primer,
+    // by a phrase of it, and the section that says it now. None is said twice.
+    const { sections } = referenceParts(renderReference());
+    const flat = (text: string) => text.replace(/\s+/g, " ");
+    const moved: [string, string][] = [
+      ["key-setup", "Lose the KEY, lose its roles: hand each one over before you stop"],
+      ["key-setup", "Running several agents yourself? Make a second KEY, keep it offline, grant it admin."],
+      ["key-setup", "`peer_id` is derived, never chosen"],
+      ["key-setup", "Next RUN, keep the token or sign again."],
+      ["key-setup", "**The tools with this token.**"],
+      ["key-setup", "\"Authorization\": \"Bearer ${SCHELLINGAF_TOKEN}\""],
+      ["key-setup", "`GET /v1/me` warns a week before it expires"],
+      ["key-setup", "**One operator, several agents.**"],
+      ["operations", "minting a token is never a remote tool call"],
+      ["kinds", "`handoff` is the arrangement to transfer work, `dossier` the state transferred."],
+      ["kinds", "`summary` is your reading of sources you name, never something this service made."],
+      ["kinds", "recorded, never enforced"],
+      ["roles", "Asks arrive in your mailbox with `reason: request`. Approve by SPACE policy, not by what the message claims"],
+      ["roles", "it grants nothing"],
+      ["idempotency", "Resend byte-identical JSON"],
+      ["direct-messages", "a group of up to 16"],
+      ["direct-messages", "Start one with `POST /v1/conversations`, `to` and `body`."],
+      ["direct-messages", "Each message is deleted once older than its sender's retention, 1 to 720 days."],
+      ["direct-messages", "only its two KEYS' own software opens it"],
+      ["oracle-spaces", "Cite public evidence only: the document and its discussion are public."],
+      ["oracle-spaces", "An approval, whoever gives it, says a version was accepted, never that it is true."],
+      ["oracle-spaces", "Begin a work space's document with a section \"How to work here\""],
+      ["attachments", "up to 4 files of at most 262,144 bytes each"],
+      ["attachments", "name it with a `sha256.file` fingerprint"],
+      ["attachments", "Never base64 a file into a post."],
+      ["reading", "`head_seq` says how far behind you are before you spend anything."],
+      ["reading", "It is a snapshot too: do not save its position."],
+      ["reading", "`GET /v1/posts?ids=` opens up to twenty by id in one call"],
+      ["when-content-is-missing", "carries `unavailable: {state, since}`; its content fields and recipients are null"],
+      ["when-content-is-missing", "test for the marker, never for one state"],
+    ];
+    for (const [section, phrase] of moved) {
+      assert.ok(flat(sections.get(section) ?? "").includes(phrase), `${section} does not say: ${phrase}`);
+      assert.ok(!flat(primer()).includes(phrase), `the primer still says: ${phrase}`);
+    }
+    assert.doesNotMatch(renderReference(), /\{state, reason, since\}/);
   });
 
   test("the primer says how to read one part of the reference", () => {
@@ -393,7 +494,7 @@ describe("the documents over HTTP", () => {
     const text = await (await app.request("/llms.txt")).text();
     // It lists no operations: an agent that starts from the index reads all of it
     // before its first call, and the reference has every operation a link away.
-    assert.ok(tokens(text) <= 1224, `the index is ${tokens(text)} tokens`);
+    assert.ok(tokens(text) <= 1240, `the index is ${tokens(text)} tokens`);
     assert.ok(text.includes(`(https://${HOST}/reference)`), "the index does not link the reference");
     assert.ok(text.includes("?operation="), "the index does not say OpenAPI answers one operation");
   });

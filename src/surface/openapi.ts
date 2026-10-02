@@ -516,6 +516,7 @@ const SCHEMAS: Record<string, Schema> = {
     expires_at: nullable(TIME),
     state: enumOf(["live", "revoked", "space_closed", "creator_no_longer_governs", "expired", "exhausted"], "live, or why it no longer works."),
     made_by: nullable(PEER_ID),
+    start: { type: "string", description: "The reference section for the work there, such as start-tasks: set when the SPACE has a task not yet accepted and your role may take one." },
   }, ["name", "kind", "role", "state"]),
   JoinRequest: object({
     request_id: UUID,
@@ -979,6 +980,8 @@ const REQUEST_DECIDED = object({ request_id: UUID, name: SPACE_NAME, state: { ty
 const WATCHING = object({ space: SPACE_NAME, watching: { type: "boolean" }, changed: { type: "boolean" } });
 /** What using a link, or taking over a role offered to you, answers: where you stand now. */
 const JOINED = object({ name: SPACE_NAME, role: { type: "string" }, tags: list(TAG), state: { type: "string" }, changed: { type: "boolean" }, revision: POSITION, handed_over_by: PEER_ID }, ["name", "state"]);
+/** What using a link answers: JOINED, and the reference section for the work there. */
+const JOINED_START = object({ name: SPACE_NAME, role: { type: "string" }, tags: list(TAG), state: { type: "string" }, changed: { type: "boolean" }, revision: POSITION, handed_over_by: PEER_ID, start: { type: "string", description: "The reference section for the work there, such as start-tasks: set when the SPACE has a task not yet accepted and your role may take one." } }, ["name", "state"]);
 
 /** One of the service's numbers, in GET /v1/numbers. */
 const PAIR = ref("NumberPair");
@@ -1137,6 +1140,7 @@ const SPECS: Record<string, Spec> = {
           changed: { type: "boolean" },
           revision: POSITION,
           handed_over_by: { ...PEER_ID, description: "Set when the link was a hand-over: the KEY whose role you took over, which left." },
+          start: { type: "string", description: "The reference section for the work there, such as start-tasks: set when the SPACE has a task not yet accepted and your role may take one." },
         }, ["name", "state"]),
         join_refused: object({ code: { type: "string" }, message: { type: "string" }, fix: { type: "string" }, detail: { type: "string" } }),
       }, ["peer_id", "token", "expires_at", "registered"]), "A token for your KEY, and with invite, whether the link let it in."),
@@ -1692,7 +1696,7 @@ const SPECS: Record<string, Spec> = {
         code: { type: "string", description: "Instead of link: the code, with name." },
       }, [], { description: "link, or name and code." }),
     },
-    answers: { "200": ok(JOINED, "In.") },
+    answers: { "200": ok(JOINED_START, "In.") },
   },
   join: {
     summary: "Join with a code or a link, or ask to join",
@@ -1704,7 +1708,7 @@ const SPECS: Record<string, Spec> = {
       }, []),
     },
     answers: {
-      "200": ok(object({ name: SPACE_NAME, role: { type: "string" }, tags: list(TAG), state: { type: "string", description: "member, or open for an open work space, which needs no joining: POST." }, changed: { type: "boolean" }, revision: POSITION, handed_over_by: { ...PEER_ID, description: "With a hand-over code: the KEY whose role you took over, which left." }, notice: NOTICE }, ["name", "state"]), "In, or nothing to join."),
+      "200": ok(object({ name: SPACE_NAME, role: { type: "string" }, tags: list(TAG), state: { type: "string", description: "member, or open for an open work space, which needs no joining: POST." }, changed: { type: "boolean" }, revision: POSITION, handed_over_by: { ...PEER_ID, description: "With a hand-over code: the KEY whose role you took over, which left." }, start: { type: "string", description: "The reference section for the work there, such as start-tasks: set when the SPACE has a task not yet accepted and your role may take one." }, notice: NOTICE }, ["name", "state"]), "In, or nothing to join."),
       "202": ok(object({
         name: SPACE_NAME,
         state: { type: "string" },

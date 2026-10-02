@@ -19,7 +19,7 @@ import type { Config } from "../src/config.ts";
 import { challengePreimage } from "../src/domain/protocol.ts";
 import { allowStreamsAgain, endAllStreams, streamsOpen } from "../src/mcp/listen.ts";
 import { defuse } from "../src/mcp/render.ts";
-import { serverIdentity } from "../src/mcp/server.ts";
+import { COMPATIBILITY_TOOLS, MCP_TOOLS, serverIdentity, TOOLSETS } from "../src/mcp/server.ts";
 import { bridgeScript } from "../src/surface/plugin.ts";
 import { ERRORS } from "../src/db/errors.ts";
 import { ATTACHMENT_LIMITS } from "../src/surface/vocabulary.ts";
@@ -48,6 +48,10 @@ let capabilitiesAsked = 0;
 let capabilitiesFail = 0;
 /** How many requests anything sent to the connector: how a test sees a post go once. */
 let connectorPosts = 0;
+/** Every request sent to the connector, by its address and its body. */
+const connectorAsked: { search: string; body: string }[] = [];
+/** Every request anything sent this service, by its method and path. */
+const requested: string[] = [];
 
 const opened = setUp(async () => {
   fixture = await cloneDatabase("bridge");
@@ -76,7 +80,11 @@ const opened = setUp(async () => {
   db = openDb(config);
   app = createApp(config, db);
   handle = getRequestListener(async (req: Request, env: unknown) => {
-    if (req.method === "POST" && new URL(req.url).pathname === "/mcp") connectorPosts++;
+    requested.push(`${req.method} ${new URL(req.url).pathname}`);
+    if (req.method === "POST" && new URL(req.url).pathname === "/mcp") {
+      connectorPosts++;
+      connectorAsked.push({ search: new URL(req.url).search, body: await req.clone().text() });
+    }
     if (new URL(req.url).pathname === "/v1/capabilities") {
       capabilitiesAsked++;
       if (capabilitiesFail > 0) {
@@ -473,6 +481,95 @@ async function readAs(tokenOf: string, path: string): Promise<any> {
 }
 
 const textOf = (answer: any) => (answer.result?.content ?? []).map((c: any) => c.text).join("\n");
+
+describe("the bridge, toolsets", () => {
+  test("with SCHELLINGAF_TOOLS=tasks the bridge relays to /mcp?tools=tasks", async () => {
+    const bridge = start({ ...elsewhere("set-tasks"), SCHELLINGAF_TOOLS: "tasks" });
+    try {
+      const from = connectorAsked.length;
+      const tools = await bridge.ask("tools/list", {});
+      assert.deepEqual(tools.result.tools.map((t: any) => t.name).sort(), [...TOOLSETS.tasks].sort());
+      const whoami = await bridge.ask("tools/call", { name: "schellingaf_whoami", arguments: {} });
+      assert.match(textOf(whoami), /^reading as [0-9a-f]{64}/);
+      const asked = connectorAsked.slice(from);
+      assert.ok(asked.length >= 2);
+      for (const a of asked) assert.equal(a.search, "?tools=tasks");
+    } finally {
+      await bridge.stop();
+    }
+  });
+
+  test("a call outside the set is refused by the bridge and nothing is sent", async () => {
+    const extra: Record<string, string> = { ...elsewhere("set-outside"), SCHELLINGAF_TOOLS: "tasks" };
+    const bob = await register();
+    const bridge = start(extra);
+    try {
+      // The first call in the set: the bridge asks the service for the set's tools first.
+      const whoami = await bridge.ask("tools/call", { name: "schellingaf_whoami", arguments: {} });
+      assert.match(textOf(whoami), /^reading as [0-9a-f]{64}/);
+      const from = requested.length;
+      const answer = await bridge.ask("tools/call", { name: "schellingaf_message", arguments: { action: "start", to: [bob.peerId], body: "only for bob", sealed: true } });
+      assert.deepEqual(requested.slice(from), [], "the bridge sent something for a tool outside its set");
+      assert.equal(answer.result.isError, true, JSON.stringify(answer));
+      assert.equal(answer.result.structuredContent, undefined);
+      const spec = ERRORS.NOT_IN_TOOLSET!;
+      // The service's own words, held equal to its refusal, with the bridge's set named.
+      assert.equal(textOf(answer), `${spec.message} (schellingaf_message is not in the toolset tasks) ${spec.fix}`);
+      assert.equal(existsSync(`${extra.SCHELLINGAF_KEY_FILE}.sealed.json`), false);
+      // Calls before any list wait for the one the bridge asks for: one tools/list, not two.
+      const fresh = start({ ...elsewhere("set-outside-2"), SCHELLINGAF_TOOLS: "research" });
+      try {
+        const asked = connectorAsked.length;
+        const [task, seek] = await Promise.all([
+          fresh.ask("tools/call", { name: "schellingaf_task", arguments: { action: "list", space: "anything" } }),
+          fresh.ask("tools/call", { name: "schellingaf_seek", arguments: { q: "nothing at all" } }),
+        ]);
+        assert.match(textOf(task), /^NOT_IN_TOOLSET\. .*\(schellingaf_task is not in the toolset research\)/);
+        assert.notEqual(seek.result.isError, true, JSON.stringify(seek));
+        const lists = connectorAsked.slice(asked).filter((a) => JSON.parse(a.body).method === "tools/list");
+        assert.equal(lists.length, 1);
+        assert.ok(connectorAsked.slice(asked).every((a) => !a.body.includes("schellingaf_task")), "the call outside the set reached the connector");
+      } finally {
+        await fresh.stop();
+      }
+    } finally {
+      await bridge.stop();
+    }
+  });
+
+  test("a failed tools/list answers BRIDGE_FAILED to every waiting call, and nothing is sent", async () => {
+    // A set the service does not have: its tools/list is refused, so no call is prepared.
+    const bridge = start({ ...elsewhere("set-failed"), SCHELLINGAF_TOOLS: "nonesuch" });
+    try {
+      const asked = connectorAsked.length;
+      const answers = await Promise.all([
+        bridge.ask("tools/call", { name: "schellingaf_whoami", arguments: {} }),
+        bridge.ask("tools/call", { name: "schellingaf_post", arguments: { space: "anything", kind: "obs", body: "never sent" } }),
+      ]);
+      for (const answer of answers) {
+        assert.equal(answer.result.isError, true, JSON.stringify(answer));
+        assert.match(textOf(answer), /^BRIDGE_FAILED\. The bridge could not check the toolset for this: INVALID_REQUEST\. .*\(tools is tasks, research or coordinate, or absent for every tool\).*\. Nothing was sent\.$/s);
+      }
+      const sent = connectorAsked.slice(asked);
+      assert.ok(sent.length >= 1);
+      assert.ok(sent.every((a) => JSON.parse(a.body).method === "tools/list"), "a call went to the connector");
+    } finally {
+      await bridge.stop();
+    }
+  });
+
+  test("an empty SCHELLINGAF_TOOLS lists every tool", async () => {
+    const bridge = start({ ...elsewhere("set-empty"), SCHELLINGAF_TOOLS: "" });
+    try {
+      const from = connectorAsked.length;
+      const tools = await bridge.ask("tools/list", {});
+      assert.deepEqual(tools.result.tools.map((t: any) => t.name).sort(), MCP_TOOLS.filter((name) => !(name in COMPATIBILITY_TOOLS)).sort());
+      for (const a of connectorAsked.slice(from)) assert.equal(a.search, "");
+    } finally {
+      await bridge.stop();
+    }
+  });
+});
 
 describe("the bridge, sealing", () => {
   test("carries the sealing module whole where its source imports it, and the source runs as it is, importing every name it uses", () => {

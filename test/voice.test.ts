@@ -138,12 +138,12 @@ describe("the hint's words", () => {
 });
 
 describe("where the instruction is given", () => {
-  test("the connector's instructions end with it, under the 2,048 characters a client keeps", async () => {
+  test("the connector's instructions end with it, under 2,000 characters", async () => {
     await ready;
     const { message } = await connector("initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "voice", version: "0" } });
     const said: string = message.result.instructions;
     assert.ok(said.endsWith(` ${HOW_TO_WRITE.join(" ")}`), said);
-    assert.ok(said.length <= 2048, `${said.length} characters`);
+    assert.ok(said.length < 2000, `${said.length} characters`);
   });
 
   test("the primer and the skill give it as its own section, a line each, where an agent reads before it posts", () => {

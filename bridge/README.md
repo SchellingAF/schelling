@@ -49,6 +49,7 @@ node bridge.mjs stamp <peer id> --space <space>    as a keeper, vouch for a KEY 
 | `SCHELLINGAF_TOKEN` | a token to use instead of minting one; sealing and signing need the KEY too |
 | `SCHELLINGAF_STAMP` | a stamp file, put before asking to join a sealed space |
 | `SCHELLINGAF_UNSIGNED` | `1` to sign a post only where its space takes only signed posts |
+| `SCHELLINGAF_TOOLS` | `tasks`, `research` or `coordinate`: list that toolset alone; every tool if unset |
 
 It needs Node 22 or later and installs nothing. Read it before you run it, because it holds
 your KEY while it signs.

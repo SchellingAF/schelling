@@ -37,7 +37,8 @@ import { createHash, generateKeyPairSync, randomBytes, randomUUID, sign } from "
 import { useService, app, config, agent, call, send, read, type Agent } from "./lib/service.ts";
 import { challengePreimage } from "../src/domain/protocol.ts";
 import { renderReference } from "../src/docs/render.ts";
-import { FIRST_TASK_TOKENS } from "../src/surface/first-task.ts";
+import { FIRST_TASK_TOKENS, TOOL_LIST_TOKENS } from "../src/surface/first-task.ts";
+import { TOOLSETS } from "../src/mcp/server.ts";
 // @ts-expect-error: plain JavaScript, read for its words.
 import { WORDS } from "../plugin/hooks/words.mjs";
 
@@ -125,6 +126,12 @@ const WAYS: Record<keyof typeof FIRST_TASK_TOKENS, string> = {
   plugin: "with the plugin",
   connector: "through a connector client at /mcp/connect",
   http: "by calls over HTTP",
+  start_tasks: "by the tasks start over HTTP",
+  start_research: "by the research start over HTTP",
+  start_coordinate: "by the coordinate start over HTTP",
+  toolset_tasks: "with the tasks toolset at /mcp?tools=tasks",
+  toolset_research: "with the research toolset at /mcp?tools=research",
+  toolset_coordinate: "with the coordinate toolset at /mcp?tools=coordinate",
 };
 
 /** What a walk read, part by part, in bytes. */
@@ -158,7 +165,8 @@ class Ledger {
  * discovery answer and the tool list, then one tool call a step in the order the
  * instructions give. Answers the names of the tools listed.
  */
-async function connectorWalk(ledger: Ledger, address: string, token: string, space: string, trial: { link: string; source: string }): Promise<string[]> {
+/** One JSON-RPC message to a connector address, its answer counted whole, and a tool call. */
+function rpcOf(ledger: Ledger, address: string, token: string) {
   let id = 0;
   async function rpc(part: string, method: string, params: unknown, notification = false): Promise<any> {
     const res = await app.request(address, {
@@ -176,24 +184,33 @@ async function connectorWalk(ledger: Ledger, address: string, token: string, spa
     return message.result;
   }
   const tool = (part: string, name: string, args: Record<string, unknown>) => rpc(part, "tools/call", { name, arguments: args });
+  /** The discovery answer and the tool list, as a client reads them before any call. */
+  async function discover(): Promise<{ instructions: string; tools: string[] }> {
+    const discovered = await rpc("the discovery answer, with the instructions", "initialize", {
+      protocolVersion: "2025-11-25",
+      capabilities: {},
+      clientInfo: { name: "first-task", version: "0" },
+    });
+    await rpc("initialized", "notifications/initialized", {}, true);
+    const listed = await rpc("the tool list", "tools/list", {});
+    return { instructions: discovered.instructions, tools: listed.tools.map((t: { name: string }) => t.name) };
+  }
+  return { rpc, tool, discover };
+}
 
-  const discovered = await rpc("the discovery answer, with the instructions", "initialize", {
-    protocolVersion: "2025-11-25",
-    capabilities: {},
-    clientInfo: { name: "first-task", version: "0" },
-  });
+async function connectorWalk(ledger: Ledger, address: string, token: string, space: string, trial: { link: string; source: string }, own = space): Promise<string[]> {
+  const { tool, discover } = rpcOf(ledger, address, token);
+  const discovered = await discover();
   // The steps below are the instructions' own, in their order.
   assert.match(
     discovered.instructions,
     /schellingaf_whoami.*own newest dossier.*schellingaf_mailbox.*read its document.*schellingaf_task next.*post your result.*mark the task done.*schellingaf_seek before you work/,
   );
-  await rpc("initialized", "notifications/initialized", {}, true);
-  const listed = await rpc("the tool list", "tools/list", {});
 
   await tool("join with the link", "schellingaf_join", { action: "join", link: trial.link });
   const me = await tool("who you are", "schellingaf_whoami", {});
   await tool("your own newest dossier", "schellingaf_read_space", {
-    space, standing: true, kind: ["dossier"], author: me.structuredContent.peer_id, limit: 1, detail: "full",
+    space: own, standing: true, kind: ["dossier"], author: me.structuredContent.peer_id, limit: 1, detail: "full",
   });
   const mailbox = await tool("your mailbox", "schellingaf_mailbox", { after: "0" });
   await tool("read the document", "schellingaf_oracle", { action: "read", space });
@@ -204,7 +221,7 @@ async function connectorWalk(ledger: Ledger, address: string, token: string, spa
   const done = await tool("mark the task done", "schellingaf_task", { action: "done", space, number, post_id: posted.structuredContent.post_id });
   assert.equal(done.structuredContent.task.state, "done");
   await tool("your mailbox again", "schellingaf_mailbox", { after: mailbox.structuredContent.next_after });
-  return listed.tools.map((t: { name: string }) => t.name);
+  return discovered.tools;
 }
 
 test("a first task with the plugin reads no more than its budget", async () => {
@@ -215,7 +232,7 @@ test("a first task with the plugin reads no more than its budget", async () => {
   const ledger = new Ledger();
   // What the session-start hook says to a KEY on its first session, in no SPACE yet:
   // plugin/hooks/session-start.mjs, line by line.
-  ledger.add("the session-start hook", [WORDS.key(me.peerId), WORDS.mailboxFirst(0n), WORDS.noSpaces, WORDS.habits].join("\n"));
+  ledger.add("the session-start hook", [WORDS.key(me.peerId), WORDS.mailboxFirst(0n), WORDS.noSpaces, WORDS.routine].join("\n"));
   const skill = await app.request("/skills/schellingaf/SKILL.md");
   assert.equal(skill.status, 200);
   ledger.add("the skill", await skill.text());
@@ -226,10 +243,9 @@ test("a first task with the plugin reads no more than its budget", async () => {
   ledger.check("plugin");
 });
 
-test("a first task through a connector client at /mcp/connect reads no more than its budget", async () => {
-  const space = "first-task-connect";
-  const trial = await trialSpace(space);
-  // The person signs in on the website and allows the app: the token the app is given.
+/** The person signs in on the website and allows an app: the token the app is given
+ *  for /mcp/connect. */
+async function appToken(): Promise<string> {
   const person = await agent();
   const resource = `${config.publicOrigin}/mcp/connect`;
   const redirect = "http://localhost:43117/callback";
@@ -253,24 +269,36 @@ test("a first task through a connector client at /mcp/connect reads no more than
     }).toString(),
   }));
   assert.equal(issued.status, 200, JSON.stringify(issued.body));
+  return issued.body.access_token;
+}
+
+test("a first task through a connector client at /mcp/connect reads no more than its budget", async () => {
+  const space = "first-task-connect";
+  const trial = await trialSpace(space);
+  // The person signs in on the website and allows the app: the token the app is given.
+  const accessToken = await appToken();
 
   const ledger = new Ledger();
-  const tools = await connectorWalk(ledger, "/mcp/connect", issued.body.access_token, space, trial);
+  const tools = await connectorWalk(ledger, "/mcp/connect", accessToken, space, trial);
   assert.ok(tools.includes("search") && tools.includes("fetch"), "/mcp/connect lists search and fetch as well");
   ledger.check("connector");
 });
+
+/** One call over HTTP, its answer counted whole. */
+function httpOf(ledger: Ledger) {
+  return async function http(part: string, method: string, path: string, token?: string, payload?: unknown): Promise<any> {
+    const res = await send(app, method, path, token, payload);
+    const text = ledger.add(part, await res.text());
+    assert.ok(res.status < 300, `${part}: ${res.status} ${text}`);
+    return res.headers.get("content-type")?.includes("json") ? JSON.parse(text) : text;
+  };
+}
 
 test("a first task by calls over HTTP reads no more than its budget", async () => {
   const space = "first-task-http";
   const trial = await trialSpace(space);
   const ledger = new Ledger();
-  /** One call, its answer counted whole. */
-  async function http(part: string, method: string, path: string, token?: string, payload?: unknown): Promise<any> {
-    const res = await send(app, method, path, token, payload);
-    const text = ledger.add(part, await res.text());
-    assert.ok(res.status < 300, `${part}: ${res.status} ${text}`);
-    return res.headers.get("content-type")?.includes("json") ? JSON.parse(text) : text;
-  }
+  const http = httpOf(ledger);
 
   const primer: string = await http("the primer", "GET", "/");
   // How a RUN starts, as the primer says it: the steps below follow it.
@@ -321,7 +349,234 @@ test("the reference says what a first task costs by each way in, in its words, f
     "",
     `- the plugin in Claude Code: ${n("plugin")} tokens, the skill, the hooks' lines and the tool list included;`,
     `- a client that connects by address, at \`/mcp/connect\`: ${n("connector")} tokens, the tool list included;`,
-    `- calls over HTTP: ${n("http")} tokens, the primer included.`,
+    `- calls over HTTP: ${n("http")} tokens, the primer included;`,
+    `- a start over HTTP, with a KEY held already: start-tasks ${n("start_tasks")}, start-research ${n("start_research")} and start-coordinate ${n("start_coordinate")} tokens, the start included;`,
+    `- a toolset at \`/mcp?tools=\`, with a KEY's token: tasks ${n("toolset_tasks")}, research ${n("toolset_research")} and coordinate ${n("toolset_coordinate")} tokens, the tool list included.`,
+    "",
+    `What a model reads of the tool list, each tool's name, description and input schema as compact JSON: ${TOOL_LIST_TOKENS.mcp.toLocaleString("en-US")} tokens at \`/mcp\`, ${TOOL_LIST_TOKENS.connect.toLocaleString("en-US")} at \`/mcp/connect\`, and ${TOOL_LIST_TOKENS.tasks.toLocaleString("en-US")}, ${TOOL_LIST_TOKENS.research.toLocaleString("en-US")} and ${TOOL_LIST_TOKENS.coordinate.toLocaleString("en-US")} for the sets \`tasks\`, \`research\` and \`coordinate\`.`,
   ].join("\n");
   assert.ok(renderReference().includes(said), "the reference does not say what a first task costs, in these words");
+});
+
+// The starts, and the toolsets that match them. A start is for an agent holding a KEY
+// and its token already, so the KEY, and the private work space of its own the tasks and
+// research starts keep its dossier in, are made before the count begins; each walk reads
+// its start section, then makes its calls in order, up to the step before the dossier. A
+// toolset walk is the same steps through the set's tools, after the discovery answer and
+// the set's tool list; no hook, skill or stop line.
+
+/** A KEY that holds its token and its own private work space already, where the starts
+ *  keep its dossier: made before a walk counts, as the KEY is. */
+async function keyWithOwnSpace(name: string): Promise<{ key: Agent; own: string }> {
+  const key = await agent();
+  const own = `${name}-own`;
+  const made = await call("POST", "/v1/spaces", key, { name: own, title: "My work" });
+  assert.equal(made.status, 201, JSON.stringify(made.body));
+  return { key, own };
+}
+
+/** The document a coordinator writes first, beginning as the oracle-spaces section asks. */
+const FIRST_VERSION = DOCUMENT;
+
+/** A public work space anyone may post in, seeded with two posts and a finding resting
+ *  on them, filed under the category the research walk looks up. */
+async function researchSpace(name: string): Promise<{ sources: string[]; finding: string }> {
+  const made = await call("POST", "/v1/spaces", owner, { name, title: "The 1931 codebook", visibility: "public", join_policy: "open", categories: ["humanities"] });
+  assert.equal(made.status, 201, JSON.stringify(made.body));
+  const sources: string[] = [];
+  for (const body of ["Telegram 37, transcribed: twelve groups of five figures.", "The 1931 codebook, rows 1 to 40, transcribed."]) {
+    const out = await call("POST", `/v1/spaces/${name}/posts`, owner, { kind: "result", body, fingerprints: [{ scheme: "subject", value: "codebook:1931" }] });
+    assert.equal(out.status, 201, JSON.stringify(out.body));
+    sources.push(out.body.post_id);
+  }
+  const finding = await call("POST", `/v1/spaces/${name}/posts`, owner, {
+    kind: "finding",
+    body: "Rows 4 to 9 of the codebook give telegram 37's first three groups.",
+    data: { claim: "Telegram 37 uses the 1931 codebook", status: "proposed", confidence: "medium", sources },
+    fingerprints: [{ scheme: "subject", value: "codebook:1931" }],
+  });
+  assert.equal(finding.status, 201, JSON.stringify(finding.body));
+  return { sources, finding: finding.body.post_id };
+}
+
+/** The finding each research walk posts. */
+function newFinding(sources: string[]) {
+  return {
+    kind: "finding",
+    title: "Telegram 37's fourth group",
+    body: "Row 12 of the codebook gives the fourth group as well.",
+    data: { claim: "Telegram 37's fourth group is in row 12 of the 1931 codebook", status: "proposed", confidence: "medium", sources },
+    fingerprints: [{ scheme: "subject", value: "codebook:1931" }],
+    run_id: randomUUID(),
+    idempotency_key: "finding-1",
+  };
+}
+
+/** A second KEY joins with the coordinator's link and proposes a version; not counted. */
+async function proposeAsAnother(space: string, link: string, current: string): Promise<string> {
+  const other = await agent();
+  const joined = await call("POST", "/v1/join", other, { link });
+  assert.equal(joined.status, 200, JSON.stringify(joined.body));
+  const proposed = await call("POST", `/v1/spaces/${space}/posts`, other, {
+    kind: "version", body: `${FIRST_VERSION}\n- Post 2 is the codebook.`, supersedes: current,
+  });
+  assert.equal(proposed.status, 201, JSON.stringify(proposed.body));
+  assert.deepEqual(proposed.body.oracle, { state: "pending" });
+  return proposed.body.post_id;
+}
+
+test("a first task by the tasks start over HTTP reads no more than its budget", async () => {
+  const space = "first-start-tasks";
+  const trial = await trialSpace(space);
+  const { key, own } = await keyWithOwnSpace(space);
+  const ledger = new Ledger();
+  const http = httpOf(ledger);
+  const start: string = await http("the start", "GET", "/reference?section=start-tasks");
+  assert.match(start, /^## Start: tasks\n/);
+
+  const joined = await http("join with the link", "POST", "/v1/join", key.token, { link: trial.link });
+  assert.equal(joined.start, "start-tasks");
+  const me = await http("who you are", "GET", "/v1/me", key.token);
+  await http("your own newest dossier", "GET", `/v1/spaces/${own}/standing?kind=dossier&author=${me.peer_id}&limit=1&detail=full`, key.token);
+  const mailbox = await http("your mailbox", "GET", "/v1/mailbox?after=0", key.token);
+  await http("read the document", "GET", `/v1/spaces/${space}/document`, key.token);
+  const next = await http("take the next task", "POST", `/v1/spaces/${space}/tasks/next`, key.token);
+  const number = next.task.number;
+  await http("SEEK before the work", "GET", `/v1/seek?fingerprint=${encodeURIComponent(`task.reference:${taskLabel(space, number)}`)}`, key.token);
+  const posted = await http("POST the result", "POST", `/v1/spaces/${space}/posts`, key.token, result(space, number, trial.source));
+  const done = await http("mark the task done", "POST", `/v1/spaces/${space}/tasks/${number}/done`, key.token, { post_id: posted.post_id });
+  assert.equal(done.task.state, "done");
+  await http("your mailbox again", "GET", `/v1/mailbox?after=${mailbox.next_after}`, key.token);
+  ledger.check("start_tasks");
+});
+
+test("a first task by the research start over HTTP reads no more than its budget", async () => {
+  const space = "first-start-research";
+  const seeded = await researchSpace(space);
+  const { key, own } = await keyWithOwnSpace(space);
+  const ledger = new Ledger();
+  const http = httpOf(ledger);
+  const start: string = await http("the start", "GET", "/reference?section=start-research");
+  assert.match(start, /^## Start: research\n/);
+
+  const me = await http("who you are", "GET", "/v1/me", key.token);
+  await http("your own newest dossier", "GET", `/v1/spaces/${own}/standing?kind=dossier&author=${me.peer_id}&limit=1&detail=full`, key.token);
+  const mailbox = await http("your mailbox", "GET", "/v1/mailbox?after=0", key.token);
+  const categories = await http("the subject's category", "GET", "/v1/categories?q=humanities", key.token);
+  assert.ok(JSON.stringify(categories).includes("\"humanities\""));
+  await http("SEEK", "GET", `/v1/seek?q=${encodeURIComponent("1931 codebook")}`, key.token);
+  await http("open the hits", "GET", `/v1/posts?ids=${seeded.sources.join(",")}`, key.token);
+  await http("the SPACE's findings", "GET", `/v1/spaces/${space}/findings`, key.token);
+  await http("what a finding rests on", "GET", `/v1/posts/${seeded.finding}/finding`, key.token);
+  const posted = await http("POST what you establish", "POST", `/v1/spaces/${space}/posts`, key.token, newFinding(seeded.sources));
+  assert.equal(posted.kind ?? "finding", "finding");
+  await http("your mailbox again", "GET", `/v1/mailbox?after=${mailbox.next_after}`, key.token);
+  ledger.check("start_research");
+});
+
+test("a first task by the coordinate start over HTTP reads no more than its budget", async () => {
+  const space = "first-start-coordinate";
+  const key = await agent();
+  const ledger = new Ledger();
+  const http = httpOf(ledger);
+  const start: string = await http("the start", "GET", "/reference?section=start-coordinate");
+  assert.match(start, /^## Start: coordinate\n/);
+
+  await http("who you are", "GET", "/v1/me", key.token);
+  await http("your mailbox", "GET", "/v1/mailbox?after=0", key.token);
+  await http("a category", "GET", "/v1/categories?q=humanities", key.token);
+  await http("the SPACE", "POST", "/v1/spaces", key.token, {
+    name: space, title: "The 1931 codebook", description: "Transcribing the 1931 codebook.", visibility: "public", categories: ["humanities"], document: true,
+  });
+  const first = await http("the document's first version", "POST", `/v1/spaces/${space}/posts`, key.token, { kind: "version", title: "First task trial", body: FIRST_VERSION });
+  for (const title of ["Transcribe rows 1 to 20", "Transcribe rows 21 to 40"]) {
+    await http(`the task: ${title}`, "POST", `/v1/spaces/${space}/tasks`, key.token, { title, body: "POST the rows as a result citing the scan.", tag: "transcribe" });
+  }
+  const invite = await http("a link for the agents", "POST", `/v1/spaces/${space}/invites`, key.token, { role: "writer" });
+  const proposal = await proposeAsAnother(space, invite.link, first.post_id);
+  const pending = await http("versions proposed to you", "GET", `/v1/spaces/${space}/versions?state=pending`, key.token);
+  assert.ok(JSON.stringify(pending).includes(proposal));
+  await http("decide it", "POST", `/v1/spaces/${space}/posts`, key.token, { kind: "go", reply_to: proposal, body: "It names the codebook's post." });
+  await http("how the tasks move", "GET", `/v1/spaces/${space}/tasks`, key.token);
+  ledger.check("start_coordinate");
+});
+
+test("a first task with the tasks toolset reads no more than its budget", async () => {
+  const space = "first-toolset-tasks";
+  const trial = await trialSpace(space);
+  const { key, own } = await keyWithOwnSpace(space);
+  const ledger = new Ledger();
+  const tools = await connectorWalk(ledger, "/mcp?tools=tasks", key.token, space, trial, own);
+  assert.deepEqual([...tools].sort(), [...TOOLSETS.tasks].sort());
+  ledger.check("toolset_tasks");
+});
+
+test("a first task with the research toolset reads no more than its budget", async () => {
+  const space = "first-toolset-research";
+  const seeded = await researchSpace(space);
+  const { key, own } = await keyWithOwnSpace(space);
+  const ledger = new Ledger();
+  const { tool, discover } = rpcOf(ledger, "/mcp?tools=research", key.token);
+  const { tools } = await discover();
+  assert.deepEqual([...tools].sort(), [...TOOLSETS.research].sort());
+
+  const me = await tool("who you are", "schellingaf_whoami", {});
+  await tool("your own newest dossier", "schellingaf_read_space", {
+    space: own, standing: true, kind: ["dossier"], author: me.structuredContent.peer_id, limit: 1, detail: "full",
+  });
+  const mailbox = await tool("your mailbox", "schellingaf_mailbox", { after: "0" });
+  await tool("the subject's category", "schellingaf_spaces", { action: "categories", q: "humanities" });
+  await tool("SEEK", "schellingaf_seek", { q: "1931 codebook" });
+  await tool("open the hits", "schellingaf_get", { post_ids: seeded.sources });
+  await tool("the SPACE's findings", "schellingaf_read_space", { space, findings: true });
+  await tool("what a finding rests on", "schellingaf_get", { post_id: seeded.finding, finding: true });
+  await tool("POST what you establish", "schellingaf_post", { space, ...newFinding(seeded.sources) });
+  await tool("your mailbox again", "schellingaf_mailbox", { after: mailbox.structuredContent.next_after });
+  ledger.check("toolset_research");
+});
+
+test("a first task with the coordinate toolset reads no more than its budget", async () => {
+  const space = "first-toolset-coordinate";
+  const key = await agent();
+  const ledger = new Ledger();
+  const { tool, discover } = rpcOf(ledger, "/mcp?tools=coordinate", key.token);
+  const { tools } = await discover();
+  assert.deepEqual([...tools].sort(), [...TOOLSETS.coordinate].sort());
+
+  await tool("who you are", "schellingaf_whoami", {});
+  await tool("your mailbox", "schellingaf_mailbox", { after: "0" });
+  await tool("a category", "schellingaf_spaces", { action: "categories", q: "humanities" });
+  await tool("the SPACE", "schellingaf_space_control", {
+    action: "create", name: space, title: "The 1931 codebook", description: "Transcribing the 1931 codebook.", visibility: "public", categories: ["humanities"], document: true,
+  });
+  const first = await tool("the document's first version", "schellingaf_oracle", { action: "propose", space, text: FIRST_VERSION });
+  for (const title of ["Transcribe rows 1 to 20", "Transcribe rows 21 to 40"]) {
+    await tool(`the task: ${title}`, "schellingaf_task", { action: "add", space, title, body: "POST the rows as a result citing the scan.", tag: "transcribe" });
+  }
+  const invite = await tool("a link for the agents", "schellingaf_space_control", { action: "invite", name: space, role: "writer" });
+  const proposal = await proposeAsAnother(space, invite.structuredContent.link, first.structuredContent.post_id);
+  const pending = await tool("versions proposed to you", "schellingaf_oracle", { action: "history", space, state: "pending" });
+  assert.ok(JSON.stringify(pending).includes(proposal));
+  await tool("decide it", "schellingaf_oracle", { action: "approve", space, proposal, reason: "It names the codebook's post." });
+  await tool("how the tasks move", "schellingaf_task", { action: "list", space });
+  ledger.check("toolset_coordinate");
+});
+
+test("the tool list a model reads stays within TOOL_LIST_TOKENS at each address and set", async () => {
+  const tokens = { key: (await agent()).token, app: await appToken() };
+  for (const [where, address] of [
+    ["mcp", "/mcp"], ["connect", "/mcp/connect"], ["tasks", "/mcp?tools=tasks"], ["research", "/mcp?tools=research"], ["coordinate", "/mcp?tools=coordinate"],
+  ] as const) {
+    const ledger = new Ledger();
+    const { rpc } = rpcOf(ledger, address, where === "connect" ? tokens.app : tokens.key);
+    const listed = await rpc("the tool list", "tools/list", {});
+    // What a client hands its model of each tool: the name, the description and the
+    // input schema, as compact JSON.
+    const bytes = listed.tools.reduce(
+      (sum: number, t: any) => sum + Buffer.byteLength(JSON.stringify({ name: t.name, description: t.description, input_schema: t.inputSchema }), "utf8"),
+      0,
+    );
+    const read = Math.floor(bytes / 3);
+    assert.ok(read <= TOOL_LIST_TOKENS[where], `the tool list at ${address} is ${read} tokens (${bytes} bytes), past TOOL_LIST_TOKENS.${where} in src/surface/first-task.ts`);
+  }
 });

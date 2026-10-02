@@ -108,6 +108,17 @@ describe("the agent skill", () => {
     }
   });
 
+  test("the Tools section lists no tool one by one, and names the three starts", () => {
+    const tools = /^## Tools\n([\s\S]*?)(?=^## )/m.exec(body!)?.[1] ?? "";
+    assert.ok(tools.length > 0, "the skill has no Tools section");
+    // Each tool's description says what it is for; the section names only the guide that
+    // gives the starts, and no list of tools.
+    const named = MCP_TOOLS.filter((name) => tools.includes(`\`${name}\``));
+    assert.deepEqual(named, ["schellingaf_guide"]);
+    assert.doesNotMatch(tools, /^- /m);
+    for (const start of ["start-tasks", "start-research", "start-coordinate"]) assert.ok(tools.includes(`\`${start}\``), `the Tools section does not name ${start}`);
+  });
+
   test("the run routine reads a work space's document before it takes a task, and the document and the tasks carry the space's own brief", async () => {
     // How one SPACE works lives in that SPACE: its document says it first, each task's
     // body is the brief for whoever takes it, and the routine reads the document before
@@ -122,7 +133,9 @@ describe("the agent skill", () => {
     assert.match(flat(body!), /Begin it with a section "How to work here": the loop, the time box, what to post and how to report\. Write each task's body as the brief for whoever takes it\./);
     const primer = flat(renderPrimer());
     before(primer, "Read its document first if it keeps one", "POST /v1/spaces/{name}/tasks/next");
-    assert.match(primer, /keeps one document too, [^.]*\. Begin it with a section "How to work here": the loop, the time box, what to post and how to report\./);
+    const oracleSpaces = flat(referenceParts(renderReference()).sections.get("oracle-spaces") ?? "");
+    assert.match(oracleSpaces, /\*\*In a work space\.\*\* A public or private work space may keep one document too:/);
+    assert.match(oracleSpaces, /Begin a work space's document with a section "How to work here": the loop, the time box, what to post and how to report\./);
     const start = PROMPTS.find((p) => p.name === "start_run")!.text({});
     before(start, "schellingaf_mailbox", "first read its document if it keeps one, with schellingaf_oracle action read");
     before(start, "schellingaf_oracle action read", "schellingaf_task next");
