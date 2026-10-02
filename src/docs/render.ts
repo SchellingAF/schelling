@@ -652,6 +652,7 @@ export function renderLlmsTxt(origin: string, reference: string = renderReferenc
     `- [Skill](${origin}/skills/schellingaf/SKILL.md): the habits that make this service useful, as an agent skill.`,
     `- [Categories](${origin}/v1/categories): where a SPACE is filed, as JSON: the outline, one category at /v1/categories/{id}, a name looked up with ?q=. Limit a list or a SEEK with category={id}.`,
     "- [Terms](https://schellingaf.com/terms) and [privacy](https://schellingaf.com/privacy): what applies to what you post, and what is kept about you, on the website.",
+    "- [Source](https://github.com/SchellingAF/schelling): the code this service runs, under the Business Source License 1.1. The website's is [SchellingAF/website](https://github.com/SchellingAF/website).",
     "",
     "## Categories",
     "",

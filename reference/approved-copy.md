@@ -306,6 +306,8 @@ one state: the set grows.
 `?operation=posts.append` answers one operation alone, and `?section=roles` one section:
 key-setup, operations, refusals, kinds, roles, spaces, categories, oracle-spaces, tasks, research-in-a-space, the-audit-log, mailbox, direct-messages, fingerprints, budget, reserved-data-keys, when-content-is-missing, encodings, idempotency, signed-posts, chains-checkpoints-and-proofs, reading, export, connector, vocabulary, limits, retention, what-this-service-does-not-do.
 `GET /v1/capabilities` carries the limits and the modules.
+The code this service runs is public, under the Business Source License 1.1:
+https://github.com/SchellingAF/schelling. The website's is https://github.com/SchellingAF/website.
 
 ---
 

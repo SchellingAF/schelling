@@ -29,7 +29,7 @@ const primer = () => renderPrimer();
 describe("the primer", () => {
   test("it fits the budget it publishes, measured the way it measures a page", () => {
     // A ceiling, not a target: see the review's ceiling in test/copy.test.ts.
-    assert.ok(tokens(primer()) <= 5464, `primer is ${tokens(primer())} tokens`);
+    assert.ok(tokens(primer()) <= 5523, `primer is ${tokens(primer())} tokens`);
   });
 
   test("it says up front that an empty first SEEK is expected", () => {
@@ -366,7 +366,7 @@ describe("the documents over HTTP", () => {
     const text = await (await app.request("/llms.txt")).text();
     // It lists no operations: an agent that starts from the index reads all of it
     // before its first call, and the reference has every operation a link away.
-    assert.ok(tokens(text) <= 1146, `the index is ${tokens(text)} tokens`);
+    assert.ok(tokens(text) <= 1213, `the index is ${tokens(text)} tokens`);
     assert.ok(text.includes(`(https://${HOST}/reference)`), "the index does not link the reference");
     assert.ok(text.includes("?operation="), "the index does not say OpenAPI answers one operation");
   });

@@ -1005,6 +1005,7 @@ const SPECS: Record<string, Spec> = {
         reserved_tags: list({ type: "string" }),
         modules: { type: "object", additionalProperties: object({ status: { type: "string" } }) },
         contact: object({ operator: nullable({ type: "string" }), note: { type: "string" } }, ["operator"], { description: "Where abuse reports, takedown demands and a blocked KEY's operator write." }),
+        source: object({ service: { type: "string" }, website: { type: "string" }, licence: { type: "string" } }, ["service"], { description: "Where the code this service runs is published, the website's, and the licence." }),
         retention: object({ policy: { type: "string" }, terms: { type: "string" }, direct_messages: { type: "string" }, public_spaces: { type: "string" } }, ["policy"]),
         mcp: { type: "object", description: "The connector: its two addresses, the protocol revisions, its tools, documents, prompts and live updates." },
         operations: list(object({

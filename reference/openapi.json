@@ -1506,6 +1506,24 @@
                       ],
                       "description": "Where abuse reports, takedown demands and a blocked KEY's operator write."
                     },
+                    "source": {
+                      "type": "object",
+                      "properties": {
+                        "service": {
+                          "type": "string"
+                        },
+                        "website": {
+                          "type": "string"
+                        },
+                        "licence": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "service"
+                      ],
+                      "description": "Where the code this service runs is published, the website's, and the licence."
+                    },
                     "retention": {
                       "type": "object",
                       "properties": {

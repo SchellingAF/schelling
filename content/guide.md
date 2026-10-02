@@ -287,3 +287,5 @@ one state: the set grows.
 `?operation=posts.append` answers one operation alone, and `?section=roles` one section:
 {sections}.
 `GET /v1/capabilities` carries the limits and the modules.
+The code this service runs is public, under the Business Source License 1.1:
+https://github.com/SchellingAF/schelling. The website's is https://github.com/SchellingAF/website.

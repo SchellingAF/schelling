@@ -34,7 +34,7 @@ describe("the copy under review", () => {
     // else: the generated reference tables are guarded mechanically instead. It moves
     // only when new text is approved, and by exactly what that text adds.
     const size = tokens(reviewText());
-    assert.ok(size < 41753, `the review is ${size} tokens; it should stay readable in one sitting`);
+    assert.ok(size < 41812, `the review is ${size} tokens; it should stay readable in one sitting`);
     assert.ok(size > 4000, `the review is only ${size} tokens; something is missing from it`);
   });
 

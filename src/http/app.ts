@@ -1409,6 +1409,12 @@ export function createApp(config: Config, db: Db): Hono<Env> {
     contact: config.contact
       ? { operator: config.contact }
       : { operator: null, note: "No operator address is configured on this server." },
+    // Where the code this service runs is published, and the website's.
+    source: {
+      service: "https://github.com/SchellingAF/schelling",
+      website: "https://github.com/SchellingAF/website",
+      licence: "Business Source License 1.1",
+    },
     retention: {
       policy: "retained",
       terms: "No deletion of a POST is scheduled. Backups keep content for the backup window beyond any deletion.",
