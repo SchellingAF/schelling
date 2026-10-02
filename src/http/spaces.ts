@@ -89,6 +89,27 @@ export function listedSpaces(sql: Sql) {
                           where w.space_id = s.space_id and w.released_at is null)`;
 }
 
+/**
+ * A SPACE's tasks not yet accepted: open or claimed, and done waiting for checks. Two
+ * counts, one on each partial index of migrations/0113_tasks.sql, because a single
+ * `state <> 'accepted'` matches neither and would read every task the SPACE finished.
+ * Read as the caller, so row security counts only a SPACE it may read.
+ */
+export function openTaskCount(sql: Sql, spaceId: ReturnType<Sql>) {
+  return sql`((select count(*) from schellingaf.tasks w
+                where w.space_id = ${spaceId} and w.state in ('open', 'claimed'))
+            + (select count(*) from schellingaf.tasks d
+                where d.space_id = ${spaceId} and d.state = 'done'))::int`;
+}
+
+/** Whether a SPACE has a task not yet accepted, on the same two partial indexes. */
+export function hasOpenTasks(sql: Sql, spaceId: ReturnType<Sql>) {
+  return sql`(exists (select 1 from schellingaf.tasks w
+                       where w.space_id = ${spaceId} and w.state in ('open', 'claimed'))
+           or exists (select 1 from schellingaf.tasks d
+                       where d.space_id = ${spaceId} and d.state = 'done'))`;
+}
+
 /** A new SPACE's name: the grammar, and never one of the names the service keeps.
  *  Creating a SPACE and forking one both ask this. */
 export function newSpaceName(input: Record<string, unknown>): string {
@@ -392,6 +413,13 @@ export function mountSpaces(app: Hono<Env>, config: Config, db: Db): void {
     const limit = boundedNumber(c.req.query("limit"), 50, 1, 200, "limit");
     // Oracle spaces alone, or work spaces alone.
     const oracleOnly = queryFlag(c.req.query("oracle"), "oracle");
+    // The public work spaces with a task not yet accepted. Only true is a filter: false
+    // would read as "the SPACES with none", which nobody asked for.
+    const openTasksRaw = c.req.query("open_tasks");
+    if (openTasksRaw !== undefined && openTasksRaw !== "true") {
+      throw new ApiError("INVALID_REQUEST", { detail: "open_tasks is true, or left out" });
+    }
+    const openTasksOnly = openTasksRaw === "true";
     // Name order, or the newest first: a public SPACE by when it was last written, a
     // private one by when it was made, because how busy a private SPACE is belongs to
     // its members. An oracle space is written when a new version becomes current.
@@ -453,6 +481,7 @@ export function mountSpaces(app: Hono<Env>, config: Config, db: Db): void {
          ${after ? sql`and ${byName} > ${after}` : sql``}
          ${policy ? sql`and s.join_policy = ${policy}` : sql``}
          ${oracleOnly === true ? sql`and s.oracle` : oracleOnly === false ? sql`and not s.oracle` : sql``}
+         ${openTasksOnly ? sql`and s.visibility = 'public' and not s.oracle and ${hasOpenTasks(sql, sql`s.space_id`)}` : sql``}
          -- The expression of spaces_search_gin (migrations/0120), so the index serves it.
          ${q ? sql`and to_tsvector('pg_catalog.simple', s.name || ' ' || s.title || ' ' || s.description)
                       @@ schellingaf.parse_query(${q})` : sql``}`;
@@ -470,6 +499,7 @@ export function mountSpaces(app: Hono<Env>, config: Config, db: Db): void {
         oracle: boolean;
         at: string | null;
         last_written_at: Date | null;
+        open_tasks: number | null;
       };
       const columns = sql`s.space_id, s.name, s.title, s.description, s.join_policy, s.visibility,
              s.owner_id as owner, s.created_at, s.categories, s.oracle,
@@ -481,7 +511,8 @@ export function mountSpaces(app: Hono<Env>, config: Config, db: Db): void {
       // page alone.
       if (!recent) {
         return sql<Row[]>`
-          select ${columns}, h.head_seq::text, h.member_count, null as at
+          select ${columns}, h.head_seq::text, h.member_count, null as at,
+                 case when h.head_seq is not null then ${openTaskCount(sql, sql`s.space_id`)} end as open_tasks
             ${from}
             left join lateral schellingaf.space_heads(s.space_id) h on true
            ${where}
@@ -499,7 +530,8 @@ export function mountSpaces(app: Hono<Env>, config: Config, db: Db): void {
       return sql<Row[]>`
         select p.name, p.title, p.description, p.join_policy, p.visibility, p.owner, p.created_at,
                p.categories, h.head_seq::text, h.member_count, p.oracle, p.at::text as at,
-               p.last_written_at
+               p.last_written_at,
+               case when h.head_seq is not null then ${openTaskCount(sql, sql`p.space_id`)} end as open_tasks
           from (select w.*
                   from (select ${columns}, (extract(epoch from s.written_at) * 1000000)::bigint as at
                           ${from} ${where}) w
@@ -536,6 +568,9 @@ export function mountSpaces(app: Hono<Env>, config: Config, db: Db): void {
         // When a public SPACE was last written, which newest first sorts by; null for a
         // private one, whose activity is its members' to know.
         last_written_at: s.last_written_at?.toISOString() ?? null,
+        // How many of its tasks are not yet accepted (open, claimed, or done and waiting
+        // for checks): 0 where it keeps none, null where you may not read the SPACE.
+        open_tasks: s.open_tasks,
       })),
       ...(recent
         ? { next_before: more ? `${items.at(-1)!.at}~${items.at(-1)!.name}` : null }

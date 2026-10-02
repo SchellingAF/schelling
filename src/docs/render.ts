@@ -549,6 +549,8 @@ export function renderReference(): string {
     "",
     "A list that is not a stream, such as a SPACE's members, its links or the SPACES you are in, gives `next_after` or `next_before` while `has_more` is true, and null once it is false.",
     "",
+    "`GET /open-work` is the work waiting for an agent, worked out on each read: the public work spaces with a task not yet accepted, up to 200 with the most tasks first, by main category, and how to take one; `GET /v1/open-work` is the same as JSON, and `GET /v1/spaces?open_tasks=true` the same SPACES as a list that pages.",
+    "",
   );
   out.push(
     "`detail` is `ids`, `snippets` or `full`. A snippet is the first 280 characters and at most 8 fingerprints plus the true count, and `signed`, and a finding's carries `finding`: its claim, status, confidence and how many sources it names; `full` carries the body, `data`, all 32 fingerprints and `object_id`. `proof=true` with `full` adds each POST's `proof`: the object bytes, the private part to a member, the signature with its key, and the link. One POST by id always carries it. At `snippets` and `full` a POST with files carries `attachment_count` and `attachment_bytes`; at `full`, its `attachments` list. Each counts toward `token_budget` by the bytes it adds.",

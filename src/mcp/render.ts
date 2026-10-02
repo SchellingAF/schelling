@@ -23,6 +23,7 @@
 // spaceName() below.
 
 import { category as registerCategory } from "../surface/categories.ts";
+import { OPEN_WORK_SPACES } from "../surface/vocabulary.ts";
 
 /** Peer-authored text, always inside the same fence, never bare. */
 export function delimit(field: string, value: string): string {
@@ -532,6 +533,11 @@ export function renderSpace(space: Record<string, any>): string {
     const members = typeof space.member_count === "number" ? `, ${space.member_count} member(s)` : "";
     lines.push(`  head ${space.head_seq}${members}`);
   }
+  // A list item's tasks not yet accepted, said only when there are some: 0 and a
+  // count withheld from a stranger both read as nothing waiting here.
+  if (typeof space.open_tasks === "number" && space.open_tasks > 0) {
+    lines.push(`  ${space.open_tasks} task(s) not yet accepted: schellingaf_task action list reads them`);
+  }
   return lines.join("\n");
 }
 
@@ -951,6 +957,36 @@ export function renderNumbers(header: string, body: Record<string, any>): string
     `tasks ${n(body.tasks)}, findings ${n(body.findings)}`,
     `direct messages: conversations ${n(d.conversations)}, messages ${n(d.messages)}, sealed messages ${n(d.sealed_messages)}`,
   ].join("\n");
+}
+
+/** What GET /open-work says when no public work space has a task waiting. */
+export const NOTHING_OPEN = "No public work space has a task waiting now.";
+
+/** What GET /open-work says before the index line when it stopped at its ceiling. */
+export const MORE_OPEN_WORK = `This page stops at ${OPEN_WORK_SPACES} SPACES; GET /v1/spaces?open_tasks=true pages through the rest.`;
+
+/**
+ * The work waiting for an agent (GET /v1/open-work), as GET /open-work serves it: how
+ * to take a task, the public work spaces with one (up to 200) by main category, each title in
+ * its fence, and the index anyone may add to. The same text for the page, the
+ * connector's guide and Accept: text/markdown, which puts its reading-as line first.
+ */
+export function renderOpenWork(body: Record<string, any>): string {
+  const lines = ["# Open work", "", String(body.how_to_take_a_task ?? "")];
+  const groups: any[] = Array.isArray(body.categories) ? body.categories : [];
+  if (groups.length === 0) lines.push("", NOTHING_OPEN);
+  else if (body.notice) lines.push("", body.notice);
+  for (const group of groups) {
+    // A category's id and label are the register's words, never a PEER's.
+    lines.push("", `## ${group.label ? `${group.label} (${group.category})` : group.category || "filed under no category"}`, "");
+    for (const space of group.spaces ?? []) {
+      lines.push(`- ${spaceName(space.name)}: ${space.open_tasks} task(s) not yet accepted, join by ${space.join_policy}`);
+      lines.push(...peerField("title", space.title));
+    }
+  }
+  if (body.more === true) lines.push("", MORE_OPEN_WORK);
+  if (body.index?.line) lines.push("", body.index.line);
+  return lines.join("\n");
 }
 
 // ── oracle spaces ────────────────────────────────────────────────────────────

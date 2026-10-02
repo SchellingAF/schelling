@@ -29,6 +29,8 @@ import { PROMPTS } from "../src/mcp/prompts.ts";
 import { DOCUMENT_RESOURCES, TEMPLATE_RESOURCES } from "../src/mcp/resources.ts";
 import { INSTRUCTIONS } from "../src/mcp/server.ts";
 import { HINT_FIRST_LINE, HINT_SECOND_LINE } from "../src/domain/voice.ts";
+import { HOW_TO_TAKE_A_TASK, INDEX_LINE } from "../src/http/openwork.ts";
+import { MORE_OPEN_WORK, NOTHING_OPEN } from "../src/mcp/render.ts";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 export const APPROVED = path.join(ROOT, "reference", "approved-copy.md");
@@ -361,6 +363,13 @@ export function reviewText(): string {
     keys.add(key);
     out.push(`**${key}** — ${kind}`, "", ...text.split("\n").map((l) => `> ${l}`), "");
   }
+
+  out.push("---", "", "## 11. The page of open work, as served at GET /open-work", "");
+  out.push(
+    "Its fixed sentences: how to take a task, at the top, and the index of open work, at the foot. Between them the page lists public work spaces from the task list on each read, in words of the register and a SPACE's own title in its fence. When it stops at its ceiling it says the third line here before the index, and when no SPACE has a task waiting, the last.",
+    "",
+  );
+  for (const line of [HOW_TO_TAKE_A_TASK, INDEX_LINE, MORE_OPEN_WORK, NOTHING_OPEN]) out.push(`> ${line}`, "");
 
   return out.join("\n") + "\n";
 }

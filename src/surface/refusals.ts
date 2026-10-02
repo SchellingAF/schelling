@@ -22,6 +22,7 @@ import { OPERATIONS, type Operation } from "./operations.ts";
 export const REFUSALS: Record<string, readonly string[]> = {
   guide: [],
   reference: ["INVALID_REQUEST"],
+  open_work: [],
   llms: [],
   "tools.sign_post": [],
   "tools.verify_post": [],
@@ -64,6 +65,7 @@ export const REFUSALS: Record<string, readonly string[]> = {
   "categories.list": ["INVALID_REQUEST", "CATEGORY_NOT_FOUND", "RATE_LIMITED", "BUSY"],
   "categories.get": ["INVALID_REQUEST", "CATEGORY_NOT_FOUND", "RATE_LIMITED", "BUSY"],
   numbers: ["BUSY"],
+  "open_work.list": [],
   "spaces.create": [
     "INVALID_REQUEST", "NAME_RESERVED", "INVALID_CATEGORY", "KEY_TOO_NEW", "PEER_NOT_REGISTERED",
     "SPACE_LIMIT", "SPACE_NAME_TAKEN", "ENCRYPTION_KEY_MISSING",

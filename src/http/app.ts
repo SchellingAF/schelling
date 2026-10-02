@@ -75,7 +75,7 @@ import { asObject, optionalString, parseStrictJson } from "../domain/validate.ts
 import { COMPATIBILITY_TOOLS, DOCUMENT_RESOURCES, MCP_TOOLS, PROMPTS, TEMPLATE_RESOURCES, createMcpFetch, isListen } from "../mcp/server.ts";
 import { CONNECT_PATH, SCOPES, bearerChallenge, connectResource, mountOAuth, oauthAvailable, resourceMetadataUrl } from "../oauth/routes.ts";
 import { WAIT_SECONDS_MAX, WAITS_PER_CALLER } from "./wait.ts";
-import { jsonText } from "../mcp/render.ts";
+import { jsonText, renderOpenWork } from "../mcp/render.ts";
 import { requestLog, type Head, type Refusal, type Returned } from "./log.ts";
 import { LISTEN_ADDRESSES_MAX, LISTEN_ADDRESS_SHAPES, LISTEN_MAX_SECONDS, LISTENS_PER_KEY, publishChange } from "../mcp/listen.ts";
 import { markdownReads } from "./markdown.ts";
@@ -165,6 +165,7 @@ import { mountMailbox } from "./mailbox.ts";
 import { mountSeek } from "./seek.ts";
 import { mountCategories } from "./categories.ts";
 import { mountNumbers } from "./numbers.ts";
+import { mountOpenWork, readOpenWork } from "./openwork.ts";
 import { mountOracle } from "./oracle.ts";
 import { mountTasks } from "./tasks.ts";
 import { mountFindings } from "./findings.ts";
@@ -467,8 +468,13 @@ function reachesAPool(c: { req: { path: string } }): boolean {
   // The three sign-in addresses that read or write a row. The two discovery
   // documents are built from configuration and touch no pool.
   if (c.req.path === "/oauth/authorize" || c.req.path === "/oauth/token" || c.req.path === "/oauth/register") return true;
+  // The page of open work, read from the database on each request like a /v1 read.
+  if (c.req.path === OPEN_WORK_PAGE) return true;
   return c.req.path.startsWith("/v1") && !servedFromMemory(c.req.path);
 }
+
+/** The one document outside /v1 that is read from the database rather than from memory. */
+const OPEN_WORK_PAGE = "/open-work";
 
 /**
  * Which requests the per-caller READ ceilings count: the /v1 reads, and the
@@ -486,7 +492,7 @@ function countsAsRead(c: { req: { method: string; path: string } }): boolean {
   if (atConnector(c.req.path)) return true;
   if (servedFromMemory(c.req.path)) return false;
   const reading = c.req.method === "GET" || c.req.method === "HEAD";
-  return reading && c.req.path.startsWith("/v1");
+  return reading && (c.req.path.startsWith("/v1") || c.req.path === OPEN_WORK_PAGE);
 }
 
 export function createApp(config: Config, db: Db): Hono<Env> {
@@ -926,6 +932,16 @@ export function createApp(config: Config, db: Db): Hono<Env> {
   app.get("/reference", (c) => {
     const part = answerReference(c.req.query("section"), c.req.query("operation"));
     return document(c, part.text, part.etag, "text/markdown");
+  });
+
+  // The work waiting for an agent, worked out on each read (openwork.ts), and served as
+  // the primer is: markdown, with its ETag. Unlike the primer it changes as tasks are
+  // taken and accepted, so a cache may keep it for a minute and no longer. Its JSON is
+  // GET /v1/open-work.
+  app.get(OPEN_WORK_PAGE, async (c) => {
+    const text = renderOpenWork(await readOpenWork(db)) + "\n";
+    c.header("Cache-Control", "public, max-age=60");
+    return document(c, text, etagOf(text), "text/markdown");
   });
 
   // Files served as they are under content/, each at its own path there:
@@ -2075,6 +2091,7 @@ export function createApp(config: Config, db: Db): Hono<Env> {
   mountSeek(app, db);
   mountCategories(app, db);
   mountNumbers(app, db);
+  mountOpenWork(app, db);
   mountOracle(app, db);
   mountTasks(app, db);
   mountFindings(app, db);

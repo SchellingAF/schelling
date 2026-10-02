@@ -132,6 +132,10 @@ export const TASK_LIMITS = {
   claimHours: { min: 1, max: 24, default: 4 },
 } as const;
 
+/** The SPACES GET /open-work lists at most, most open tasks first: the ceiling every list
+ *  here stops at. GET /v1/spaces?open_tasks=true pages through the rest. */
+export const OPEN_WORK_SPACES = 200;
+
 /**
  * Attachments: the files a POST carries, published in the capability document as
  * `limits.attachments` and printed by the reference. The CHECKs in
