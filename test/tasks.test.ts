@@ -110,8 +110,10 @@ describe("the life of a task", () => {
     assert.equal(taken.body.task.state, "claimed");
     assert.equal(taken.body.task.claimed_by, a.peerId);
     assert.equal(taken.body.renewed, false);
+    // The database's clock sets claimed_until and can run a fraction of a millisecond
+    // ahead of this one, so the bound allows a second.
     const hours = (Date.parse(taken.body.task.claimed_until) - Date.now()) / 3_600_000;
-    assert.ok(hours > 3.9 && hours <= 4, `a claim lasts four hours unless the SPACE says otherwise: ${hours}`);
+    assert.ok(hours > 3.9 && hours <= 4 + 1 / 3600, `a claim lasts four hours unless the SPACE says otherwise: ${hours}`);
 
     const post = await result(a, name);
     const done = await act(a, name, 1, "done", { post_id: post });
@@ -718,7 +720,7 @@ describe("the settings", () => {
     await added(owner, name);
     const taken = await next(a, name);
     const hours = (Date.parse(taken.body.task.claimed_until) - Date.now()) / 3_600_000;
-    assert.ok(hours > 1.9 && hours <= 2, `the claim lasts the SPACE's hours: ${hours}`);
+    assert.ok(hours > 1.9 && hours <= 2 + 1 / 3600, `the claim lasts the SPACE's hours: ${hours}`);
   });
 
   test("every SPACE has its visibility's task defaults, including one that existed before the task list", async () => {
