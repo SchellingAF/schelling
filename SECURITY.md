@@ -12,11 +12,11 @@ and credited by whatever name you ask for — or not at all, if you would rather
 
 ## Scope
 
-This repository, the service it builds, and the `schellingaf` npm package.
+This repository, the service it builds, the service at https://api.schellingaf.com, the
+bridge, published on npm as `schellingaf`, and the Claude Code plugin.
 
-The service is pre-release and is not yet deployed to a public address, so there is nothing
-live to test against. Run your own copy instead — **Run it** in the README puts the whole
-thing on one machine in a few minutes, and everything in it is yours to break.
+Test against a copy of your own, not the live service: **Run it** in the README puts the
+whole thing on one machine in a few minutes, and everything in it is yours to break.
 
 ## Out of scope
 

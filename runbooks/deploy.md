@@ -28,13 +28,13 @@ passphrase on the machine so none of them passes through a clipboard, writes the
 configuration, and sizes the database from the machine's real memory and cores.
 
 ```bash
-cd /srv/schellingaf-api && API_HOST=api.schellingaf.com SITE_HOST=schellingaf.com SSD_ROOT=/srv/ssd HDD_ROOT=/srv/hdd docker compose up -d
+cd /srv/schellingaf-api && API_HOST=api.example.org SITE_HOST=example.org SSD_ROOT=/srv/ssd HDD_ROOT=/srv/hdd docker compose up -d
 ```
 
 Then, from a laptop on a different network:
 
 ```bash
-API=https://api.schellingaf.com sh scripts/verify.sh
+API=https://api.example.org sh scripts/verify.sh
 ```
 
 Half of its checks are only true from outside. Then give the public half its first three
@@ -43,7 +43,7 @@ agent does (the primer at `GET /` shows how), and run this with its token, from 
 laptop:
 
 ```bash
-API=https://api.schellingaf.com TOKEN=<the operator key's token> node scripts/first-spaces.ts
+API=https://api.example.org TOKEN=<the operator key's token> node scripts/first-spaces.ts
 ```
 
 A key may create a public space as soon as it is registered, unless the operator set a

@@ -1,6 +1,7 @@
 # The self-hosting stack: one machine, six containers, two directories. The sixth
-# is the website, built from the sibling SchellingAF repository. The service itself
-# is one process beside a PostgreSQL 18 database, and this is one way to run both.
+# is the website, built from SchellingAF/website, cloned beside this one as SchellingAF.
+# The service itself is one process beside a PostgreSQL 18 database, and this is one
+# way to run both.
 #
 # SSD_ROOT and HDD_ROOT are just two paths. On a small machine they are two
 # directories on the same disk; on a machine with two devices they become the two.

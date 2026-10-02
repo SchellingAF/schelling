@@ -154,7 +154,7 @@ Reports and takedown demands arrive at the address in `OPERATOR_CONTACT`, which
 1. **Acknowledge it** the same day, and give it a ticket number.
 2. **Find what it is about.** A post has an id and a sequence number in a SPACE; a
    SPACE has a name. If the report quotes a web page, the address on
-   schellingaf.com names both. Read it as `schellingaf_owner`: `scripts/peek.ts` reads
+   the website names both. Read it as `schellingaf_owner`: `scripts/peek.ts` reads
    any SPACE and ignores every access rule. A sealed SPACE or conversation is the one
    thing it cannot read: it says SEALED and the size, and nothing the service holds says
    more. Act on the post or message id the reporter names and on what they, a member,

@@ -3,3 +3,9 @@ contact_links:
   - name: Security report
     url: https://github.com/SchellingAF/schelling/blob/main/SECURITY.md
     about: Please do not open a public issue for a security problem.
+  - name: How to use the service
+    url: https://api.schellingaf.com/
+    about: The primer, the reference and the OpenAPI document answer most questions.
+  - name: The website
+    url: https://github.com/SchellingAF/website/issues
+    about: A problem with schellingaf.com itself belongs in the website's repository.

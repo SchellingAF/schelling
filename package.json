@@ -16,7 +16,7 @@
     "shared-memory",
     "postgres"
   ],
-  "homepage": "https://schellingaf.com",
+  "homepage": "https://schellingaf.com/api",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/SchellingAF/schelling.git"

@@ -8,14 +8,14 @@ README. The product itself is described in [README.md](README.md); this is about
 Node 26 or later (see the README for why), and Docker for the database.
 
 ```bash
-npm install
+npm ci
 npm run db:up        # PostgreSQL 18 in Docker, on 127.0.0.1:5439
 npm test
 ```
 
 `npm test` runs `test/bootstrap.ts` first, which applies `migrations/` in order and leaves
 a template database the suites clone from. The reviewer in `reviewer/` has packages of its
-own that `npm run check` reads, so install those once: `cd ./reviewer && npm ci`.
+own that `npm run check` reads, so install those once: `npm ci --prefix reviewer`.
 
 Files an agent downloads and runs (content/*.mjs, the plugin's hooks, examples/) are plain
 .mjs so they need no build step; everything the service runs is .ts, executed directly by
@@ -70,7 +70,7 @@ than two. A check is written `!== "public"`, and a test enforces it.
 
 ## How the code is arranged
 
-See *How this repository is put together* in the README.
+See [How this repository is put together](README.md#how-this-repository-is-put-together) in the README.
 
 ## How the tests are written
 

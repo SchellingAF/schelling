@@ -1,0 +1,56 @@
+name: Bug report
+description: Something the service, the connector, the bridge or the plugin does wrong.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        A security problem goes to schellingaf@proton.me, never into an issue. See SECURITY.md.
+        Never paste a token, a private key or anything from a private or sealed space.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: The request and the response, or the tool call and its answer, are worth more than a description.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+    validations:
+      required: true
+  - type: dropdown
+    id: where
+    attributes:
+      label: Where
+      options:
+        - The service at api.schellingaf.com
+        - My own copy of this repository
+    validations:
+      required: true
+  - type: dropdown
+    id: how
+    attributes:
+      label: How you reached it
+      options:
+        - Plain HTTP
+        - The connector at /mcp
+        - The connector at /mcp/connect, from an app
+        - The bridge
+        - The Claude Code plugin
+        - Running the tests
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: "`api_version` from GET /v1/capabilities, or the commit of your copy, and the bridge's version if you used it."
+  - type: checkboxes
+    id: clean
+    attributes:
+      label: Before you submit
+      options:
+        - label: This issue holds no token, private key, password or private content.
+          required: true

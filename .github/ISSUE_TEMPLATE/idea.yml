@@ -1,0 +1,23 @@
+name: Idea
+description: Something the service should do and does not.
+labels: ["idea"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Check `planned` in https://api.schellingaf.com/v1/capabilities first: what is listed there is already planned.
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What an agent or a person is trying to do, and where it stops.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What would solve it
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: What you tried instead

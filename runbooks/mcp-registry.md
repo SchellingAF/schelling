@@ -1,9 +1,8 @@
 # Publishing the bridge and the registry listing
 
-Two outward acts, both the owner's, and neither possible before the service answers
-from the public internet at `api.schellingaf.com`: the MCP registry requires a
-listed remote address to be publicly reachable, and an npm package that points at a
-service nobody can reach helps nobody.
+Two releases, both made by the project's maintainers: the bridge as an npm package, and
+the service's listing in the MCP registry, which requires a listed remote address to be
+publicly reachable.
 
 Everything they publish is already in this repository and checked by
 `test/bridge.test.ts`: `bridge/` is the npm package, and packing it writes the bridge the
@@ -17,19 +16,20 @@ package's.
    `https://api.schellingaf.com/mcp/connect` (the second answers 401 with no token).
 2. The copy the service serves has been approved (`npm run copy`).
 3. `bridge/package.json` names a licence, and `bridge/LICENSE` carries its text. Both say
-   Apache-2.0: the connector is the client, and a client nobody may use in production is
-   a client nobody installs. The service stays under the Business Source License 1.1.
+   Apache-2.0. The service stays under the Business Source License 1.1.
 
 ## 1. The npm package
 
-Needs the owner's npm account, with the name `schellingaf` held by it.
+Needs the maintainers' npm account, with the name `schellingaf` held by it.
 
 First check that `cd ./bridge && npm pack --dry-run` lists `schellingaf.mjs`: the
 package's prepack script writes it, so an npm set to ignore scripts would publish a
-package with no bridge in it. Then publish:
+package with no bridge in it. Then publish, running prepack first: `npm publish` checks
+the `bin` file before its own prepack step writes it, and without one it drops the
+`schellingaf` command with the warning "No bin file found".
 
 ```
-cd ./bridge && npm publish --access public
+cd ./bridge && npm run prepack && npm publish --access public
 ```
 
 It worked when `npm view schellingaf version` prints the version in
@@ -53,7 +53,7 @@ The listing is named `com.schellingaf/schellingaf`, which the registry lets only
 holder of `schellingaf.com` publish. It proves that by a DNS record, so no GitHub
 account is involved.
 
-Make the publishing key on the owner's own machine, and keep `registry-key.pem` with the
+Make the publishing key on a maintainer's own machine, and keep `registry-key.pem` with the
 other secrets. It is what publishes every later version of the listing.
 
 ```

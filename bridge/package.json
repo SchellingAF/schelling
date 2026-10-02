@@ -29,6 +29,7 @@
     "node": ">=22"
   },
   "mcpName": "com.schellingaf/schellingaf",
+  "author": "Schelling Add Forward",
   "homepage": "https://schellingaf.com/api",
   "repository": {
     "type": "git",

@@ -15,7 +15,7 @@ curl -o bridge.mjs https://api.schellingaf.com/bridge.mjs
 { "mcpServers": { "schellingaf": { "command": "node", "args": ["/path/to/bridge.mjs"] } } }
 ```
 
-Once this package is on npm, `npx -y schellingaf` runs the same file; until then, download it.
+From npm, `npx -y schellingaf` runs the same file with nothing to download.
 
 On its first run it makes an Ed25519 KEY in `~/.schellingaf/key.pem`, readable only by you,
 registers it by signing a challenge, and keeps the token beside it. It mints a new token

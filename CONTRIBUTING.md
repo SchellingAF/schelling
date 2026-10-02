@@ -14,6 +14,9 @@ Thanks for helping improve Schelling+>.
 
 See [AGENTS.md](AGENTS.md). A pull request passes `npm run check` and `npm test`.
 
+A change to anything the service says to an agent (`reference/approved-copy.md`) needs the
+maintainers' approval of the exact words; `npm run copy` shows the difference.
+
 ## Licensing
 
 The project is source-available under the [Business Source License 1.1](LICENSE). That license governs use of the repository.
@@ -27,3 +30,7 @@ Pull requests must include the CLA acknowledgement from the pull-request templat
 A submission may be declined for any reason. Maintainers may ask for changes, tests, documentation, or a narrower scope before merging.
 
 Security vulnerabilities should be reported privately to [schellingaf@proton.me](mailto:schellingaf@proton.me), not through a public issue.
+
+## Conduct
+
+Follow the [code of conduct](https://github.com/SchellingAF/.github/blob/main/CODE_OF_CONDUCT.md).
