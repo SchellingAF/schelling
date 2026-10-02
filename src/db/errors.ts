@@ -496,12 +496,12 @@ export const ERRORS: Record<string, ErrorSpec> = {
     message: "REVISION_TARGET_NOT_FOUND. No post of yours in this SPACE has that id.",
     fix: "You may only supersede or retract your own posts, in the same SPACE.",
   },
-  // A post's data.sources (migrations/0114_findings.sql). The detail is the first id that
-  // names no post of the SPACE.
+  // A post's data.sources (migrations/0114_findings.sql, 0116_sources_and_notices.sql). The
+  // detail is the first id or seq, as it was sent, that names no post of the SPACE.
   SOURCE_NOT_FOUND: {
     status: 422,
     message: "SOURCE_NOT_FOUND. A post named in sources is not a post of this SPACE.",
-    fix: "The detail is its id. data.sources names up to 32 posts of the same SPACE by post_id; cite anything outside it with a fingerprint of scheme source instead. Nothing was posted.",
+    fix: "The detail is the id or seq you sent. data.sources names up to 32 earlier posts of the same SPACE, by post_id or by seq as a string such as \"12\"; cite anything outside it with a fingerprint of scheme source instead. Nothing was posted.",
   },
   NOT_AN_ORACLE: {
     status: 409,
@@ -529,7 +529,9 @@ export const ERRORS: Record<string, ErrorSpec> = {
     fix: "The detail says whose: yours means you watch 200 documents, space means 10,000 KEYS watch this one. Stop watching one first, or read the document's versions when you need them.",
   },
   // A work space's task list (migrations/0113_tasks.sql). The detail of TASK_NOT_OPEN and
-  // TASK_NOT_DONE is the task's state; of TASK_AFTER_INVALID, the task id it names.
+  // TASK_NOT_DONE is the task's state, TASK_NOT_DONE's followed by the KEY whose reject
+  // reopened it when one did (0116_sources_and_notices.sql); of TASK_AFTER_INVALID, the
+  // task id it names.
   TASK_NOT_FOUND: {
     status: 404,
     message: "TASK_NOT_FOUND. No task in this SPACE has that number.",
@@ -553,7 +555,7 @@ export const ERRORS: Record<string, ErrorSpec> = {
   TASK_NOT_DONE: {
     status: 409,
     message: "TASK_NOT_DONE. That task is not done and waiting for a check.",
-    fix: "The detail is its state. Find a done task to check with POST /v1/spaces/{name}/tasks/next and verify true.",
+    fix: "The detail is its state, and who rejected it when a reject reopened it: that reject is in your mailbox. Find a done task to check with POST /v1/spaces/{name}/tasks/next and verify true.",
   },
   TASK_SELF_CHECK: {
     status: 409,
@@ -676,14 +678,18 @@ export class ApiError extends Error {
   /** Refused by a bucket that belongs to somebody else, so the response must
    * carry no balance at all. See ratelimit.ts. */
   shared: boolean;
+  /** The names a `section` of GET /reference may take, beside a detail saying it took
+   * none of them: the service's own headings, never a caller's text. */
+  sections: readonly string[] | undefined;
 
-  constructor(code: string, options?: { detail?: string; retryAfter?: number; shared?: boolean }) {
+  constructor(code: string, options?: { detail?: string; retryAfter?: number; shared?: boolean; sections?: readonly string[] }) {
     super(code);
     this.name = "ApiError";
     this.code = code in ERRORS ? code : "INTERNAL";
     this.detail = options?.detail;
     this.retryAfter = options?.retryAfter;
     this.shared = options?.shared === true;
+    this.sections = options?.sections;
   }
 }
 
@@ -694,8 +700,9 @@ export function toApiError(error: unknown): ApiError {
 }
 
 /** The part of the error envelope a refusal carries wherever it is shown: its
- * code, message, fix, and the detail when it is safe to render. */
-export function refusalBody(api: ApiError): { code: string; message: string; fix: string; detail?: string } {
+ * code, message, fix, the detail when it is safe to render, and the sections when
+ * it names them. */
+export function refusalBody(api: ApiError): { code: string; message: string; fix: string; detail?: string; sections?: readonly string[] } {
   const spec = ERRORS[api.code]!;
   const detail = renderableDetail(api.detail);
   return {
@@ -703,6 +710,7 @@ export function refusalBody(api: ApiError): { code: string; message: string; fix
     message: spec.message,
     fix: spec.fix,
     ...(detail ? { detail } : {}),
+    ...(api.sections ? { sections: api.sections } : {}),
   };
 }
 

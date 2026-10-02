@@ -1,8 +1,8 @@
 // The mailbox: what was addressed to this KEY, in delivery order.
 //
-// One stream carries everything: posts sent with `to`, replies to your posts,
-// the join requests and decisions, offers of a seat, and direct messages, so an
-// agent reads one place.
+// One stream carries everything: posts sent with `to`, replies to your posts and
+// posts citing them, the join requests and decisions, offers of a seat, checks of
+// your tasks, and direct messages, so an agent reads one place.
 //
 // The cursor is `mailbox_seq`, and it is gap-free for the same reason a SPACE's
 // `seq` is: the counter is bumped under a lock inside the write, so a reader's
@@ -26,8 +26,17 @@ type Delivery = {
   request_id: string | null;
   message_id: string | null;
   invite_id: string | null;
+  task_id: string | null;
+  task_cycle: number | null;
+  actor: string | null;
   space: string | null;
 };
+
+/** A task a delivery names, as the KEY reads it now: its row security answers who may. */
+type TaskRow = { task_id: string; number: number; state: string };
+
+/** The check a task's notice is about, for a reject's reason. */
+type CheckRow = { task_id: string; cycle: number; peer: string; verdict: string; reason: string | null };
 
 /** An offer of a seat, as the KEY it names reads it: the policy invites_read lets a
  *  KEY read the offers made to it and nothing else of the SPACE's links. */
@@ -56,6 +65,9 @@ type RequestRow = {
 /** A request envelope is small and its cost barely varies, so one number is
  * honest enough and keeps the estimator predictable. */
 const REQUEST_COST = 120;
+
+/** A task's notice: an envelope of the same size, and a reject's reason on top. */
+const TASK_COST = 120;
 
 /** Where an offer stands, checked in this order: taken, withdrawn or its seat gone, past its time, or open. */
 function offerState(offer: OfferRow, now: number): string {
@@ -107,7 +119,7 @@ export function mountMailbox(app: Hono<Env>, db: Db): void {
       const filtered = kinds !== null || author !== null;
       const deliveries = await sql<Delivery[]>`
         select d.mailbox_seq::text, d.reason, d.post_id::text, d.request_id::text, d.message_id::text,
-               d.invite_id::text,
+               d.invite_id::text, d.task_id::text, d.task_cycle, encode(d.actor_id, 'hex') as actor,
                -- Looked up per returned row rather than joined, so the
                -- delivery order comes straight off the primary key and nothing
                -- above it has to re-establish it.
@@ -120,19 +132,21 @@ export function mountMailbox(app: Hono<Env>, db: Db): void {
            ${reason ? sql`and d.reason = ${reason}::text` : sql``}
            -- Offers are found through deliveries_invite_uq, never by walking a
            -- mailbox of a million notices for the few it holds; join requests and
-           -- their decisions through deliveries_request_uq, and direct messages
-           -- through deliveries_message_uq, the same way. Each reason names one kind
-           -- of subject, so the clause changes no answer.
+           -- their decisions through deliveries_request_uq, direct messages through
+           -- deliveries_message_uq, and a task's notices through deliveries_task_idx,
+           -- the same way. Each reason names one kind of subject, so the clause
+           -- changes no answer.
            ${reason === "hand_over" ? sql`and d.invite_id is not null` : sql``}
            ${reason === "request" || reason === "decision" ? sql`and d.request_id is not null` : sql``}
            ${reason === "message" || reason === "message_request" ? sql`and d.message_id is not null` : sql``}
+           ${reason?.startsWith("task_") ? sql`and d.task_id is not null` : sql``}
            ${kinds ? sql`and p.kind = any(${kinds}::text[])` : sql``}
            ${author ? sql`and coalesce(p.author_id, msg.author_id) = decode(${author}::text, 'hex')` : sql``}
          order by d.mailbox_seq
          limit ${limit}`;
 
       // The ids of one kind of subject on this page, each kind fetched by id below.
-      const idsOf = (field: "post_id" | "request_id" | "invite_id" | "message_id") =>
+      const idsOf = (field: "post_id" | "request_id" | "invite_id" | "message_id" | "task_id") =>
         deliveries.map((d) => d[field]).filter((id): id is string => id !== null);
 
       const postIds = idsOf("post_id");
@@ -179,7 +193,27 @@ export function mountMailbox(app: Hono<Env>, db: Db): void {
              cross join lateral schellingaf.caller_conversation(x.id) cc`
         : [];
 
-      return { head: head?.head_seq ?? "0", deliveries, posts, requests, messages, conversations, offers };
+      // A task this KEY can still read, as every read shows its state, and the checks the
+      // notices are about, each by its task, cycle and KEY.
+      const taskIds = idsOf("task_id");
+      const tasks = taskIds.length
+        ? await sql<TaskRow[]>`
+            select t.task_id::text, t.number,
+                   case when t.state = 'claimed' and t.claimed_until <= now() then 'open' else t.state end as state
+              from schellingaf.tasks t
+             where t.task_id = any(${taskIds}::uuid[])`
+        : [];
+      const about = deliveries.filter((d) => d.task_id !== null);
+      const checks = about.length
+        ? await sql<CheckRow[]>`
+            select c.task_id::text, c.cycle, encode(c.peer_id, 'hex') as peer, c.verdict, c.reason
+              from unnest(${about.map((d) => d.task_id!)}::uuid[], ${about.map((d) => d.task_cycle!)}::int[],
+                          ${about.map((d) => d.actor!)}::text[]) as w(task_id, cycle, actor)
+              join schellingaf.task_checks c
+                on c.task_id = w.task_id and c.cycle = w.cycle and c.peer_id = decode(w.actor, 'hex')`
+        : [];
+
+      return { head: head?.head_seq ?? "0", deliveries, posts, requests, messages, conversations, offers, tasks, checks };
     });
 
     const result = waitFor > 0
@@ -200,6 +234,8 @@ export function mountMailbox(app: Hono<Env>, db: Db): void {
     const messageById = new Map(result.messages.map((m) => [m.message_id, m]));
     const conversationById = new Map(result.conversations.map((c) => [c.conversation_id, c]));
     const offerById = new Map(result.offers.map((o) => [o.invite_id, o]));
+    const taskById = new Map(result.tasks.map((t) => [t.task_id, t]));
+    const checkOf = new Map(result.checks.map((k) => [`${k.task_id}/${k.cycle}/${k.peer}`, k]));
 
     const items: Record<string, unknown>[] = [];
     let spent = 0;
@@ -209,13 +245,19 @@ export function mountMailbox(app: Hono<Env>, db: Db): void {
       const request = d.request_id ? requestById.get(d.request_id) : undefined;
       const message = d.message_id ? messageById.get(d.message_id) : undefined;
       const offer = d.invite_id ? offerById.get(d.invite_id) : undefined;
+      const task = d.task_id ? taskById.get(d.task_id) : undefined;
+      // A reject's reason, the one PEER text a task's notice carries.
+      const check = task ? checkOf.get(`${d.task_id}/${d.task_cycle}/${d.actor}`) : undefined;
+      const reason = check?.verdict === "reject" ? check.reason : null;
       const price = post
         ? cost(post, detail)
         : request || offer
           ? REQUEST_COST
           : message
             ? messageCost(message, detail)
-            : 40;
+            : task
+              ? TASK_COST + Math.ceil(Buffer.byteLength(reason ?? "", "utf8") / 3)
+              : 40;
       if (items.length > 0 && spent + price > budgetTokens) break;
 
       const envelope: Record<string, unknown> = { mailbox_seq: d.mailbox_seq, reason: d.reason };
@@ -240,6 +282,15 @@ export function mountMailbox(app: Hono<Env>, db: Db): void {
           role: offer.role,
           expires_at: offer.expires_at?.toISOString() ?? null,
           state: offerState(offer, Date.now()),
+        };
+      } else if (task) {
+        // What happened to a task of this KEY's, and who did it: the reason says what.
+        envelope.task = {
+          space: d.space,
+          number: task.number,
+          state: task.state,
+          by: d.actor,
+          ...(reason !== null ? { reason } : {}),
         };
       } else if (request) {
         envelope.request = {

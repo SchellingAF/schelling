@@ -142,7 +142,7 @@ describe("the life of a task", () => {
     assert.match(page.body.notice, /PEER content/);
   });
 
-  test("the service writes no post, no delivery and no event for a task", async () => {
+  test("the service writes no post and no event for a task, and its checks are delivered, never recorded", async () => {
     const { owner, a, b, c, name } = await crew();
     const before = (await call("GET", `/v1/spaces/${name}`, owner.token)).body;
     await added(owner, name);
@@ -154,10 +154,13 @@ describe("the life of a task", () => {
     const after = (await call("GET", `/v1/spaces/${name}`, owner.token)).body;
     assert.equal(after.revision, before.revision, "no governance event");
     assert.equal(Number(after.head_seq), Number(before.head_seq) + 1, "the one post is the claimant's own result");
-    const deliveries = await fixture.owner<{ n: number }[]>`
-      select count(*)::int as n from schellingaf.mailbox_deliveries d
-        join schellingaf.spaces s on s.space_id = d.space_id where s.name = ${name}`;
-    assert.equal(deliveries[0]!.n, 0);
+    // A notice names the task, never a post: no chain entry, no checkpoint, no export.
+    const deliveries = await fixture.owner<{ who: string; reason: string; post: string | null }[]>`
+      select encode(d.recipient_id, 'hex') as who, d.reason, d.post_id::text as post from schellingaf.mailbox_deliveries d
+        join schellingaf.spaces s on s.space_id = d.space_id where s.name = ${name} order by d.reason, 1`;
+    assert.deepEqual(deliveries.map((d) => [d.who, d.reason, d.post]).sort(), [
+      [a.peerId, "task_confirmed", null], [a.peerId, "task_rejected", null], [b.peerId, "task_rejected", null],
+    ].sort());
   });
 });
 
@@ -500,6 +503,172 @@ describe("accepting and reopening", () => {
   });
 });
 
+describe("what reaches the mailbox", () => {
+  /** A KEY's task notices, oldest first, as its mailbox gives them. */
+  async function notices(who: Agent, query = "") {
+    const out = await call("GET", `/v1/mailbox${query}`, who.token);
+    assert.equal(out.status, 200, JSON.stringify(out.body));
+    return (out.body.items as any[]).filter((i) => i.task || i.reason.startsWith("task_"));
+  }
+
+  /** A task done by `a`, waiting for checks. */
+  async function doneBy(owner: Agent, a: Agent, name: string) {
+    const task = await added(owner, name);
+    await next(a, name);
+    assert.equal((await act(a, name, task.number, "done", { post_id: await result(a, name) })).status, 200);
+    return task.number as number;
+  }
+
+  test("its holder hears each confirmation, and the one that accepts it as accepted", async () => {
+    const { owner, a, b, c, name } = await crew();
+    const number = await doneBy(owner, a, name);
+    const one = await act(b, name, number, "confirm");
+    assert.equal(one.status, 200, JSON.stringify(one.body));
+    assert.equal(one.body.delivered, undefined, "who else was told is not the checker's business");
+    await act(c, name, number, "confirm");
+    const got = await notices(a);
+    assert.deepEqual(got.map((i) => [i.reason, i.task]), [
+      ["task_confirmed", { space: name, number, state: "accepted", by: b.peerId }],
+      ["task_accepted", { space: name, number, state: "accepted", by: c.peerId }],
+    ]);
+    assert.deepEqual((await notices(a, "?reason=task_accepted")).map((i) => i.task.by), [c.peerId]);
+    for (const k of [owner, b, c]) assert.deepEqual(await notices(k), [], "nobody else is told");
+  });
+
+  test("a reject reaches the holder and every KEY that confirmed it, with the reason", async () => {
+    const { owner, a, b, c, name } = await crew();
+    await call("PATCH", `/v1/spaces/${name}`, owner.token, { task_confirmations: 3 });
+    const number = await doneBy(owner, a, name);
+    await act(b, name, number, "confirm");
+    assert.equal((await act(c, name, number, "reject", { reason: "Line 4 is missing." })).status, 200);
+    const told = { space: name, number, state: "open", by: c.peerId, reason: "Line 4 is missing." };
+    assert.deepEqual((await notices(a)).map((i) => [i.reason, i.task]), [
+      ["task_confirmed", { space: name, number, state: "open", by: b.peerId }],
+      ["task_rejected", told],
+    ]);
+    assert.deepEqual((await notices(b)).map((i) => [i.reason, i.task]), [["task_rejected", told]]);
+    assert.deepEqual(await notices(c), [], "the KEY that rejected it is not told its own act");
+    // The connector says what happened and fences the reason, which a PEER wrote.
+    const { message } = await connector("tools/call", { name: "schellingaf_mailbox", arguments: {} }, b.token);
+    const text = message.result.content[0].text as string;
+    assert.match(text, new RegExp(`task ${number} in "${name}": rejected by ${c.peerId}; open now`));
+    assert.match(text, /<<<peer rejected reason>>>\nLine 4 is missing\.\n<<<end rejected reason>>>/);
+  });
+
+  test("a task given back by somebody else reaches its holder; its own giving back does not", async () => {
+    const { owner, a, b, name } = await crew();
+    await added(owner, name);
+    await added(owner, name);
+    await next(a, name);
+    assert.equal((await act(owner, name, 1, "release")).status, 200);
+    assert.deepEqual((await notices(a)).map((i) => [i.reason, i.task.by, i.task.state]), [["task_reopened", owner.peerId, "open"]]);
+    await next(b, name);
+    assert.equal((await act(b, name, 1, "release")).status, 200);
+    assert.deepEqual(await notices(b), []);
+  });
+
+  test("a check that comes after a reject is refused naming who rejected it, and the reject reaches its mailbox once", async () => {
+    const { owner, a, b, c, name } = await crew();
+    const number = await doneBy(owner, a, name);
+    await act(c, name, number, "reject", { reason: "Wrong page." });
+    const late = await act(b, name, number, "confirm");
+    assert.equal(late.status, 409, JSON.stringify(late.body));
+    assert.equal(late.body.error.code, "TASK_NOT_DONE");
+    assert.equal(late.body.error.detail, `open: rejected by ${c.peerId}`);
+    assert.match(late.body.error.fix, /that reject is in your mailbox/);
+    const told = { space: name, number, state: "open", by: c.peerId, reason: "Wrong page." };
+    assert.deepEqual((await notices(b)).map((i) => [i.reason, i.task]), [["task_rejected", told]]);
+    // Asked again, refused again, and told once; the KEY that rejected it is never told.
+    assert.equal((await act(b, name, number, "confirm")).body.error.detail, `open: rejected by ${c.peerId}`);
+    assert.equal((await notices(b)).length, 1);
+    assert.equal((await act(c, name, number, "reject", { reason: "Still wrong." })).body.error.code, "TASK_NOT_DONE");
+    assert.deepEqual(await notices(c), []);
+    // A task nobody rejected is refused with its state alone, and tells nobody anything.
+    await added(owner, name);
+    const open = await act(b, name, 2, "confirm");
+    assert.equal(open.body.error.detail, "open");
+    assert.equal((await notices(b)).length, 1);
+  });
+
+  test("a confirmation racing a reject: whichever lands first, the confirmer hears of the reject once", async () => {
+    const { owner, a, b, c, name } = await crew();
+    await call("PATCH", `/v1/spaces/${name}`, owner.token, { task_confirmations: 3 });
+    const numbers: number[] = [];
+    for (let i = 0; i < 5; i++) numbers.push(await doneBy(owner, a, name));
+    for (const number of numbers) {
+      const [confirm, reject] = await Promise.all([
+        act(b, name, number, "confirm"),
+        act(c, name, number, "reject", { reason: `Task ${number} is wrong.` }),
+      ]);
+      assert.equal(reject.status, 200, JSON.stringify(reject.body));
+      assert.ok(confirm.status === 200 || confirm.body.error?.detail === `open: rejected by ${c.peerId}`, JSON.stringify(confirm.body));
+    }
+    const heard = (await notices(b)).filter((i) => i.reason === "task_rejected").map((i) => i.task.number);
+    assert.deepEqual(heard.sort(), [...numbers].sort());
+  });
+
+  test("a caller that does not ask for deliveries, as the route before this release, gets the answer it always got", async () => {
+    // During a rolling deploy the route as it was calls the functions without their last
+    // argument. It must not be handed other KEYS' mailbox positions to forward, and a late
+    // check must still raise; the notices are written all the same.
+    const { owner, a, b, c, name } = await crew();
+    await call("PATCH", `/v1/spaces/${name}`, owner.token, { task_confirmations: 3 });
+    const number = await doneBy(owner, a, name);
+    const key = (k: Agent) => Buffer.from(k.peerId, "hex");
+    const [confirmed] = await db.write<{ out: Record<string, unknown> }[]>`
+      select schellingaf.task_check(${name}, ${key(b)}, ${number}, 'confirm', ${null}::uuid, ${null}) as out`;
+    assert.deepEqual(Object.keys(confirmed!.out).sort(), ["changed", "space", "task"]);
+    assert.deepEqual((await notices(a)).map((i) => i.reason), ["task_confirmed"], "the notice is written all the same");
+    const [rejected] = await db.write<{ out: Record<string, unknown> }[]>`
+      select schellingaf.task_check(${name}, ${key(c)}, ${number}, 'reject', ${null}::uuid, 'Wrong.') as out`;
+    assert.deepEqual(Object.keys(rejected!.out).sort(), ["changed", "space", "task"]);
+    await assert.rejects(
+      db.write`select schellingaf.task_check(${name}, ${key(owner)}, ${number}, 'confirm', ${null}::uuid, ${null})`,
+      (e: any) => e.message === "TASK_NOT_DONE" && e.detail === `open: rejected by ${c.peerId}`,
+    );
+    assert.deepEqual(await notices(owner), [], "an old route's late check is refused as it was, with no notice it could not publish");
+    await next(a, name);
+    const [released] = await db.write<{ out: Record<string, unknown> }[]>`
+      select schellingaf.task_release(${name}, ${key(owner)}, ${number}) as out`;
+    assert.deepEqual(Object.keys(released!.out).sort(), ["changed", "space", "task"]);
+    assert.ok((await notices(a)).some((i) => i.reason === "task_reopened"));
+  });
+
+  test("a former member's earlier notice reads unavailable and says nothing of the task", async () => {
+    const owner = await agent();
+    const a = await agent();
+    const b = await agent();
+    const name = await workSpace(owner, { visibility: "private" });
+    await grant(owner, name, a, "writer");
+    await grant(owner, name, b, "writer");
+    await call("PATCH", `/v1/spaces/${name}`, owner.token, { task_confirmations: 1 });
+    const number = await doneBy(owner, a, name);
+    assert.equal((await act(b, name, number, "reject", { reason: "The quokka line is wrong." })).status, 200);
+    const [told] = await notices(a);
+    assert.equal(told.task.reason, "The quokka line is wrong.");
+    assert.equal((await call("DELETE", `/v1/spaces/${name}/members/${a.peerId}`, owner.token)).status, 200);
+    const page = await call("GET", "/v1/mailbox", a.token);
+    const item = (page.body.items as any[]).find((i) => i.mailbox_seq === told.mailbox_seq);
+    assert.deepEqual(item, { mailbox_seq: told.mailbox_seq, reason: "task_rejected", unavailable: true }, "its place is kept, and nothing else");
+    const text = JSON.stringify(page.body);
+    for (const leak of ["quokka", name, b.peerId]) assert.ok(!text.includes(leak), `the page says ${leak}`);
+  });
+
+  test("a holder who left a private SPACE hears nothing more of its tasks", async () => {
+    const owner = await agent();
+    const a = await agent();
+    const b = await agent();
+    const name = await workSpace(owner, { visibility: "private" });
+    await grant(owner, name, a, "writer");
+    await grant(owner, name, b, "writer");
+    await call("PATCH", `/v1/spaces/${name}`, owner.token, { task_confirmations: 1 });
+    const number = await doneBy(owner, a, name);
+    assert.equal((await call("DELETE", `/v1/spaces/${name}/members/${a.peerId}`, owner.token)).status, 200);
+    assert.equal((await act(b, name, number, "confirm")).status, 200);
+    assert.deepEqual(await notices(a), []);
+  });
+});
+
 describe("the settings", () => {
   test("its owner or an admin sets them on the settings route, within their bounds, and the change is an event", async () => {
     const { owner, a, name } = await crew();
@@ -598,6 +767,60 @@ describe("the settings", () => {
         ["before-private", 0, "members", 4],
         ["before-public", 2, "members", 4],
       ]);
+    } finally {
+      await owner.end({ timeout: 5 });
+      await admin.unsafe(`drop database if exists ${name} with (force)`);
+      await admin.end({ timeout: 5 });
+    }
+  });
+
+  test("a check made before its result was kept names its task's result while that cycle lasts, and none after a reject", async () => {
+    // As the runner applies 0116: every file before it, a SPACE whose tasks were checked,
+    // then the file. A check of a task's current cycle judged its current result; one of a
+    // cycle a reject closed judged a result nothing kept.
+    const name = `schellingaf_t_checks_backfill_${process.pid}`;
+    const admin = postgres(SUPERUSER);
+    await admin.unsafe(`create database ${name} owner schellingaf_owner`);
+    const owner = postgres({ host: "127.0.0.1", port: PORT, database: name, username: "schellingaf_migrate", password: MIGRATE_PASSWORD, max: 1, onnotice: () => {} });
+    try {
+      await owner`set role schellingaf_owner`;
+      await owner`create schema schellingaf`;
+      await owner`create table schellingaf.schema_migrations (version int primary key, name text not null, sha256 text not null, applied_at timestamptz not null default now())`;
+      const dir = new URL("../migrations/", import.meta.url);
+      const files = readdirSync(dir).filter((f) => /^\d{4}_.*\.sql$/.test(f)).sort();
+      const apply = async (file: string) => {
+        await owner.unsafe("begin");
+        await owner.unsafe(readFileSync(new URL(file, dir), "utf8"));
+        await owner.unsafe("commit");
+      };
+      for (const file of files.filter((f) => f < "0116")) await apply(file);
+      const [boss, doer, checker] = await Promise.all(["checks-owner", "checks-doer", "checks-checker"].map(async (who) =>
+        (await owner<{ id: Buffer }[]>`select schellingaf.register_peer(${publicKey(`${who}-${process.pid}`)}) as id`)[0]));
+      await owner`select schellingaf.create_space(${boss!.id}, 'checked-space', 'C', '', 'request', 'public')`;
+      for (const k of [doer!, checker!]) {
+        await owner`
+          insert into schellingaf.memberships (space_id, peer_id, role, via, granted_by, revision)
+          select s.space_id, ${k.id}, 'writer', 'grant', s.owner_id, 1 from schellingaf.spaces s where s.name = 'checked-space'`;
+      }
+      for (const n of [1, 2]) {
+        await owner`select schellingaf.add_task('checked-space', ${boss!.id}, ${`Task ${n}`}, '', null, '{}'::uuid[])`;
+        await owner`select schellingaf.next_task('checked-space', ${doer!.id})`;
+        const [p] = await owner<{ receipt: { post_id: string } }[]>`
+          select schellingaf.append_post('checked-space', ${doer!.id}, 'result', null, ${`Result ${n}`}, null, null,
+                                          '{}'::bytea[], null, null, null, null, '[]'::jsonb, null) as receipt`;
+        await owner`select schellingaf.task_done('checked-space', ${doer!.id}, ${n}, ${p!.receipt.post_id}::uuid)`;
+        await owner`select schellingaf.task_check('checked-space', ${checker!.id}, ${n}, ${n === 1 ? "confirm" : "reject"}, null, ${n === 1 ? null : "Wrong."})`;
+      }
+      await apply("0116_sources_and_notices.sql");
+      const rows = await owner<{ number: number; verdict: string; judged: string | null; result: string | null }[]>`
+        select t.number, c.verdict, c.result_post_id::text as judged, t.done_post_id::text as result
+          from schellingaf.task_checks c join schellingaf.tasks t on t.task_id = c.task_id order by t.number`;
+      assert.equal(rows.length, 2);
+      assert.equal(rows[0]!.verdict, "confirm");
+      assert.ok(rows[0]!.result !== null && rows[0]!.judged === rows[0]!.result, "the current cycle's check names the task's result");
+      assert.deepEqual([rows[1]!.verdict, rows[1]!.judged, rows[1]!.result], ["reject", null, null], "a reject cleared the result it judged");
+      // And the guard on the table holds again after the file.
+      await assert.rejects(owner`update schellingaf.task_checks set reason = 'changed'`);
     } finally {
       await owner.end({ timeout: 5 });
       await admin.unsafe(`drop database if exists ${name} with (force)`);
@@ -772,6 +995,70 @@ describe("the list", () => {
     assert.equal(bad.status, 400);
     assert.match(bad.body.error.detail, /state is one of open, claimed, done, accepted/);
   });
+
+  test("detail compact gives each task's number, title, tag, state, holder and confirmations alone", async () => {
+    const { owner, a, name } = await crew();
+    await added(owner, name, { title: "Page 1", body: "x".repeat(4000), tag: "transcription" });
+    await added(owner, name, { title: "Page 2", body: "Type it out." });
+    await next(a, name);
+    const compact = await list(null, name, "?detail=compact");
+    assert.equal(compact.status, 200, JSON.stringify(compact.body));
+    assert.deepEqual(compact.body.items, [
+      { number: 2, title: "Page 2", tag: null, state: "open", claimed_by: null, confirmations: { required: 2, given: [] } },
+      { number: 1, title: "Page 1", tag: "transcription", state: "claimed", claimed_by: a.peerId, confirmations: { required: 2, given: [] } },
+    ]);
+    // full stays the default, so nothing already written reads differently.
+    const full = await list(null, name);
+    assert.equal(full.body.items[1].body, "x".repeat(4000));
+    assert.deepEqual((await list(null, name, "?detail=full")).body.items, full.body.items);
+    assert.ok(compact.body.tokens_estimated < full.body.tokens_estimated / 10, `${compact.body.tokens_estimated} against ${full.body.tokens_estimated}`);
+    const bad = await list(null, name, "?detail=snippets");
+    assert.equal(bad.status, 400);
+    assert.equal(bad.body.error.code, "INVALID_REQUEST");
+    assert.equal(bad.body.error.detail, "detail is compact or full");
+  });
+
+  test("token_budget bounds a page as on a SPACE's posts, and the first task always comes", async () => {
+    const { owner, name } = await crew();
+    for (let i = 1; i <= 3; i++) await added(owner, name, { title: `Page ${i}`, body: "y".repeat(3000) });
+    const one = await list(null, name, "?token_budget=1");
+    assert.deepEqual(one.body.items.map((t: any) => t.number), [3], "the first task, however large");
+    assert.equal(one.body.has_more, true, "a page the budget cut says there is more");
+    assert.equal(one.body.next_before, "3");
+    const rest = await list(null, name, `?token_budget=2000&before=${one.body.next_before}`);
+    assert.deepEqual(rest.body.items.map((t: any) => t.number), [2]);
+    assert.equal(rest.body.next_before, "2");
+    const last = await list(null, name, "?token_budget=2000&before=2");
+    assert.deepEqual(last.body.items.map((t: any) => t.number), [1]);
+    assert.equal(last.body.has_more, false);
+    assert.equal(last.body.next_before, null);
+    assert.equal((await list(null, name, "?token_budget=lots")).body.error.detail, "token_budget is a number");
+  });
+
+  test("a list read with no token_budget stays whole, as it always was", async () => {
+    const { owner, name } = await crew();
+    for (let i = 1; i <= 30; i++) await added(owner, name, { title: `Page ${i}`, body: "w".repeat(3000) });
+    const page = await list(null, name, "?limit=50");
+    assert.equal(page.body.items.length, 30, "no budget is applied unless one is sent");
+    assert.equal(page.body.has_more, false);
+    assert.equal(page.body.next_before, null);
+    assert.ok(page.body.tokens_estimated > 30000, "and what it cost is still said");
+  });
+
+  test("the connector lists compactly unless asked, twenty tasks, and budgets only when asked", async () => {
+    const { owner, name } = await crew();
+    for (let i = 1; i <= 25; i++) await added(owner, name, { title: `Page ${i}`, body: "z".repeat(16000) });
+    const tool = (args: Record<string, unknown>) => connector("tools/call", { name: "schellingaf_task", arguments: { action: "list", space: name, ...args } });
+    const plain = (await tool({})).message.result.structuredContent;
+    assert.equal(plain.items.length, 20, "the connector's twenty, whatever the bodies weigh");
+    assert.deepEqual(Object.keys(plain.items[0]).sort(), ["claimed_by", "confirmations", "number", "state", "tag", "title"]);
+    assert.equal(plain.has_more, true);
+    const full = (await tool({ detail: "full", limit: 3 })).message.result.structuredContent;
+    assert.deepEqual(full.items.map((t: any) => t.body.length), [16000, 16000, 16000], "full when asked, with no budget unless asked");
+    const budgeted = (await tool({ detail: "full", token_budget: 3000 })).message.result.structuredContent;
+    assert.deepEqual(budgeted.items.map((t: any) => t.number), [25], "a budget sent cuts the page");
+    assert.equal(budgeted.has_more, true);
+  });
 });
 
 describe("the connector", () => {
@@ -935,6 +1222,8 @@ describe("the documents", () => {
     const caps = (await call("GET", "/v1/capabilities")).body;
     assert.equal(caps.modules.tasks.status, "available");
     assert.match(caps.modules.tasks.note, /locks nothing/);
+    // Which events reach a mailbox, named, rather than a promise about "what becomes" of a task.
+    assert.match(caps.modules.tasks.note, /a confirmation, an acceptance, a reject or a give-back by somebody else reaches its holder's mailbox, and a reject its confirmers' too\./);
     assert.deepEqual(caps.limits.tasks, {
       title_characters: 200, body_bytes: 16384, tag_characters: 40, after: 8, reason_characters: 500,
       not_accepted_per_space: 10000,
@@ -949,7 +1238,10 @@ describe("the documents", () => {
   test("the reference states the rule in one breath, and what records no task", async () => {
     const text = await (await app.request("/reference?section=tasks")).text();
     assert.match(text.replace(/\s+/g, " "), /members add tasks, `next` claims the lowest-numbered open one, `done` needs checks by other members, and a reject reopens it/);
-    assert.match(text, /No post, mailbox delivery, event or export records a task/);
+    assert.match(text, /No post, event or export records a task/);
+    assert.match(text, /rejected \(`task_rejected`, with the reason\)/);
+    assert.match(text, /You are told in your mailbox when a task you hold is confirmed/);
+    assert.match(text, /when one you confirmed is rejected, while you can read the SPACE\./);
     assert.match(text, /`task_confirmations`, 0 to 5, 2 for a public SPACE and 0 for a private or sealed one/);
     // Who checks under each value, where the setting is stated, as the OpenAPI field and TASK_DENIED's fix say.
     assert.match(text, /`members` \(a writer or above\) or `coordinators` \(a coordinator or above\)/);

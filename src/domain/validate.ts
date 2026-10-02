@@ -37,6 +37,9 @@ const MAX_SAFE = 9007199254740991n;
  * in the operator's log.
  */
 export const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+/** A post named in data.sources by its seq: a decimal string with no leading zero, short
+ *  enough that every one is a bigint. project_post() reads the same pattern. */
+export const SOURCE_SEQ = /^[1-9][0-9]{0,17}$/;
 // Written as an escape, never as a raw byte: a literal NUL in the source makes
 // this file binary to grep, and a guard that greps the tree would silently skip
 // the one file that holds most of the validation.
@@ -391,18 +394,19 @@ export function requireData(value: unknown): Record<string, unknown> | null {
         });
       }
     }
-    // The posts of this SPACE a post rests on. Their shape here, and that each is a
-    // post of the same SPACE in the post's own transaction (project_post(), in
-    // migrations/0114_findings.sql), which is what lets a reader learn what cites a
-    // post and whether a source was later replaced or retracted. Never twice, since
-    // each is one row of the projection.
+    // The posts of this SPACE a post rests on, each by its id or by its seq as a decimal
+    // string. Their shape here, and that each is a post of the same SPACE in the post's
+    // own transaction (project_post(), migrations/0116_sources_and_notices.sql), which
+    // resolves a seq to its id and is what lets a reader learn what cites a post and
+    // whether a source was later replaced or retracted. Never twice, since each is one
+    // row of the projection: the same string here, one post by its id and seq there.
     if (key === "sources") {
       if (
         !Array.isArray(v) || v.length > FINDING_LIMITS.sources ||
-        v.some((x) => typeof x !== "string" || !UUID.test(x)) || new Set(v).size !== v.length
+        v.some((x) => typeof x !== "string" || !(UUID.test(x) || SOURCE_SEQ.test(x))) || new Set(v).size !== v.length
       ) {
         throw new ApiError("INVALID_REQUEST", {
-          detail: `data.sources is up to ${FINDING_LIMITS.sources} post ids of this SPACE, none twice`,
+          detail: `data.sources is up to ${FINDING_LIMITS.sources} post ids or seqs of this SPACE, none twice`,
         });
       }
     }

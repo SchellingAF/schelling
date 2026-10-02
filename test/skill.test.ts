@@ -9,13 +9,13 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { useService, app } from "./lib/service.ts";
+import { useService, app, connector } from "./lib/service.ts";
 import { ERRORS } from "../src/db/errors.ts";
 import { MCP_TOOLS, PROMPTS } from "../src/mcp/server.ts";
 import { LISTEN_ADDRESS_SHAPES } from "../src/mcp/listen.ts";
 import { OPERATIONS } from "../src/surface/operations.ts";
 import { KINDS, SUGGESTED_SCHEMES } from "../src/surface/vocabulary.ts";
-import { tokens } from "../src/docs/render.ts";
+import { renderPrimer, tokens } from "../src/docs/render.ts";
 
 const FILE = new URL("../content/skills/schellingaf/SKILL.md", import.meta.url);
 const text = readFileSync(FILE, "utf8");
@@ -106,6 +106,31 @@ describe("the agent skill", () => {
     for (const [, code] of text.matchAll(/`([A-Z][A-Z_]{3,})`/g)) {
       assert.ok(ERRORS[code!], `${code} is not a refusal the service gives`);
     }
+  });
+
+  test("the run routine reads a work space's document before it takes a task, and the document and the tasks carry the space's own brief", async () => {
+    // How one SPACE works lives in that SPACE: its document says it first, each task's
+    // body is the brief for whoever takes it, and the routine reads the document before
+    // next. In the skill, the primer and the prompt start_run alike.
+    const flat = (t: string) => t.replace(/\s+/g, " ");
+    const before = (t: string, first: string, then: string) => {
+      const at = t.indexOf(first);
+      assert.ok(at >= 0 && at < t.indexOf(then, at), `${first} does not come before ${then}: ${t}`);
+    };
+    const step = flat(/^4\. \*\*Tasks\.\*\*[\s\S]*?(?=^5\. )/m.exec(body!)?.[0] ?? "");
+    before(step, "first read its document if it keeps one, with `schellingaf_oracle` action `read`", "`schellingaf_task` `next`");
+    assert.match(flat(body!), /Begin it with a section "How to work here": the loop, the time box, what to post and how to report\. Write each task's body as the brief for whoever takes it\./);
+    const primer = flat(renderPrimer());
+    before(primer, "Read its document first if it keeps one", "POST /v1/spaces/{name}/tasks/next");
+    assert.match(primer, /keeps one document too, [^.]*\. Begin it with a section "How to work here": the loop, the time box, what to post and how to report\./);
+    const start = PROMPTS.find((p) => p.name === "start_run")!.text({});
+    before(start, "schellingaf_mailbox", "first read its document if it keeps one, with schellingaf_oracle action read");
+    before(start, "schellingaf_oracle action read", "schellingaf_task next");
+    before(start, "schellingaf_task next", "SEEK before you repeat work");
+    // And the routine every connected client is given at the start.
+    const { message } = await connector("initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "test", version: "0" } });
+    const said = message.result.instructions as string;
+    before(said, "schellingaf_mailbox from the cursor", "where a work space keeps tasks, read its document with schellingaf_oracle, if it keeps one, then take the next task with schellingaf_task next");
   });
 
   test("the service serves it as the file it is, and a second read is 304", async () => {

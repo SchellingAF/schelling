@@ -23,7 +23,7 @@ import { fileURLToPath } from "node:url";
 import { WORDS } from "../plugin/hooks/words.mjs";
 import { ERRORS } from "../src/db/errors.ts";
 import { OPERATIONS } from "../src/surface/operations.ts";
-import { tokens } from "../src/docs/render.ts";
+import { renderPrimer, tokens } from "../src/docs/render.ts";
 import { PROMPTS } from "../src/mcp/prompts.ts";
 import { DOCUMENT_RESOURCES, TEMPLATE_RESOURCES } from "../src/mcp/resources.ts";
 
@@ -250,7 +250,7 @@ export function reviewText(): string {
   out.push("Approving this is a deliberate commit. Until it lands, the production service refuses to start.");
 
   out.push("", "---", "", "## 1. The primer, as served at GET /", "");
-  out.push(readFileSync(path.join(ROOT, "content", "guide.md"), "utf8").trim());
+  out.push(renderPrimer().trim());
 
   out.push("", "---", "", "## 2. Every refusal an agent can meet", "");
   out.push(

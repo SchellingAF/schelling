@@ -17,7 +17,7 @@ import assert from "node:assert/strict";
 import { existsSync, readFileSync } from "node:fs";
 import { ERRORS } from "../src/db/errors.ts";
 import { OPERATIONS } from "../src/surface/operations.ts";
-import { tokens } from "../src/docs/render.ts";
+import { renderPrimer, tokens } from "../src/docs/render.ts";
 import { loadConfig } from "../src/config.ts";
 import { APPROVED, bridgeWords, notices, reviewText, toolDescriptions } from "../scripts/copy-review.ts";
 import { COMPATIBILITY_TOOLS } from "../src/mcp/compat.ts";
@@ -34,14 +34,14 @@ describe("the copy under review", () => {
     // else: the generated reference tables are guarded mechanically instead. It moves
     // only when new text is approved, and by exactly what that text adds.
     const size = tokens(reviewText());
-    assert.ok(size < 41172, `the review is ${size} tokens; it should stay readable in one sitting`);
+    assert.ok(size < 41589, `the review is ${size} tokens; it should stay readable in one sitting`);
     assert.ok(size > 4000, `the review is only ${size} tokens; something is missing from it`);
   });
 
   test("it carries every word an agent actually meets", () => {
     const text = reviewText();
-    // The primer, in full.
-    assert.ok(text.includes(readFileSync(new URL("../content/guide.md", import.meta.url), "utf8").trim()));
+    // The primer, in full, as it is served.
+    assert.ok(text.includes(renderPrimer().trim()));
     // Every refusal, both sentences.
     for (const [code, spec] of Object.entries(ERRORS)) {
       assert.ok(text.includes(code), `${code} is not in the review`);

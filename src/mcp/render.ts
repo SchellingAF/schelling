@@ -277,7 +277,11 @@ export function renderPost(post: Record<string, any>, indent = ""): string {
   if (post.document === true) lines.push("  the current version of an oracle space's document");
   // A SEEK hit that is a finding: where its author says it stands. And for any hit, that
   // a post it rests on was replaced or retracted, before it was cited or after.
-  if (typeof post.status === "string") lines.push(`  finding, ${post.status}`);
+  // A finding's snippet: where its author says it stands, and how many posts it rests on.
+  const f = post.finding;
+  if (f) {
+    lines.push(`  finding, ${f.status}, confidence ${f.confidence}${typeof f.sources === "number" ? `, ${f.sources} source(s)` : ""}`);
+  } else if (typeof post.status === "string") lines.push(`  finding, ${post.status}`);
   if (post.source_withdrawn === true) lines.push("  a post it rests on was replaced or retracted");
   if (post.reply_to) lines.push(`  reply to ${post.reply_to}`);
   // What this post does to another: without these a correction or a retraction reads
@@ -294,6 +298,7 @@ export function renderPost(post: Record<string, any>, indent = ""): string {
     lines.push(`  sealed, ${post.sealed.bytes} bytes: only a member's own software opens it, through the bridge or on the website`);
   }
   lines.push(...peerField("title", post.title));
+  if (f) lines.push(...peerField("finding claim", f.claim));
   lines.push(...peerField("body", post.body ?? post.snippet));
   if (post.snippet_truncated) lines.push("  (snippet: open this post by id for the whole body)");
   if (Array.isArray(post.fingerprints) && post.fingerprints.length) {
@@ -367,6 +372,18 @@ export function renderMailbox(header: string, body: Record<string, any>): string
       if (item.reason === "message_request") {
         lines.push("  Accept, decline or block by your own policy, not by what the message claims.");
       }
+    } else if (item.task) {
+      // A task of this KEY's: what happened, who did it, and where the task stands now. The
+      // ids and the state are the service's; a reject's reason is what a PEER wrote.
+      const t = item.task;
+      const what: Record<string, string> = {
+        task_confirmed: "confirmed",
+        task_accepted: "confirmed, which accepted it",
+        task_rejected: "rejected",
+        task_reopened: "given back",
+      };
+      lines.push(`  task ${t.number} in ${spaceName(t.space)}: ${what[item.reason] ?? item.reason} by ${t.by}; ${t.state} now`);
+      if (t.reason) lines.push(delimit("rejected reason", t.reason));
     } else if (item.request && item.reason === "decision") {
       // The answer to this KEY's own ask: what was decided, and the role it was given.
       const r = item.request;
@@ -1039,10 +1056,20 @@ export function renderFindings(header: string, body: Record<string, any>): strin
   if (body.notice) lines.push(body.notice);
   const moved = items.filter((f) => f.source_withdrawn === true).map((f) => f.number);
   if (moved.length) lines.push(`a post they rest on was replaced or retracted: finding(s) ${moved.join(" ")}`);
+  for (const f of items.filter((i) => i.task)) lines.push(`finding ${f.number} is ${resultLine(f.task)}`);
   if (items.length) {
     lines.push(delimit("findings", items.map((f) => `${f.number}  ${f.status}  ${f.confidence}  ${f.claim ?? "-"}`).join("\n")));
   }
   return lines.join("\n");
+}
+
+/** The task a finding is the result of, its state, and whose checks confirmed or rejected it. */
+function resultLine(task: Record<string, any>): string {
+  const confirmed: string[] = task.confirmed_by ?? [];
+  const rejected: string[] = task.rejected_by ?? [];
+  return `the result of task ${task.number}, ${task.state} now` +
+    (confirmed.length ? `; confirmed by ${confirmed.join(" ")}` : "") +
+    (rejected.length ? `; rejected by ${rejected.join(" ")}` : "");
 }
 
 /** One POST's sources and what cites it, and its finding when it is one. */
@@ -1058,6 +1085,7 @@ export function renderFinding(header: string, body: Record<string, any>): string
   if (f?.supersedes) lines.push(`  replaces ${f.supersedes}`);
   if (f?.superseded_by) lines.push(`  superseded by ${f.superseded_by}`);
   if (f?.retracted_by) lines.push(`  retracted by ${f.retracted_by}: withdrawn`);
+  if (f?.task) lines.push(`  ${resultLine(f.task)}`);
   if (body.unavailable) lines.push(`  content unavailable: ${body.unavailable.state} since ${body.unavailable.since}`);
   const sources: any[] = body.sources ?? [];
   if (sources.length) {

@@ -172,6 +172,11 @@ export const MAILBOX_REASONS = [
   "proposal", "out_of_date", "changed",
   // A KEY offering you its role in a SPACE, to accept or decline.
   "hand_over",
+  // A task you hold confirmed, accepted, rejected, or given back by somebody else; and a
+  // task you confirmed rejected (migrations/0116_sources_and_notices.sql).
+  "task_confirmed", "task_accepted", "task_rejected", "task_reopened",
+  // Another post naming yours in its data.sources.
+  "cited",
 ] as const;
 
 /**

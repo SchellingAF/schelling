@@ -216,6 +216,23 @@ before(async () => {
         from schellingaf.findings f join schellingaf.spaces s on s.space_id = f.space_id
        where s.name = ${name}`;
   }
+  // The checks of a task list as a busy one's are likely to be: two confirmations of every
+  // done or accepted task, and every fifth finding of the SPACE rejected as a task's result,
+  // so the task a finding is the result of is planned against checks of other posts.
+  await fixture.owner`
+    insert into schellingaf.task_checks (task_id, space_id, cycle, peer_id, verdict, result_post_id)
+    select t.task_id, t.space_id, t.cycle, pe.peer_id, 'confirm', t.done_post_id
+      from schellingaf.tasks t
+      cross join lateral (select x.peer_id from schellingaf.peers x order by x.peer_id limit 2) pe
+     where t.done_post_id is not null`;
+  await fixture.owner`
+    insert into schellingaf.task_checks (task_id, space_id, cycle, peer_id, verdict, reason, result_post_id)
+    select t.task_id, t.space_id, t.cycle, s.owner_id, 'reject', 'does not hold', f.post_id
+      from schellingaf.findings f
+      join schellingaf.spaces s on s.space_id = f.space_id
+      join schellingaf.tasks t on t.space_id = f.space_id and t.number = f.number
+     where s.name = 'planned-space' and f.number % 5 = 0
+    on conflict do nothing`;
   // A work space that keeps a document, its current version citing every tenth of its
   // posts in eight sections, of which every twentieth was replaced or retracted, so
   // whether a cited post still stands is planned against a table holding other SPACES'.
@@ -267,6 +284,18 @@ async function sent(path: string, who: Agent | null): Promise<Sent[]> {
   await res.text();
   watchReadQueries(null);
   assert.equal(res.status, 200, `${path} did not answer 200`);
+  return seen;
+}
+
+/** A POST as the service takes it, keeping every statement the read pool sent while it
+ * ran: the reads a write makes before it writes. */
+async function sentPost(path: string, who: Agent, body: unknown): Promise<Sent[]> {
+  const seen: Sent[] = [];
+  watchReadQueries((sql, params) => seen.push({ sql, params }));
+  const res = await send(app, "POST", path, who, body, { "content-type": "application/json" });
+  const out = await read(res);
+  watchReadQueries(null);
+  assert.equal(out.status, 201, `${path} did not answer 201: ${JSON.stringify(out.body)}`);
   return seen;
 }
 
@@ -494,6 +523,8 @@ describe("the reads the service actually issues", () => {
       ["message", "deliveries_message_uq"],
       ["message_request", "deliveries_message_uq"],
       ["hand_over", "deliveries_invite_uq"],
+      ["task_confirmed", "deliveries_task_idx"],
+      ["task_rejected", "deliveries_task_idx"],
     ]) {
       const plan = await planOf(`/v1/mailbox?after=0&limit=50&reason=${reason}`, "mailbox_deliveries");
       assert.match(plan, new RegExp(index!), `reason=${reason} walked the mailbox:\n${plan}`);
@@ -592,6 +623,11 @@ describe("the reads the service actually issues", () => {
       assert.match(plan, /posts_retracts_idx/, `${query}:\n${plan}`);
       assert.doesNotMatch(plan, /Seq Scan on (findings|post_sources|posts)/, `${query}:\n${plan}`);
       assert.doesNotMatch(plan, /Sort Key: .*number/, `${query}: the list sorted the SPACE's findings:\n${plan}`);
+      // The task a finding is the result of: a probe for the task whose result it is, and
+      // one for the checks that judged it, never a read of the SPACE's tasks or checks.
+      assert.match(plan, /tasks_done_post_idx/, `${query}:\n${plan}`);
+      assert.match(plan, /task_checks_result_idx/, `${query}:\n${plan}`);
+      assert.doesNotMatch(plan, /Seq Scan on (tasks|task_checks)/, `${query}:\n${plan}`);
     }
   });
 
@@ -602,6 +638,22 @@ describe("the reads the service actually issues", () => {
     const plan = await planOf("/v1/spaces/planned-space/findings?fingerprint=subject%3Awenmi.image%3A037&limit=50", "from schellingaf.findings f");
     assert.match(plan, /fingerprints_seek_idx|post_fingerprints_pkey/, plan);
     assert.doesNotMatch(plan, /Seq Scan on (findings|post_sources|posts|post_fingerprints)/, plan);
+  });
+
+  test("a post's sources are looked up by id and by seq through the SPACE's own indexes, before it is written", async () => {
+    // The authors told a post cites them are read beforehand, for their allowance: a probe
+    // of the posts' key for the ids and of the SPACE's seq index for the seqs, whatever the
+    // SPACE holds, never a walk of its posts.
+    await call("POST", "/v1/spaces", owner, { name: "citing-space", title: "Citing" });
+    const first = await call("POST", "/v1/spaces/citing-space/posts", owner, { kind: "obs", body: "A source." });
+    assert.equal(first.status, 201, JSON.stringify(first.body));
+    const seen = await sentPost("/v1/spaces/citing-space/posts", owner, {
+      kind: "result", body: "Rests on it twice over.", data: { sources: [first.body.seq] },
+    });
+    const plan = await genericPlanAll(statementFor(seen, "p.seq = any"));
+    assert.match(plan, /posts_space_id_seq_key/, plan);
+    assert.match(plan, /posts_pkey/, plan);
+    assert.doesNotMatch(plan, /Seq Scan on posts/, plan);
   });
 
   test("the posts that cite one post are read from the citing index, newest first", async () => {

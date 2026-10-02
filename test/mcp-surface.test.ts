@@ -8,13 +8,13 @@
 
 import { test, before, describe } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import { createHash, randomBytes } from "node:crypto";
 import { filed } from "./helpers.ts";
 import { useService, app, agent, send, read, HOST, type Agent } from "./lib/service.ts";
 import { COMPATIBILITY_TOOLS, DOCUMENT_RESOURCES, MCP_TOOLS, PROMPTS, TEMPLATE_RESOURCES } from "../src/mcp/server.ts";
 import { OPERATIONS } from "../src/surface/operations.ts";
 import { ERRORS } from "../src/db/errors.ts";
+import { renderPrimer, sectionNames } from "../src/docs/render.ts";
 
 const SITE = "https://site.schellingaf.test";
 
@@ -244,7 +244,7 @@ describe("the resources", () => {
 
   test("the primer is the primer, the reference is the reference, and both may be shared for five minutes", async () => {
     const guide = await readResource("schellingaf://guide");
-    assert.equal(guide.result.contents[0].text, readFileSync(new URL("../content/guide.md", import.meta.url), "utf8"));
+    assert.equal(guide.result.contents[0].text, renderPrimer());
     assert.equal(guide.result.cacheScope, "public");
     assert.equal(guide.result.ttlMs, 300_000);
     const reference = await readResource("schellingaf://reference");
@@ -583,6 +583,14 @@ describe("every way the documents say to reach an operation", () => {
     assert.ok(rules.length > 200);
     const stray = (await tool("schellingaf_guide", { section: "refusals" })).result;
     assert.equal(stray.isError, true);
+  });
+
+  test("the guide answers an empty section with its contents, and a section that is none with the sections there are", async () => {
+    const empty = (await tool("schellingaf_guide", { part: "reference", section: "" })).result.content[0].text as string;
+    assert.match(empty, /^The reference is about \d+ tokens, so it is read a part at a time/);
+    const refused = (await tool("schellingaf_guide", { part: "reference", section: "permissions" })).result;
+    assert.equal(refused.isError, true);
+    assert.ok(refused.content[0].text.includes(`(section names no heading of GET /reference) Sections: ${sectionNames().join(", ")}. `), refused.content[0].text);
   });
 
   test("what stands pages back with before, and refuses a cursor's arguments rather than dropping them", async () => {

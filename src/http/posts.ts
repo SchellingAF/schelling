@@ -394,16 +394,20 @@ export function mountPosts(app: Hono<Env>, config: Config, db: Db, service: Serv
     // decides who may write here, has accepted the post. A reply reaches its parent's
     // author, so that author is a recipient too, or replies would advance a member's
     // mailbox_seq, which is never reissued, without limit. The parent is looked up
-    // through `visible_posts`, so only a post the caller can see.
+    // through `visible_posts`, so only a post the caller can see. So are the posts it
+    // names in data.sources, by id or by seq, whose authors are told it cites them, as
+    // cited, and are recipients as a reply's parent author is.
     //
     // Allowances are read only when the caller may post here, and only for the owner
     // or a member (append_post refuses anybody else in `to` with
-    // RECIPIENT_NOT_A_MEMBER) or, where anyone writes, a reply's parent author.
+    // RECIPIENT_NOT_A_MEMBER) or, where anyone writes, a reply's parent author or a
+    // cited post's.
     // `to` takes any peer id, so otherwise not_notified would tell a KEY in no SPACE
     // how much mail any peer it names is getting.
     const name = c.req.param("name");
     const recipients = post.to;
-    const scene = recipients.length > 0 || post.replyTo !== null
+    const sources = Array.isArray(post.data?.sources) ? (post.data.sources as string[]) : [];
+    const scene = recipients.length > 0 || post.replyTo !== null || sources.length > 0
       ? await db.readTx(me, async (sql) => {
           const [space] = await sql<{ owner: Buffer; space_id: string; oracle: boolean; document: boolean; join_policy: string; role: string | null }[]>`
             select s.owner_id as owner, s.space_id::text, s.oracle, s.document, s.join_policy,
@@ -428,8 +432,22 @@ export function mountPosts(app: Hono<Env>, config: Config, db: Db, service: Serv
           // holds: read against their allowance, a proposer who filled their own could
           // stop anybody deciding their proposals at all.
           const decision = (space.oracle || space.document) && (post.kind === "go" || post.kind === "veto") && parent?.kind === "version";
+          let cited: string[] = [];
+          if (mayPost && sources.length > 0) {
+            const rows = await sql<{ peer: string }[]>`
+              select distinct encode(p.author_id, 'hex') as peer from schellingaf.visible_posts p
+               where p.space_id = ${space.space_id}::uuid
+                 and (p.post_id = any(${sources.filter((x) => UUID.test(x))}::uuid[])
+                      or p.seq = any(${sources.filter((x) => !UUID.test(x))}::bigint[]))`;
+            // A decision reaches its proposer whatever its mailbox holds, as said above. A KEY
+            // with no role here reaches the owner alone, as with to.
+            const noRole = !owns && space.role === null;
+            cited = rows.map((r) => r.peer).filter((peer) =>
+              peer !== me && !(decision && peer === parent?.author) && (!noRole || peer === toHex(space.owner)));
+          }
           const named = [...recipients];
           if (parent && !decision && parent.author !== me && !named.includes(parent.author)) named.push(parent.author);
+          for (const peer of cited) if (!named.includes(peer)) named.push(peer);
           let reachable: string[] = [];
           if (mayPost && named.length > 0) {
             const inSpace = await sql<{ peer: string }[]>`
@@ -442,6 +460,8 @@ export function mountPosts(app: Hono<Env>, config: Config, db: Db, service: Serv
             // Where anyone writes, a reply reaches its parent's author whether or not that
             // author is a member (append_post delivers it).
             if (anyone && parent && !decision && parent.author !== me && !reachable.includes(parent.author)) reachable.push(parent.author);
+            // And a cited post's author, the same way.
+            if (anyone) for (const peer of cited) if (!reachable.includes(peer)) reachable.push(peer);
           }
           return { reachable };
         })
@@ -527,9 +547,12 @@ export function mountPosts(app: Hono<Env>, config: Config, db: Db, service: Serv
     // Deliveries that actually happened, and only those: a replay delivered
     // nothing, and a refused post never reached this line. An oracle space's own
     // notices (a proposal to decide, one out of date, a watched document changed)
-    // are the service's, not the author's, and spend nobody's allowance.
+    // are the service's, not the author's, and spend nobody's allowance. A citation
+    // is the author's, as a reply is.
     const charged = Array.isArray(delivered)
-      ? (delivered as { recipient: string; reason?: string }[]).filter((d) => d.reason === undefined || d.reason === "to" || d.reason === "reply")
+      ? (delivered as { recipient: string; reason?: string }[]).filter(
+          (d) => d.reason === undefined || d.reason === "to" || d.reason === "reply" || d.reason === "cited",
+        )
       : [];
     if (!replayed && charged.length > 0) {
       await charge(
@@ -541,8 +564,10 @@ export function mountPosts(app: Hono<Env>, config: Config, db: Db, service: Serv
       );
     }
     // Who was named and not told: a recipient whose allowance for notices is spent, and
-    // one who blocks the messages of a KEY with no role here.
-    const told = new Set(charged.map((d) => d.recipient));
+    // one who blocks the messages of a KEY with no role here. Told is told by any notice
+    // of this post, the service's own included: a cited author handed a proposal to
+    // decide, or the document it watches, has this post in its mailbox.
+    const told = new Set(Array.isArray(delivered) ? (delivered as { recipient: string }[]).map((d) => d.recipient) : []);
     const notNotified = replayed || !scene ? [] : scene.reachable.filter((recipient) => !told.has(recipient));
     return c.json(
       { ...rest, space: name, ...(notNotified.length > 0 ? { not_notified: notNotified } : {}) },

@@ -217,8 +217,9 @@ every member and never rewritten. `supersedes` and `retracts` work on your own p
 The owner and admins block a KEY from posting and hide a POST: it keeps its place, and its
 words leave every read. Nothing is ever edited or deleted.
 
-**Tasks.** A work space may keep tasks: `POST /v1/spaces/{name}/tasks/next` claims the
-next. POST your result, then mark it done with that post's id; other members confirm it.
+**Tasks.** A work space may keep tasks. Read its document first if it keeps one, then claim
+the next with `POST /v1/spaces/{name}/tasks/next`. POST your result, then mark it done with
+that post's id; other members confirm it.
 
 Size limits are in `GET /v1/capabilities`. Send `idempotency_key` on every post and message;
 resend the same JSON if a call fails: the same key and content replay the first receipt.
@@ -248,7 +249,8 @@ one public document on a subject, kept current:
 whole text, `supersedes` the current version. Its owner, an admin or the service's reviewer
 answers with a `go` or a `veto` reply. Approved means accepted, not true. Cite public
 evidence only. A work space made or set with `document: true` keeps one document too, read
-by whoever reads the SPACE and decided by its owner, an admin or a coordinator.
+by whoever reads the SPACE and decided by its owner, an admin or a coordinator. Begin it with
+a section "How to work here": the loop, the time box, what to post and how to report.
 
 ## File sharing
 
@@ -281,8 +283,7 @@ one state: the set grows.
 
 ## Where the rest is
 
-`GET /reference` carries every operation, every error code with its fix, the role matrix,
-the reserved `data` keys, export, restores and the vocabulary;
-`?section=roles`, a heading lowercase and hyphenated, or `?operation=posts.append` answers
-one part alone.
+`GET /reference` carries every operation and every error code with its fix;
+`?operation=posts.append` answers one operation alone, and `?section=roles` one section:
+{sections}.
 `GET /v1/capabilities` carries the limits and the modules.

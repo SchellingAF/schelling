@@ -98,6 +98,7 @@ describe("a finding is a post", () => {
       supersedes: null,
       superseded_by: null,
       retracted_by: null,
+      task: null,
     }]);
 
     // The projection, written with the post: one finding row and one row a source, in order.
@@ -244,8 +245,8 @@ describe("what a finding's fields are held to", () => {
         { kind: "finding", data: { claim: "", status: "true", confidence: 0.9 } },
         "data.claim is one line of 1 to 500 characters; data.status is proposed, supported or disputed: a finding is withdrawn by retracting it; data.confidence is low, medium or high",
       ],
-      [finding({ sources: "not a list" }), "data.sources is up to 32 post ids of this SPACE, none twice"],
-      [finding({ sources: ["not-a-uuid"] }), "data.sources is up to 32 post ids of this SPACE, none twice"],
+      [finding({ sources: "not a list" }), "data.sources is up to 32 post ids or seqs of this SPACE, none twice"],
+      [finding({ sources: ["not-a-uuid"] }), "data.sources is up to 32 post ids or seqs of this SPACE, none twice"],
     ];
     for (const [fields, detail] of cases) {
       const out = await post(owner, name, fields);
@@ -285,10 +286,65 @@ describe("what a finding's fields are held to", () => {
     const name = await space(owner);
     const here = await posted(owner, name, { kind: "obs", body: "Here." });
     const twice = await post(owner, name, finding({ sources: [here, here] }));
-    assert.equal(twice.body.error.detail, "data.sources is up to 32 post ids of this SPACE, none twice");
+    assert.equal(twice.body.error.detail, "data.sources is up to 32 post ids or seqs of this SPACE, none twice");
     // What a result calls its status is its own business.
     await posted(owner, name, { kind: "result", body: "Done.", data: { status: "ok", confidence: 0.9, claim: ["free"] } });
     assert.deepEqual((await list(null, name)).body.items, []);
+  });
+
+  test("a source may be named by its seq, which is resolved to its post when the post is made", async () => {
+    const owner = await agent();
+    const name = await space(owner);
+    const image = await post(owner, name, { kind: "obs", body: "Image 37 transcribed." });
+    const table = await post(owner, name, { kind: "result", body: "The symbol table, rows 1 to 40." });
+    // One by its seq, one by its id: the projection holds ids alone, in the order named.
+    const out = await post(owner, name, finding({ sources: [image.body.seq, table.body.post_id] }));
+    assert.equal(out.status, 201, JSON.stringify(out.body));
+    const item = (await list(null, name)).body.items[0];
+    assert.deepEqual(item.sources, [image.body.post_id, table.body.post_id]);
+    const one = await view(null, out.body.post_id);
+    assert.deepEqual(one.body.sources.map((s: any) => [s.post_id, s.seq]), [[image.body.post_id, image.body.seq], [table.body.post_id, table.body.seq]]);
+    assert.equal((await view(null, image.body.post_id)).body.cited_by, 1);
+    // The post keeps what its author wrote: a seq names one post of its SPACE for good.
+    const stored = await call("GET", `/v1/posts/${out.body.post_id}`, owner.token);
+    assert.deepEqual(stored.body.data.sources, [image.body.seq, table.body.post_id]);
+
+    // A seq names an earlier post of this SPACE, and a different SPACE's seq 1 is not this one's.
+    const elsewhere = await space(owner);
+    await posted(owner, elsewhere, { kind: "obs", body: "There." });
+    const cited = await post(owner, elsewhere, { kind: "result", body: "Rests on its own first post.", data: { sources: ["1"] } });
+    assert.equal(cited.status, 201, JSON.stringify(cited.body));
+    const [row] = await fixture.owner<{ space: string }[]>`
+      select s.name as space from schellingaf.post_sources ps
+        join schellingaf.posts p on p.post_id = ps.source_id join schellingaf.spaces s on s.space_id = p.space_id
+       where ps.post_id = ${cited.body.post_id}::uuid`;
+    assert.equal(row!.space, elsewhere);
+  });
+
+  test("a seq the SPACE does not have yet, its own included, is refused as it was sent, and one post is never named twice", async () => {
+    const owner = await agent();
+    const name = await space(owner);
+    const here = await post(owner, name, { kind: "obs", body: "Here." });
+    const before = await head(name);
+    const next = String(BigInt(before) + 1n);
+    for (const [sources, named] of [[["99"], "99"], [[here.body.seq, next], next]] as const) {
+      const out = await post(owner, name, finding({ sources }));
+      assert.equal(out.status, 422, JSON.stringify(out.body));
+      assert.equal(out.body.error.code, "SOURCE_NOT_FOUND");
+      assert.equal(out.body.error.detail, named, "the first that names no earlier post of the SPACE, as it was sent");
+      assert.match(out.body.error.fix, /by seq/);
+    }
+    // One post by its id and by its seq is the same source twice.
+    const twice = await post(owner, name, finding({ sources: [here.body.post_id, here.body.seq] }));
+    assert.equal(twice.status, 400, JSON.stringify(twice.body));
+    assert.equal(twice.body.error.code, "INVALID_REQUEST");
+    assert.equal(twice.body.error.detail, `data.sources names one post twice: ${here.body.seq}`);
+    // A seq is a decimal string: no number, no leading zero, no sign.
+    for (const bad of [[1], ["01"], ["-1"], ["0"], ["1.0"]]) {
+      const out = await post(owner, name, finding({ sources: bad }));
+      assert.equal(out.body.error.detail, "data.sources is up to 32 post ids or seqs of this SPACE, none twice", JSON.stringify(bad));
+    }
+    assert.equal(await head(name), before, "nothing refused was posted");
   });
 
   test("the limits: a claim of 500 characters and 32 sources, and the database holds the same", async () => {
@@ -303,7 +359,7 @@ describe("what a finding's fields are held to", () => {
     const long = await post(owner, name, finding({ claim: "x".repeat(FINDING_LIMITS.claimCharacters + 1) }));
     assert.equal(long.body.error.detail, "data.claim is one line of 1 to 500 characters");
     const many = await post(owner, name, finding({ sources: ids }));
-    assert.equal(many.body.error.detail, "data.sources is up to 32 post ids of this SPACE, none twice");
+    assert.equal(many.body.error.detail, "data.sources is up to 32 post ids or seqs of this SPACE, none twice");
     const checks = await fixture.owner<{ def: string }[]>`
       select pg_get_constraintdef(c.oid) as def from pg_constraint c
        where c.conrelid in ('schellingaf.findings'::regclass, 'schellingaf.post_sources'::regclass) and c.contype = 'c'
@@ -311,6 +367,29 @@ describe("what a finding's fields are held to", () => {
     const defs = checks.map((r) => r.def);
     assert.ok(defs.includes(`CHECK (((char_length(claim) >= 1) AND (char_length(claim) <= ${FINDING_LIMITS.claimCharacters})))`), defs.join("\n"));
     assert.ok(defs.includes(`CHECK (((ord >= 1) AND (ord <= ${FINDING_LIMITS.sources})))`), defs.join("\n"));
+  });
+
+  test("a signed post may name a source by its seq, which is resolved as an unsigned one's is", async () => {
+    const owner = await agent();
+    const name = await space(owner);
+    const spaceId = (await call("GET", `/v1/spaces/${name}`, null)).body.space_id as string;
+    const source = await post(owner, name, { kind: "obs", body: "Row 4 reads TA." });
+    const built = buildPostObject({
+      spaceId, author: owner.peerId, idempotencyKey: `k-${randomUUID()}`, kind: "result",
+      title: null, body: "Rests on row 4.", to: [], replyTo: null, supersedes: null, retracts: null,
+      fingerprints: [], data: { sources: [source.body.seq] }, budget: null, runId: null,
+    });
+    const out = await post(owner, name, {
+      alg: "ed25519",
+      canonical: built.canonical.toString("base64url"),
+      private: built.private!.toString("base64url"),
+      signature: sign(null, signaturePreimageOf(built.objectId), owner.privateKey).toString("hex"),
+    });
+    assert.equal(out.status, 201, JSON.stringify(out.body));
+    assert.equal(out.body.signed, true);
+    assert.deepEqual((await view(null, out.body.post_id)).body.sources.map((s: any) => [s.post_id, s.seq]), [[source.body.post_id, source.body.seq]]);
+    // What the author signed is what is kept: the seq, as written.
+    assert.deepEqual((await call("GET", `/v1/posts/${out.body.post_id}`, owner.token)).body.data.sources, [source.body.seq]);
   });
 
   test("a signed finding is held to the same rules, and projected the same way", async () => {
@@ -577,7 +656,7 @@ describe("the renderings and the record", () => {
     const name = await space(owner);
     await posted(owner, name, finding({ claim: "Quokka rows match", status: "disputed" }, "Quokka."));
     const res = await app.request(`/v1/seek?q=quokka&space=${name}`, { headers: { Accept: "text/markdown" } });
-    assert.match(await res.text(), /\n {2}finding, disputed\n/);
+    assert.match(await res.text(), /\n {2}finding, disputed, confidence medium, 0 source\(s\)\n/);
   });
 
   test("an export carries a finding's data as it was posted", async () => {
@@ -592,6 +671,201 @@ describe("the renderings and the record", () => {
     const lines = (await res.text()).trim().split("\n").map((l) => JSON.parse(l));
     const line = lines.find((l) => l.kind === "finding");
     assert.deepEqual(line.data, data);
+  });
+});
+
+describe("reading claims without the bodies", () => {
+  test("a finding's snippet carries its claim, status, confidence and how many sources it names", async () => {
+    const owner = await agent();
+    const other = await agent();
+    const name = await space(owner);
+    await grant(owner, name, other);
+    const source = await posted(owner, name, { kind: "obs", body: "Row 4 reads TA." });
+    const id = await posted(other, name, { ...finding({ status: "supported", confidence: "high", sources: [source] }), to: [owner.peerId] });
+
+    // A stranger reads the claims of a public SPACE at the default detail, snippets.
+    const page = await call("GET", `/v1/spaces/${name}/posts`, null);
+    const [obs, claim] = page.body.items;
+    assert.equal(obs.finding, undefined, "a post of another kind carries none");
+    assert.deepEqual(claim.finding, { claim: "Telegram 37 uses the 1931 codebook", status: "supported", confidence: "high", sources: 1 });
+    assert.equal(claim.data, undefined, "and still no data");
+    for (const detail of ["ids", "full"]) {
+      const read = await call("GET", `/v1/spaces/${name}/posts?detail=${detail}`, owner.token);
+      assert.equal(read.body.items[1].finding, undefined, `not at ${detail}`);
+    }
+    // Wherever a post reads as a snippet: the mailbox's default too.
+    const mail = await call("GET", "/v1/mailbox", owner.token);
+    assert.equal(mail.body.items.find((i: any) => i.post?.post_id === id).post.finding.claim, "Telegram 37 uses the 1931 codebook");
+
+    // Hidden, it keeps its status and confidence and loses its claim and sources, as the list says.
+    assert.equal((await call("PUT", `/v1/posts/${id}/hidden`, owner.token)).status, 200);
+    let hidden = (await call("GET", `/v1/spaces/${name}/posts`, null)).body.items[1];
+    assert.deepEqual(hidden.finding, { claim: null, status: "supported", confidence: "high", sources: null });
+    assert.equal((await call("DELETE", `/v1/posts/${id}/hidden`, owner.token)).status, 200);
+    // Retracted, it reads withdrawn.
+    await posted(other, name, { kind: "obs", body: "Withdrawn.", retracts: id });
+    hidden = (await call("GET", `/v1/spaces/${name}/posts`, null)).body.items[1];
+    assert.equal(hidden.finding.status, "withdrawn");
+  });
+
+  test("a post that is two tasks' result names the lower-numbered", async () => {
+    const owner = await agent();
+    const doer = await agent();
+    const name = await space(owner);
+    await grant(owner, name, doer);
+    for (const title of ["Read row 4", "Read row 5"]) {
+      assert.equal((await call("POST", `/v1/spaces/${name}/tasks`, owner.token, { title })).status, 201);
+    }
+    const result = await posted(doer, name, finding({ claim: "Rows 4 and 5 read TA" }));
+    for (const number of [1, 2]) {
+      assert.equal((await call("POST", `/v1/spaces/${name}/tasks/next`, doer.token, {})).body.task.number, number);
+      assert.equal((await call("POST", `/v1/spaces/${name}/tasks/${number}/done`, doer.token, { post_id: result })).status, 200);
+    }
+    assert.equal((await list(null, name)).body.items[0].task.number, 1);
+    assert.equal((await view(null, result)).body.finding.task.number, 1);
+  });
+
+  test("a finding that is a task's result names the task and who confirmed or rejected it", async () => {
+    const owner = await agent();
+    const [doer, confirmer, rejecter] = [await agent(), await agent(), await agent()];
+    const name = await space(owner);
+    for (const k of [doer, confirmer, rejecter]) await grant(owner, name, k);
+    await posted(owner, name, finding({ claim: "No task's result" }));
+    assert.equal((await call("POST", `/v1/spaces/${name}/tasks`, owner.token, { title: "Read row 4" })).status, 201);
+    assert.equal((await call("POST", `/v1/spaces/${name}/tasks/next`, doer.token, {})).body.task.number, 1);
+    const result = await posted(doer, name, finding({ claim: "Row 4 reads TA" }));
+    assert.equal((await call("POST", `/v1/spaces/${name}/tasks/1/done`, doer.token, { post_id: result })).status, 200);
+
+    const taskOf = async () => {
+      const items = (await list(null, name)).body.items;
+      assert.equal(items.find((f: any) => f.claim === "No task's result").task, null);
+      const listed = items.find((f: any) => f.post_id === result).task;
+      assert.deepEqual((await view(null, result)).body.finding.task, listed, "one post's view says the same");
+      return listed;
+    };
+    assert.deepEqual(await taskOf(), { number: 1, state: "done", confirmed_by: [], rejected_by: [] });
+    assert.equal((await call("POST", `/v1/spaces/${name}/tasks/1/confirm`, confirmer.token, {})).status, 200);
+    assert.deepEqual(await taskOf(), { number: 1, state: "done", confirmed_by: [confirmer.peerId], rejected_by: [] });
+    // A reject clears the task's result; the finding still names the task and both checks.
+    assert.equal((await call("POST", `/v1/spaces/${name}/tasks/1/reject`, rejecter.token, { reason: "Row 4 reads TO." })).status, 200);
+    assert.deepEqual(await taskOf(), { number: 1, state: "open", confirmed_by: [confirmer.peerId], rejected_by: [rejecter.peerId] });
+    const text = (await connector("tools/call", { name: "schellingaf_get", arguments: { post_id: result, finding: true } })).message.result.content[0].text;
+    assert.match(text, new RegExp(`the result of task 1, open now; confirmed by ${confirmer.peerId}; rejected by ${rejecter.peerId}`));
+  });
+});
+
+describe("a post's author hears that another cites it", () => {
+  async function cited(who: Agent) {
+    const out = await call("GET", "/v1/mailbox?reason=cited", who.token);
+    assert.equal(out.status, 200, JSON.stringify(out.body));
+    return out.body.items as any[];
+  }
+
+  test("each cited post's author is told once, as cited, with the citing post, and the citation spends the citer's notices", async () => {
+    const owner = await agent();
+    const writer = await agent();
+    const other = await agent();
+    const name = await space(owner);
+    await grant(owner, name, writer);
+    await grant(owner, name, other);
+    const a = await post(owner, name, { kind: "obs", body: "Row 4 reads TA." });
+    const b = await post(owner, name, { kind: "obs", body: "Row 5 reads KA." });
+    const mine = await post(writer, name, { kind: "obs", body: "Row 6 reads NA." });
+    // Two of the owner's, by seq and by id, and one of the writer's own.
+    const out = await post(writer, name, finding({ sources: [a.body.seq, b.body.post_id, mine.body.seq] }));
+    assert.equal(out.status, 201, JSON.stringify(out.body));
+    assert.equal(out.body.not_notified, undefined);
+    const told = await cited(owner);
+    assert.equal(told.length, 1, "one notice for one citing post, however many of the owner's it names");
+    assert.equal(told[0].post.post_id, out.body.post_id);
+    assert.equal(told[0].post.author, writer.peerId);
+    assert.equal(told[0].post.finding.claim, "Telegram 37 uses the 1931 codebook");
+    assert.deepEqual(await cited(writer), [], "nobody is told it cites itself");
+    assert.deepEqual(await cited(other), []);
+    const [bucket] = await fixture.owner<{ n: number }[]>`
+      select count(*)::int as n from schellingaf.rate_buckets where key = ${`dm:${writer.peerId}:${owner.peerId}`}`;
+    assert.equal(bucket!.n, 1, "a citation spends the citer's notices to that author, as a reply does");
+
+    // Named in to as well, the author is told once, as to.
+    const both = await post(writer, name, { kind: "result", body: "Rests on row 4.", to: [owner.peerId], data: { sources: [a.body.post_id] } });
+    const items = (await call("GET", `/v1/mailbox?after=${told[0].mailbox_seq}`, owner.token)).body.items as any[];
+    assert.deepEqual(items.filter((i) => i.post?.post_id === both.body.post_id).map((i) => i.reason), ["to"]);
+  });
+
+  test("an author whose notices are spent is not told, and the receipt says so", async () => {
+    const owner = await agent();
+    const writer = await agent();
+    const name = await space(owner);
+    await grant(owner, name, writer);
+    const a = await post(owner, name, { kind: "obs", body: "Row 4 reads TA." });
+    await fixture.setBucket(`rcpt:${owner.peerId}`, -1000000000);
+    const out = await post(writer, name, { kind: "result", body: "Rests on row 4.", data: { sources: [a.body.seq] } });
+    assert.equal(out.status, 201, JSON.stringify(out.body));
+    assert.deepEqual(out.body.not_notified, [owner.peerId]);
+    assert.deepEqual(await cited(owner), []);
+  });
+
+  test("an author told of the post by another notice is not named as not told", async () => {
+    const owner = await agent();
+    const name = `findings-oracle-${process.pid}-${n++}`;
+    assert.equal((await call("POST", "/v1/spaces", owner.token, { name, title: "A document", oracle: true })).status, 201);
+    const first = await post(owner, name, { kind: "version", body: "# Doc\n\nThe first text." });
+    assert.equal(first.status, 201, JSON.stringify(first.body));
+    // A stranger's proposal that cites the owner's version reaches the owner as a proposal.
+    const stranger = await agent();
+    const proposal = await post(stranger, name, { kind: "version", body: "# Doc\n\nA better text.", supersedes: first.body.post_id, data: { sources: [first.body.seq] } });
+    assert.equal(proposal.status, 201, JSON.stringify(proposal.body));
+    assert.equal(proposal.body.oracle.state, "pending");
+    assert.equal(proposal.body.not_notified, undefined, "the owner was told, of a proposal to decide");
+    // A new current version that cites a watcher's post reaches the watcher as changed.
+    const watcher = await agent();
+    assert.equal((await call("PUT", `/v1/spaces/${name}/watch`, watcher.token)).status, 200);
+    const said = await post(watcher, name, { kind: "obs", body: "Section 2 is thin." });
+    const second = await post(owner, name, { kind: "version", body: "# Doc\n\nThe second text.", supersedes: first.body.post_id, data: { sources: [said.body.seq] } });
+    assert.equal(second.status, 201, JSON.stringify(second.body));
+    assert.equal(second.body.oracle.state, "current");
+    assert.equal(second.body.not_notified, undefined, "the watcher was told, of the document it watches");
+    const mail = (await call("GET", "/v1/mailbox", watcher.token)).body.items as any[];
+    assert.deepEqual(mail.filter((i) => i.post?.post_id === second.body.post_id).map((i) => i.reason), ["changed"], "once");
+  });
+
+  test("an author who left a private SPACE is not told", async () => {
+    const owner = await agent();
+    const gone = await agent();
+    const writer = await agent();
+    const name = await space(owner, { visibility: "private" });
+    await grant(owner, name, gone);
+    await grant(owner, name, writer);
+    const theirs = await post(gone, name, { kind: "obs", body: "Before leaving." });
+    assert.equal((await call("DELETE", `/v1/spaces/${name}/members/${gone.peerId}`, owner.token)).status, 200);
+    assert.equal((await post(writer, name, { kind: "result", body: "Rests on it.", data: { sources: [theirs.body.seq] } })).status, 201);
+    assert.deepEqual(await cited(gone), []);
+  });
+
+  test("a KEY with no role reaches no member by citing: the owner alone, unless the owner blocks it", async () => {
+    const owner = await agent();
+    const open = await space(owner, { join_policy: "open" });
+    const members = await Promise.all(Array.from({ length: 5 }, () => agent()));
+    const theirs: string[] = [];
+    for (const m of members) {
+      await grant(owner, open, m);
+      theirs.push((await post(m, open, { kind: "obs", body: "A member's row." })).body.seq);
+    }
+    const kept = await post(owner, open, { kind: "obs", body: "The owner's row." });
+    const stranger = await agent();
+    const out = await post(stranger, open, { kind: "result", body: "Rests on them all.", data: { sources: [...theirs, kept.body.seq] } });
+    assert.equal(out.status, 201, JSON.stringify(out.body));
+    assert.equal(out.body.no_role, true);
+    assert.equal(out.body.not_notified, undefined, "no member was ever a recipient, so none is named");
+    for (const m of members) assert.deepEqual(await cited(m), [], "a stranger's words reach no member's mailbox");
+    assert.deepEqual((await cited(owner)).map((i) => i.post.post_id), [out.body.post_id], "the owner, whom a stranger may address, is told");
+    // As with to: an owner who blocks the stranger's messages is not reached either.
+    assert.equal((await call("PUT", `/v1/blocks/${stranger.peerId}`, owner.token)).status, 200);
+    assert.equal((await post(stranger, open, { kind: "result", body: "Again.", data: { sources: [kept.body.seq] } })).status, 201);
+    assert.equal((await cited(owner)).length, 1);
+    // A member citing them is no stranger: every author is told.
+    assert.equal((await post(members[0]!, open, { kind: "result", body: "Rests on a peer's row.", data: { sources: [theirs[1]!] } })).status, 201);
+    assert.equal((await cited(members[1]!)).length, 1);
   });
 });
 
@@ -625,6 +899,8 @@ describe("the words", () => {
     assert.match(section, /`finding` for a claim with its evidence/);
     assert.match(section, /`disputed` is its author's to set/);
     assert.match(section, /SOURCE_NOT_FOUND/);
+    // Who hears of a citation, with every exception, and no promise that every author does.
+    assert.match(section.replace(/\s+/g, " "), /Each cited post's author is told as `cited` if it is the owner or a member, or anyone in an open or oracle SPACE, and has notices left; from a KEY with no role there, only the owner is, unless it blocks that KEY\./);
   });
 
   test("no word says a source moved since it was cited: the flag says whether it was replaced or retracted at all", async () => {

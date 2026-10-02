@@ -9,8 +9,9 @@
 // fingerprint leaves such a finding out, as SEEK does.
 //
 // Nothing here writes. A finding's status and confidence are its author's; the service
-// says only what it can check: which posts of the SPACE it cites, how many cite it, and
-// whether one it cites was replaced or retracted, before it was cited or after.
+// says only what it can check: which posts of the SPACE it cites, how many cite it,
+// whether one it cites was replaced or retracted, before it was cited or after, and, for
+// a task's result, which task and whose checks confirmed or rejected it.
 
 import type { Hono } from "hono";
 import type { Sql } from "postgres";
@@ -45,6 +46,7 @@ type FindingRow = {
   sources: string[] | null;
   cited_by: number;
   source_withdrawn: boolean;
+  task: { number: number; state: string; confirmed_by: string[]; rejected_by: string[] } | null;
 };
 
 /**
@@ -65,7 +67,33 @@ function findingColumns(sql: Sql) {
          then array(select s.source_id::text from schellingaf.post_sources s
                      where s.post_id = f.post_id order by s.ord) end as sources,
     (select count(*)::int from schellingaf.post_sources c where c.source_id = f.post_id) as cited_by,
-    ${sourceWithdrawn(sql, "f.post_id")} as source_withdrawn`;
+    ${sourceWithdrawn(sql, "f.post_id")} as source_withdrawn,
+    ${resultOf(sql)} as task`;
+}
+
+/**
+ * The task a finding is the result of, when it is one: the task whose result it is now,
+ * or else the one whose checks judged it, since a reject clears a task's result. Its
+ * number, its state as every read shows it, and the KEYS whose checks confirmed or
+ * rejected this post as that task's result. Index walks of tasks_done_post_idx and
+ * task_checks_result_idx, bounded by that one post's tasks and checks, not by the
+ * SPACE's: a post that is no task's result costs two empty probes.
+ */
+function resultOf(sql: Sql) {
+  const judged = (verdict: "confirm" | "reject") => sql`coalesce((
+      select jsonb_agg(encode(c.peer_id, 'hex') order by c.checked_at, c.peer_id)
+        from schellingaf.task_checks c
+       where c.result_post_id = f.post_id and c.task_id = t.task_id and c.verdict = ${verdict}), '[]'::jsonb)`;
+  const shown = sql`jsonb_build_object(
+      'number', t.number,
+      'state', case when t.state = 'claimed' and t.claimed_until <= now() then 'open' else t.state end,
+      'confirmed_by', ${judged("confirm")},
+      'rejected_by', ${judged("reject")})`;
+  return sql`coalesce(
+    (select ${shown} from schellingaf.tasks t
+      where t.done_post_id = f.post_id order by t.done_post_id, t.number limit 1),
+    (select ${shown} from schellingaf.task_checks r join schellingaf.tasks t on t.task_id = r.task_id
+      where r.result_post_id = f.post_id order by r.result_post_id desc, r.checked_at desc limit 1))`;
 }
 
 /**
@@ -98,6 +126,7 @@ function shown(row: FindingRow): Record<string, unknown> {
     supersedes: row.supersedes,
     superseded_by: row.superseded_by,
     retracted_by: row.retracted_by,
+    task: row.task,
     ...(row.unavailable ? { unavailable: row.unavailable } : {}),
   };
 }
@@ -235,7 +264,8 @@ export function mountFindings(app: Hono<Env>, db: Db): void {
       seq: post.seq,
       kind: post.kind,
       finding: found.finding ? shown(found.finding) : null,
-      // The posts it names, as its author named them; null once its words are withheld or hidden.
+      // The posts it names, by id in the order its author named them, a seq resolved;
+      // null once its words are withheld or hidden.
       sources: post.unavailable ? null : found.sources,
       source_withdrawn: post.source_withdrawn,
       cited_by: found.citedBy,

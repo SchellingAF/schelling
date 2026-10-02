@@ -6,6 +6,7 @@ import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import {
   renderDocument,
+  renderFindings,
   renderMailbox,
   renderMembers,
   renderPeer,
@@ -94,6 +95,22 @@ describe("the connector's text says what its JSON says", () => {
     assert.doesNotMatch(text, /Approve by SPACE policy/);
   });
 
+  test("a task's notice says what happened, who did it and where the task stands, a reject's reason fenced", () => {
+    const text = renderMailbox("reading as x", {
+      items: [
+        { mailbox_seq: "4", reason: "task_accepted", task: { space: "pages", number: 3, state: "accepted", by: OTHER } },
+        { mailbox_seq: "5", reason: "task_rejected", task: { space: "pages", number: 4, state: "open", by: ME, reason: "Wrong table." } },
+        { mailbox_seq: "6", reason: "task_reopened", task: { space: "pages", number: 5, state: "open", by: OTHER } },
+      ],
+      head_seq: "6",
+      next_after: "6",
+    });
+    assert.match(text, new RegExp(`\\(4\\) task_accepted\n {2}task 3 in "pages": confirmed, which accepted it by ${OTHER}; accepted now`));
+    assert.match(text, new RegExp(`task 4 in "pages": rejected by ${ME}; open now\n<<<peer rejected reason>>>\nWrong table\.\n<<<end rejected reason>>>`));
+    assert.match(text, new RegExp(`task 5 in "pages": given back by ${OTHER}; open now`));
+    assert.doesNotMatch(text, /no longer readable/);
+  });
+
   test("members, whoami and a KEY's profile say when there is more, and where it starts", () => {
     assert.match(renderMembers("h", { owner: ME, items: [{ peer_id: OTHER, role: "writer", via: "grant", managed_by: ME }], has_more: true, next_after: OTHER }), /more after: pass after b{64}/);
     assert.match(renderMembers("h", { owner: ME, items: [{ peer_id: OTHER, role: "writer", via: "grant", managed_by: ME }] }), /managed by a{64}/);
@@ -112,6 +129,31 @@ describe("the connector's text says what its JSON says", () => {
     assert.match(text, /2 task\(s\) in "pages", more before: pass before 11/);
     assert.match(text, /a task is accepted when it is done; a claim lasts 4 hour\(s\)/);
     assert.match(text, /<<<peer tasks>>>\n12  open  transcription  Transcribe page 3\n11  done  -  Find the key\n<<<end tasks>>>/);
+  });
+
+  test("a finding's snippet says where it stands and how many posts it rests on, its claim fenced", () => {
+    const text = renderPost({
+      kind: "finding", author: ME, posted_at: "t", post_id: "p", snippet: "Read against the codebook.",
+      finding: { claim: "Telegram 37 uses the 1931 codebook", status: "supported", confidence: "high", sources: 2 },
+    });
+    assert.match(text, /\n {2}finding, supported, confidence high, 2 source\(s\)\n/);
+    assert.match(text, /<<<peer finding claim>>>\nTelegram 37 uses the 1931 codebook\n<<<end finding claim>>>/);
+    // Hidden: no claim and no count, and no line printing a null.
+    const hidden = renderPost({ kind: "finding", author: ME, posted_at: "t", post_id: "p", finding: { claim: null, status: "proposed", confidence: "low", sources: null } });
+    assert.match(hidden, /\n {2}finding, proposed, confidence low$/);
+    assert.doesNotMatch(hidden, /null|finding claim/);
+  });
+
+  test("a findings list names the task each one is the result of, and whose checks judged it", () => {
+    const text = renderFindings("reading as anonymous", {
+      space: "research",
+      items: [
+        { number: 2, status: "proposed", confidence: "medium", claim: "Row 4 reads TA", task: { number: 7, state: "open", confirmed_by: [ME], rejected_by: [OTHER] } },
+        { number: 1, status: "supported", confidence: "high", claim: "Rows agree", task: null },
+      ],
+    });
+    assert.match(text, new RegExp(`finding 2 is the result of task 7, open now; confirmed by ${ME}; rejected by ${OTHER}`));
+    assert.doesNotMatch(text, /finding 1 is/);
   });
 
   test("one task in full says its holder, its result, its confirmations, and the reject that reopened it", () => {

@@ -11,26 +11,25 @@
 
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import { HOST, app, useService } from "./lib/service.ts";
-import { referenceParts, renderLlmsTxt, renderReference, sectionSlug, tokens } from "../src/docs/render.ts";
+import { referenceAnswers } from "../src/http/app.ts";
+import { referenceParts, renderLlmsTxt, renderPrimer, renderReference, sectionNames, sectionSlug, tokens } from "../src/docs/render.ts";
 import { CATEGORY_RULES, REGISTER, childrenOf } from "../src/surface/categories.ts";
 import { OPERATIONS } from "../src/surface/operations.ts";
-import { ERRORS } from "../src/db/errors.ts";
+import { ApiError, ERRORS, refusalBody } from "../src/db/errors.ts";
 import { KINDS } from "../src/surface/vocabulary.ts";
 import { registrationAllowance } from "../src/http/ratelimit.ts";
 import { withEnv } from "./lib/env.ts";
 
-const GUIDE = new URL("../content/guide.md", import.meta.url);
-
 useService("docs");
 
-const primer = () => readFileSync(GUIDE, "utf8");
+/** The primer as GET / serves it. */
+const primer = () => renderPrimer();
 
 describe("the primer", () => {
   test("it fits the budget it publishes, measured the way it measures a page", () => {
     // A ceiling, not a target: see the review's ceiling in test/copy.test.ts.
-    assert.ok(tokens(primer()) <= 5320, `primer is ${tokens(primer())} tokens`);
+    assert.ok(tokens(primer()) <= 5464, `primer is ${tokens(primer())} tokens`);
   });
 
   test("it says up front that an empty first SEEK is expected", () => {
@@ -152,7 +151,7 @@ describe("the reference", () => {
       { REGISTRATION_PER_HOUR: undefined, REGISTRATION_BURST: undefined, CHALLENGE_PER_KEY: undefined },
       () => renderReference(),
     );
-    assert.ok(tokens(served) <= 37686, `reference is ${tokens(served)} tokens`);
+    assert.ok(tokens(served) <= 38153, `reference is ${tokens(served)} tokens`);
   });
 
   test("it prints the registration limits the service is configured with, as the capability document does", async () => {
@@ -260,11 +259,69 @@ describe("the documents over HTTP", () => {
     assert.ok(etag);
     assert.notEqual(etag, (await app.request("/reference")).headers.get("etag"));
     assert.equal((await app.request("/reference?section=roles", { headers: { "If-None-Match": etag! } })).status, 304);
+    // The lists of names, asked for with an empty name, are parts like any other.
+    for (const query of ["section=", "operation="]) {
+      const list = (await app.request(`/reference?${query}`)).headers.get("etag");
+      assert.ok(list, query);
+      assert.equal((await app.request(`/reference?${query}`, { headers: { "If-None-Match": list! } })).status, 304, query);
+    }
     for (const query of ["section=nothing-like-this", "operation=posts.delete", "section=roles&operation=posts.append"]) {
       const refused = await app.request(`/reference?${query}`);
       assert.equal(refused.status, 400, query);
       assert.equal(((await refused.json()) as any).error.code, "INVALID_REQUEST", query);
     }
+  });
+
+  test("the sections are listed where an agent looks, cut from the headings the reference serves", async () => {
+    const whole = await (await app.request("/reference")).text();
+    const names = whole.split("\n").filter((l) => l.startsWith("## ")).map((l) => sectionSlug(l.slice(3)));
+    assert.deepEqual(sectionNames(whole), names);
+    const listed = names.join(", ");
+    // The primer's last paragraph and the index name every one, in the reference's order.
+    const served = await (await app.request("/")).text();
+    assert.ok(served.split("\n## ").at(-1)!.includes(`one section:\n${listed}.`), "the primer's last paragraph does not list the sections");
+    assert.doesNotMatch(served, /\{sections\}/);
+    assert.ok((await (await app.request("/llms.txt")).text()).includes(`one section: ${listed}.`), "the index does not list the sections");
+    // A section the reference does not have is refused with the ones it has, and stays small.
+    const refused = await app.request("/reference?section=permissions");
+    assert.equal(refused.status, 400);
+    const { error } = (await refused.json()) as any;
+    assert.equal(error.detail, "section names no heading of GET /reference");
+    assert.deepEqual(error.sections, names);
+    assert.ok(JSON.stringify(error).length < 1024, `the refusal is ${JSON.stringify(error).length} bytes`);
+    // Given empty, or with no value, it answers the sections alone, each with its size.
+    for (const query of ["section=", "section"]) {
+      const res = await app.request(`/reference?${query}`);
+      assert.equal(res.status, 200, query);
+      assert.match(res.headers.get("content-type") ?? "", /text\/markdown/);
+      const lines = (await res.text()).trimEnd().split("\n");
+      assert.deepEqual(lines.map((l) => /^- ([a-z0-9-]+), about \d+ tokens$/.exec(l)?.[1]), names, query);
+    }
+  });
+
+  test("a heading added to the reference is in every list of its sections", () => {
+    const grown = renderReference() + "\n## A section added later\n\nIts words.\n";
+    assert.equal(sectionNames(grown).at(-1), "a-section-added-later");
+    assert.match(renderPrimer(grown), /, a-section-added-later\.\n/);
+    assert.match(renderLlmsTxt(`https://${HOST}`, grown), /, a-section-added-later\.\n/);
+    assert.doesNotMatch(renderPrimer(), /a-section-added-later/);
+    // And what GET /reference answers with it: the list an empty section asks for, and
+    // the refusal of a section that is none.
+    const answer = referenceAnswers(grown);
+    assert.match(answer("").text, /\n- a-section-added-later, about \d+ tokens\n$/);
+    assert.equal(answer("a-section-added-later").text, "## A section added later\n\nIts words.\n");
+    assert.throws(() => answer("permissions"), (e: ApiError) => refusalBody(e).sections?.at(-1) === "a-section-added-later");
+  });
+
+  test("an operation the reference does not have is refused with where the names are, and an empty one answers them", async () => {
+    const refused = (await (await app.request("/reference?operation=posts.delete")).json()) as any;
+    assert.equal(refused.error.detail, "operation names no operation in GET /reference; an empty operation lists them");
+    assert.equal(refused.error.sections, undefined);
+    const res = await app.request("/reference?operation=");
+    assert.equal(res.status, 200);
+    assert.deepEqual((await res.text()).trimEnd().split("\n"), OPERATIONS.map((op) => `- ${op.name}`));
+    const openapi = (await (await app.request("/openapi.json?operation=posts.delete")).json()) as any;
+    assert.equal(openapi.error.detail, "operation names no operation; GET /reference with an empty operation lists them");
   });
 
   test("the primer says how to read one part of the reference", () => {
@@ -309,7 +366,7 @@ describe("the documents over HTTP", () => {
     const text = await (await app.request("/llms.txt")).text();
     // It lists no operations: an agent that starts from the index reads all of it
     // before its first call, and the reference has every operation a link away.
-    assert.ok(tokens(text) <= 1100, `the index is ${tokens(text)} tokens`);
+    assert.ok(tokens(text) <= 1146, `the index is ${tokens(text)} tokens`);
     assert.ok(text.includes(`(https://${HOST}/reference)`), "the index does not link the reference");
     assert.ok(text.includes("?operation="), "the index does not say OpenAPI answers one operation");
   });

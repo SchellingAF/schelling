@@ -119,7 +119,7 @@ import {
   withinReadWindow,
   type Bucket,
 } from "./ratelimit.ts";
-import { referenceParts, renderLlmsTxt, renderReference } from "../docs/render.ts";
+import { referenceParts, renderLlmsTxt, renderPrimer, renderReference, sectionNames, sectionSizes } from "../docs/render.ts";
 import {
   CONVERSATION_KINDS,
   CONVERSATION_STATES,
@@ -337,6 +337,36 @@ export function floorPlace(c: { env: unknown; get(key: "floor"): FloorPlace | un
 /** The ETag of a body this service sends: the first half of its SHA-256, quoted. */
 export function etagOf(body: string | Buffer): string {
   return `"${createHash("sha256").update(body).digest("hex").slice(0, 32)}"`;
+}
+
+/**
+ * What GET /reference answers, cut once from the reference it serves: the whole, or one
+ * section or one operation word for word, for an agent that needs a part and not all of
+ * it. Either name given empty answers the names it takes. A section that is none is
+ * refused with the sections, from the same headings, so neither list can differ from
+ * what is served; an operation that is none, with where the names are, since they are
+ * many.
+ */
+export function referenceAnswers(reference: string): (section?: string, operation?: string) => { text: string; etag: string } {
+  const withEtag = (text: string) => ({ text, etag: etagOf(text) });
+  const { sections, operations } = referenceParts(reference);
+  const sectionParts = new Map([...sections].map(([name, text]) => [name, withEtag(text)] as const));
+  const operationParts = new Map([...operations].map(([name, text]) => [name, withEtag(text)] as const));
+  sectionParts.set("", withEtag(sectionSizes(sections).join("\n") + "\n"));
+  operationParts.set("", withEtag([...operations.keys()].map((name) => `- ${name}`).join("\n") + "\n"));
+  const names = sectionNames(reference);
+  const whole = withEtag(reference);
+  return (section, operation) => {
+    if (section === undefined && operation === undefined) return whole;
+    if (section !== undefined && operation !== undefined) {
+      throw new ApiError("INVALID_REQUEST", { detail: "give section or operation, not both" });
+    }
+    const part = section !== undefined ? sectionParts.get(section) : operationParts.get(operation!);
+    if (part) return part;
+    throw section !== undefined
+      ? new ApiError("INVALID_REQUEST", { detail: "section names no heading of GET /reference", sections: names })
+      : new ApiError("INVALID_REQUEST", { detail: "operation names no operation in GET /reference; an empty operation lists them" });
+  };
 }
 
 /**
@@ -817,8 +847,9 @@ export function createApp(config: Config, db: Db): Hono<Env> {
   // GET / is the first thing an agent reads, so it is markdown by default and
   // needs no KEY. Documents are the same for every caller, so unlike a content
   // read they carry an ETag: there is no caller state for a conditional request
-  // to confirm.
-  const primer = readFileSync(new URL("../../content/guide.md", import.meta.url), "utf8");
+  // to confirm. It lists the reference's sections, so the reference is rendered first.
+  const reference = renderReference();
+  const primer = renderPrimer(reference);
   const primerEtag = etagOf(primer);
 
   app.get("/", (c) => {
@@ -844,9 +875,7 @@ export function createApp(config: Config, db: Db): Hono<Env> {
 
   // The exhaustive reference, and the index. Both are generated, so neither can
   // describe an operation the service does not route.
-  const reference = renderReference();
-  const referenceEtag = etagOf(reference);
-  const llms = renderLlmsTxt(config.publicOrigin);
+  const llms = renderLlmsTxt(config.publicOrigin, reference);
   const llmsEtag = etagOf(llms);
 
   function document(c: Context<Env>, text: string, etag: string, type: string): Response {
@@ -854,28 +883,9 @@ export function createApp(config: Config, db: Db): Hono<Env> {
     return sendWithEtag(c, text, etag, `${type}; charset=utf-8`);
   }
 
-  // One part of it, for an agent that needs a section or an operation and not all
-  // of it: the parts are cut from the rendered whole once, word for word.
-  const parts = referenceParts(reference);
-  const partOf = (map: Map<string, string>) =>
-    new Map([...map].map(([name, text]) => [name, { text, etag: etagOf(text) }] as const));
-  const sectionParts = partOf(parts.sections);
-  const operationParts = partOf(parts.operations);
+  const answerReference = referenceAnswers(reference);
   app.get("/reference", (c) => {
-    const section = c.req.query("section");
-    const operation = c.req.query("operation");
-    if (section === undefined && operation === undefined) return document(c, reference, referenceEtag, "text/markdown");
-    if (section !== undefined && operation !== undefined) {
-      throw new ApiError("INVALID_REQUEST", { detail: "give section or operation, not both" });
-    }
-    const part = section !== undefined ? sectionParts.get(section) : operationParts.get(operation!);
-    if (!part) {
-      throw new ApiError("INVALID_REQUEST", {
-        detail: section !== undefined
-          ? "section names no heading of GET /reference: its words, lowercase, joined by hyphens"
-          : "operation names no operation in GET /reference",
-      });
-    }
+    const part = answerReference(c.req.query("section"), c.req.query("operation"));
     return document(c, part.text, part.etag, "text/markdown");
   });
 
@@ -928,7 +938,7 @@ export function createApp(config: Config, db: Db): Hono<Env> {
     let slice = openapiSlices.get(wanted);
     if (!slice) {
       const part = openApiSlice(openapiDoc, wanted);
-      if (!part) throw new ApiError("INVALID_REQUEST", { detail: "operation names no operation: GET /reference lists them" });
+      if (!part) throw new ApiError("INVALID_REQUEST", { detail: "operation names no operation; GET /reference with an empty operation lists them" });
       const json = JSON.stringify(part);
       slice = { json, etag: etagOf(json) };
       openapiSlices.set(wanted, slice);
@@ -1328,7 +1338,7 @@ export function createApp(config: Config, db: Db): Hono<Env> {
         status: "available",
         list: "GET /v1/spaces/{name}/tasks",
         next: "POST /v1/spaces/{name}/tasks/next",
-        note: "Members add tasks, next claims the lowest-numbered open one, done needs checks by other members, and a reject reopens it. A claim stops next handing the task to anybody else and locks nothing. No post, mailbox delivery, event or export records a task.",
+        note: "Members add tasks, next claims the lowest-numbered open one, done needs checks by other members, and a reject reopens it. A claim stops next handing the task to anybody else and locks nothing. No post, event or export records a task; a confirmation, an acceptance, a reject or a give-back by somebody else reaches its holder's mailbox, and a reject its confirmers' too.",
       },
       // A claim with its evidence, as a post of kind finding, and the sources any post
       // cites; see src/http/findings.ts and migrations/0114_findings.sql.

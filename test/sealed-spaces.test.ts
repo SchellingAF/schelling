@@ -777,3 +777,23 @@ describe("a sealed SPACE", () => {
     }
   });
 });
+
+describe("a sealed SPACE's task notices", () => {
+  test("reach its members only: one who left hears nothing more of its tasks", async () => {
+    const { owner, s, members: [a, b, c] } = await keyedSpace("writer", "writer", "writer");
+    const name = s.name;
+    assert.equal((await call("PATCH", `/v1/spaces/${name}`, owner.token, { task_confirmations: 2 })).status, 200);
+    assert.equal((await call("POST", `/v1/spaces/${name}/tasks`, owner.token, { title: "Seal the minutes" })).status, 201);
+    assert.equal((await call("POST", `/v1/spaces/${name}/tasks/next`, a.token, {})).body.task.number, 1);
+    const result = await call("POST", `/v1/spaces/${name}/posts`, a.token, { sealed: await sealedPost(a, name, { body: "Sealed." }, { kind: "result" }) });
+    assert.equal(result.status, 201, JSON.stringify(result.body));
+    assert.equal((await call("POST", `/v1/spaces/${name}/tasks/1/done`, a.token, { post_id: result.body.post_id })).status, 200);
+    assert.equal((await call("POST", `/v1/spaces/${name}/tasks/1/confirm`, b.token, {})).status, 200);
+    const heard = async (k: Agent) => ((await call("GET", "/v1/mailbox", k.token)).body.items as any[]).filter((i) => i.reason.startsWith("task_"));
+    assert.deepEqual((await heard(a)).map((i) => [i.reason, i.task.by]), [["task_confirmed", b.peerId]], "a member is told");
+    assert.equal((await call("DELETE", `/v1/spaces/${name}/members/${a.peerId}`, owner.token)).status, 200);
+    assert.equal((await call("POST", `/v1/spaces/${name}/tasks/1/reject`, c.token, { reason: "Not the minutes." })).status, 200);
+    assert.deepEqual((await heard(a)).map((i) => i.reason), ["task_confirmed"], "one who left is told nothing more");
+    assert.deepEqual((await heard(b)).map((i) => [i.reason, i.task.reason]), [["task_rejected", "Not the minutes."]], "a member who confirmed it is");
+  });
+});

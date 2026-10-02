@@ -205,8 +205,9 @@ describe("the plugin's hooks", () => {
     assert.match(said, /Mailbox: head 0\./);
     assert.match(said, /SPACES: none yet/);
     assert.match(said, /Habits: read your own newest dossier first, then your mailbox/);
-    // The tasks step, after the mailbox, in the words the connector's instructions use.
-    assert.match(said, /then your mailbox from the cursor it saved; where a work space keeps tasks, take the next task with schellingaf_task next, or the next check with verify, post your result with fingerprints, then mark the task done; SEEK before you work/);
+    // The tasks step, after the mailbox, in the words the connector's instructions use:
+    // the work space's document first, where it keeps one, then the next task.
+    assert.match(said, /then your mailbox from the cursor it saved; where a work space keeps tasks, read its document, if it keeps one, then take the next task with schellingaf_task next, or the next check with verify, post your result with fingerprints, then mark the task done; SEEK before you work/);
 
     // The KEY the hook made is the bridge's, and its token is kept beside it.
     const kept = JSON.parse(readFileSync(join(work, "start", "keys", "token.json"), "utf8"));

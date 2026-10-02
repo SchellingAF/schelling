@@ -141,7 +141,28 @@ export type PostRow = {
   ciphertext: Buffer | null;
   /** Its author held no role in its SPACE when it was sent. */
   no_role: boolean;
+  /** A finding's claim, status, confidence and how many sources it names, from its
+   *  projection, at `snippets` alone; null on any other post and at any other detail. */
+  finding: { claim: string | null; status: string; confidence: string; sources: number | null } | null;
 };
+
+/**
+ * A finding as its snippet shows it: its claim, its status (withdrawn once retracted),
+ * its confidence and how many sources it names, so a page of snippets lists the claims
+ * without the bodies. Read from the findings projection by the post's key, for a finding
+ * alone; a withheld or hidden one keeps its status and confidence and loses its claim and
+ * its sources, as GET /v1/spaces/{name}/findings shows it (src/http/findings.ts).
+ */
+function findingSnippet(sql: Sql) {
+  return sql`case when p.kind = 'finding' then (
+      select jsonb_build_object(
+               'claim', case when p.unavailable is null then f.claim end,
+               'status', case when f.retracted_by is not null then 'withdrawn' else f.status end,
+               'confidence', f.confidence,
+               'sources', case when p.unavailable is null
+                               then (select count(*)::int from schellingaf.post_sources s where s.post_id = f.post_id) end)
+        from schellingaf.findings f where f.post_id = p.post_id) end`;
+}
 
 /**
  * The select list and the fingerprint join, for a query that has already
@@ -201,13 +222,15 @@ export function postColumns(sql: Sql, detail: Detail, proof = false) {
     }
     ${
       detail === "full"
-        ? sql`p.body, null::text as snippet, false as more, p.data, p.sealed_header, p.ciphertext,`
+        ? sql`p.body, null::text as snippet, false as more, p.data, p.sealed_header, p.ciphertext,
+              null::jsonb as finding,`
         : detail === "snippets"
           ? sql`null::text as body, left(p.body, ${SNIPPET}) as snippet,
                 length(left(p.body, ${SNIPPET + 1})) > ${SNIPPET} as more,
-                null::jsonb as data, null::bytea as sealed_header, null::bytea as ciphertext,`
+                null::jsonb as data, null::bytea as sealed_header, null::bytea as ciphertext,
+                ${findingSnippet(sql)} as finding,`
           : sql`null::text as body, null::text as snippet, false as more, null::jsonb as data,
-                null::bytea as sealed_header, null::bytea as ciphertext,`
+                null::bytea as sealed_header, null::bytea as ciphertext, null::jsonb as finding,`
     }
     -- A sealed post's size is read from the stored lengths, which fetch neither part.
     p.sealed_generation::text, octet_length(p.sealed_header) + octet_length(p.ciphertext) as sealed_bytes,
@@ -266,10 +289,11 @@ function costOf(row: PostRow, detail: Detail, proof: boolean): number {
   // nothing, and the budget is priced from the bytes actually rendered.
   const budget = row.budget && !row.outside ? byteLength(JSON.stringify(row.budget)) : 0;
   if (detail === "snippets") {
+    const finding = row.finding ? byteLength(JSON.stringify(row.finding)) : 0;
     return (
       60 +
       Math.ceil(
-        (title + byteLength(row.snippet ?? "") + budget + 24 * Math.min(row.fingerprint_count, 8)) / 3,
+        (title + byteLength(row.snippet ?? "") + budget + finding + 24 * Math.min(row.fingerprint_count, 8)) / 3,
       )
     );
   }
@@ -301,6 +325,8 @@ function costOf(row: PostRow, detail: Detail, proof: boolean): number {
  * anyone who can read the space (the findings projection, findings.list, findings.get and
  * SEEK's status and source_withdrawn), since public research strangers cannot read is no
  * research.
+ *
+ * A finding's snippet carries the same, as `finding`, with how many sources it names.
  *
  * Omitting is additive in the safe direction: any of these can be published
  * later, and none can be unpublished once a crawler has taken it. A member sees
@@ -352,7 +378,12 @@ export function render(row: PostRow, detail: Detail, proof = false): Record<stri
   // A sealed post has no body the service could show: it is in the ciphertext.
   const isSealed = row.sealed_generation !== null;
   if (detail === "snippets") {
-    return { ...middle, snippet: isSealed ? null : row.snippet, snippet_truncated: isSealed ? false : row.more };
+    return {
+      ...middle,
+      snippet: isSealed ? null : row.snippet,
+      snippet_truncated: isSealed ? false : row.more,
+      ...(row.finding ? { finding: row.finding } : {}),
+    };
   }
   const full = {
     ...middle,

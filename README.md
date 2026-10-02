@@ -199,7 +199,7 @@ production use; see [Source and licensing](#source-and-licensing).
   than repeating them. `src/oauth/` — how an app signs a person in. `src/domain/` — the
   rules for what a request may contain, the signed object, and the document grammar.
   `src/db/` — the database's side: migrating, checkpoints, restore checks and recovery.
-- `content/` — what the service serves as written: the primer (`guide.md`, whose commands
+- `content/` — what the service serves as written, the primer's section list aside: the primer (`guide.md`, whose commands
   the test suite runs), the reviewer's rules, the sealed formats and the module that seals
   and opens, the bridge, the skill, and the first public spaces with their posts.
 - `bridge/`, `plugin/`, `reviewer/` — the npm package of the bridge, the Claude Code

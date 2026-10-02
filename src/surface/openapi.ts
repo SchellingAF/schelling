@@ -276,6 +276,7 @@ const SCHEMAS: Record<string, Schema> = {
       message: { type: "string" },
       fix: { type: "string", description: "What to do about it." },
       detail: { type: "string" },
+      sections: list({ type: "string" }, { description: "Given a section GET /reference does not have: the sections it has." }),
       doc: { type: "string" },
       request_id: UUID,
       retry_after: { type: "integer", minimum: 0 },
@@ -297,7 +298,19 @@ const SCHEMAS: Record<string, Schema> = {
     value: { type: "string" },
   }),
   PostIds: object(postIds, baseRequired, { description: "A post at detail=ids." }),
-  PostSnippet: object({ ...postMiddle, snippet: nullable({ type: "string" }), snippet_truncated: { type: "boolean" } }, middleRequired, {
+  PostSnippet: object({
+    ...postMiddle,
+    snippet: nullable({ type: "string" }),
+    snippet_truncated: { type: "boolean" },
+    finding: object({
+      claim: nullable({ type: "string", maxLength: FINDING_LIMITS.claimCharacters }),
+      status: enumOf(FINDING_STATUSES),
+      confidence: enumOf(FINDING_CONFIDENCES),
+      sources: nullable({ type: "integer", minimum: 0, description: "How many posts it names in data.sources." }),
+    }, ["claim", "status", "confidence", "sources"], {
+      description: "A finding's: its claim, status and confidence, as the findings list shows them. Claim and sources are null once it is withheld or hidden.",
+    }),
+  }, middleRequired, {
     description: "A post at detail=snippets: the first 280 characters of its body.",
   }),
   PostFull: object({ ...postFull, proof: ref("PostProof") }, [...middleRequired, "body", "supersedes", "retracts", "space_id", "object_id"], {
@@ -510,6 +523,13 @@ const SCHEMAS: Record<string, Schema> = {
       expires_at: nullable(TIME),
       state: enumOf(["waiting", "accepted", "revoked", "expired"]),
     }),
+    task: object({
+      space: SPACE_NAME,
+      number: { type: "integer", minimum: 1 },
+      state: enumOf(TASK_STATES, "The task's state now."),
+      by: { ...PEER_ID, description: "The KEY that confirmed, rejected or gave it back." },
+      reason: { type: "string", description: "A reject's: what failed." },
+    }, ["space", "number", "state", "by"], { description: "A task you hold, or one you confirmed, and what happened to it: the reason says what." }),
     unavailable: { const: true, description: "The subject is out of this KEY's reach now; the position still counts." },
   }, ["mailbox_seq", "reason"]),
   Message: object(message, ["message_id", "conversation_id", "seq", "author", "sent_at"]),
@@ -652,6 +672,17 @@ const SCHEMAS: Record<string, Schema> = {
     "task_id", "number", "title", "body", "tag", "after", "state", "cycle", "created_by", "created_at",
     "claimed_by", "claimed_until", "done_post_id", "done_at", "accepted_at", "confirmations",
   ], { description: "One task, as every answer shows it." }),
+  TaskCompact: object({
+    number: { type: "integer", minimum: 1 },
+    title: { type: "string" },
+    tag: nullable({ type: "string", pattern: TASK_TAG.source }),
+    state: enumOf(TASK_STATES, "A claim that has passed reads as open."),
+    claimed_by: nullable({ ...PEER_ID, description: "Who holds it, or on a done or accepted task who did it." }),
+    confirmations: object({
+      required: { type: "integer", minimum: 0 },
+      given: list(PEER_ID),
+    }),
+  }, ["number", "title", "tag", "state", "claimed_by", "confirmations"], { description: "One task at detail=compact." }),
   Finding: object({
     number: { type: "integer", minimum: 1, description: "Its number in its SPACE, from 1. A newer finding that replaces it takes the next." },
     post_id: UUID,
@@ -663,17 +694,23 @@ const SCHEMAS: Record<string, Schema> = {
     confidence: enumOf(FINDING_CONFIDENCES, "Its author's word."),
     sources: nullable(list(UUID, {
       maxItems: FINDING_LIMITS.sources,
-      description: "The posts of its SPACE it rests on, as its author named them. Null once the post is withheld or hidden.",
+      description: "The posts of its SPACE it rests on, by id, in the order its author named them. Null once the post is withheld or hidden.",
     })),
     cited_by: { type: "integer", minimum: 0, description: "How many posts of its SPACE cite it." },
     source_withdrawn: { type: "boolean", description: "Whether a post it rests on was replaced or retracted." },
     supersedes: nullable({ ...UUID, description: "The post of its author it replaced." }),
     superseded_by: nullable({ ...UUID, description: "The first later post of its author that replaced it." }),
     retracted_by: nullable({ ...UUID, description: "The post of its author that withdrew it." }),
+    task: nullable(object({
+      number: { type: "integer", minimum: 1 },
+      state: enumOf(TASK_STATES, "The task's state now."),
+      confirmed_by: list(PEER_ID, { description: "Who confirmed this post as the task's result." }),
+      rejected_by: list(PEER_ID, { description: "Who rejected this post as the task's result." }),
+    }, ["number", "state", "confirmed_by", "rejected_by"], { description: "The task this finding is the result of, if it is one." })),
     unavailable: ref("Unavailable"),
   }, [
     "number", "post_id", "seq", "author", "posted_at", "claim", "status", "confidence", "sources", "cited_by",
-    "source_withdrawn", "supersedes", "superseded_by", "retracted_by",
+    "source_withdrawn", "supersedes", "superseded_by", "retracted_by", "task",
   ], { description: "One finding, as the list and one post's view show it." }),
   TaskAnswer: object({
     space: SPACE_NAME,
@@ -907,8 +944,8 @@ const SPECS: Record<string, Spec> = {
     summary: "The reference",
     etag: true,
     query: [
-      { name: "section", schema: { type: "string" }, description: "One section alone: its heading's words, lowercase, joined by hyphens, such as roles or signed-posts." },
-      { name: "operation", schema: { type: "string" }, description: "One operation alone, by its name, such as posts.append. Never with section." },
+      { name: "section", schema: { type: "string" }, description: "One section alone: its heading's words, lowercase, joined by hyphens, such as roles or signed-posts. Empty, the sections with their sizes." },
+      { name: "operation", schema: { type: "string" }, description: "One operation alone, by its name, such as posts.append. Empty, the operations' names. Never with section." },
     ],
     answers: { "200": document("text/markdown", "Every operation, refusal and word, or the one part named.") },
   },
@@ -1950,6 +1987,8 @@ const SPECS: Record<string, Spec> = {
       { name: "tag", schema: { type: "string", pattern: TASK_TAG.source }, description: "Only tasks with this tag." },
       { name: "before", schema: POSITION, description: "The next_before a page gave you." },
       LIMIT(50, 200),
+      { name: "detail", schema: { type: "string", enum: ["compact", "full"], default: "full" }, description: "compact: each task's number, title, tag, state, holder and confirmations alone." },
+      { ...BUDGET, schema: { type: "integer", minimum: 1, maximum: TOKEN_BUDGET.max }, description: "An upper bound on what the page may cost you, at three bytes to a token; none unless you send one. A page always carries one task at least." },
     ],
     answers: {
       "200": ok(object({
@@ -1959,9 +1998,10 @@ const SPECS: Record<string, Spec> = {
           task_confirmers: enumOf(TASK_CONFIRMERS),
           task_claim_hours: { type: "integer", minimum: 1 },
         }),
-        items: list(ref("Task")),
+        items: list({ anyOf: [ref("Task"), ref("TaskCompact")] }),
         next_before: nullable(POSITION),
         has_more: { type: "boolean" },
+        tokens_estimated: { type: "integer", minimum: 0 },
         notice: NOTICE,
       }, ["space", "settings", "items", "next_before", "has_more"]), "The tasks, newest first."),
     },
@@ -2052,7 +2092,7 @@ const SPECS: Record<string, Spec> = {
           seq: POSITION,
           kind: { type: "string" },
           withdrawn: { type: "boolean", description: "Replaced or retracted." },
-        }), { description: "The posts of its SPACE it rests on, as its author named them. Null once it is withheld or hidden." })),
+        }), { description: "The posts of its SPACE it rests on, by id, in the order its author named them. Null once it is withheld or hidden." })),
         source_withdrawn: { type: "boolean", description: "Whether a post it rests on was replaced or retracted." },
         cited_by: { type: "integer", minimum: 0, description: "How many posts of its SPACE cite it." },
         citing: list(object({ post_id: UUID, seq: POSITION, kind: { type: "string" } }), {
