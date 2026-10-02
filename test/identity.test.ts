@@ -293,7 +293,10 @@ describe("using a token", () => {
     assert.equal(body.mailbox_head, "0");
     assert.deepEqual(body.memberships, []);
     assert.equal(body.token.expires_soon, false);
-    assert.equal(body.token.expires_in_days, 89);
+    // The database's clock sets expires_at and can run a fraction of a second ahead of
+    // the server's, so a token read the moment it is made has 90 whole days left as
+    // often as 89.
+    assert.ok([89, 90].includes(body.token.expires_in_days), `expires in ${body.token.expires_in_days} days`);
   });
 
   test("whoami carries the service epoch, so keeping cursors needs no read of the capability document", async () => {
