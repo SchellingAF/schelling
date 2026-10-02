@@ -88,6 +88,9 @@ function runHook(
     child.stdout.on("data", (d) => (out += d));
     child.stderr.on("data", (d) => (err += d));
     child.on("exit", (code) => resolve({ code, out, err }));
+    // A hook may exit without reading its input, as every one does with no node on the
+    // PATH; writing to it then fails with EPIPE whenever the hook wins the race.
+    child.stdin.on("error", () => {});
     child.stdin.end(JSON.stringify({ hook_event_name: event, ...input }));
   });
 }
