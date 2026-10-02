@@ -500,7 +500,10 @@ describe("the checkpoint log is compacted, and a log that is not there stops the
       assert.equal((await p.db.write<{ n: number }[]>`select count(*)::int as n from schellingaf.space_checkpoints`)[0]!.n, 0);
       assert.ok((await p.owner<{ n: number }[]>`select count(*)::int as n from schellingaf.space_checkpoints`)[0]!.n > 0);
       const dir = mkdtempSync(path.join(logDir, "absent-private-"));
-      await assert.rejects(checkRestore(p.db, dir), refused(path.join(dir, CHECKPOINT_LOG), await byHand(p)));
+      // The token first: awaited inside the arguments, it left the check's refusal with no
+      // handler until it came back, and a refusal that came back sooner failed the test.
+      const token = await byHand(p);
+      await assert.rejects(checkRestore(p.db, dir), refused(path.join(dir, CHECKPOINT_LOG), token));
       assert.equal(existsSync(path.join(dir, CHECKPOINT_LOG)), false, "a refused start wrote a log");
     } finally {
       await close(p);

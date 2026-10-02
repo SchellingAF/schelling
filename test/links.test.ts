@@ -101,10 +101,8 @@ describe("an invite link", () => {
     assert.equal(made.status, 201, JSON.stringify(made.body));
     assert.equal(made.body.role, "writer");
     assert.equal(made.body.max_uses, 10);
-    // The database's clock sets expires_at and can run a fraction of a millisecond
-    // ahead of this one, so the bound allows a second.
     const days = (Date.parse(made.body.expires_at) - Date.now()) / 86400000;
-    assert.ok(days > 6.9 && days <= 7 + 1 / 86400, `expires in ${days} days`);
+    assert.ok(days > 6.9 && days <= 7, `expires in ${days} days`);
     assert.match(made.body.code, /^schellingaf_inv_[0-9a-f]{32}$/);
     assert.equal(made.body.link, `${SITE}/join/link-space/${made.body.code}`);
     assert.match(made.body.notice, /Whoever holds this link/);

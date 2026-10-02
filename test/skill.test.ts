@@ -15,7 +15,7 @@ import { MCP_TOOLS, PROMPTS } from "../src/mcp/server.ts";
 import { LISTEN_ADDRESS_SHAPES } from "../src/mcp/listen.ts";
 import { OPERATIONS } from "../src/surface/operations.ts";
 import { KINDS, SUGGESTED_SCHEMES } from "../src/surface/vocabulary.ts";
-import { renderPrimer, tokens } from "../src/docs/render.ts";
+import { referenceParts, renderPrimer, renderReference, tokens } from "../src/docs/render.ts";
 
 const FILE = new URL("../content/skills/schellingaf/SKILL.md", import.meta.url);
 const text = readFileSync(FILE, "utf8");
@@ -131,6 +131,42 @@ describe("the agent skill", () => {
     const { message } = await connector("initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "test", version: "0" } });
     const said = message.result.instructions as string;
     before(said, "schellingaf_mailbox from the cursor", "where a work space keeps tasks, read its document with schellingaf_oracle, if it keeps one, then take the next task with schellingaf_task next");
+  });
+
+  test("the skill and the reference give the proposal routine, and the primer points to it, starting with SEEK and the index and never sending anything identifying", () => {
+    const flat = (t: string) => t.replace(/\s+/g, " ");
+    const inOrder = (t: string, ...parts: string[]) => {
+      let at = -1;
+      for (const part of parts) {
+        const next = t.indexOf(part, at + 1);
+        assert.ok(next > at, `${part} is missing or out of order in: ${t}`);
+        at = next;
+      }
+    };
+    const privacy = "no file path from your machine, no user name, no email address and no machine name";
+    const lines = /^## Propose a change to this service\n([\s\S]*?)(?=^## )/m.exec(body!)?.[1]?.trim() ?? "";
+    assert.ok(lines && lines.split("\n").length < 15, `the routine is not under fifteen lines: ${lines}`);
+    const section = flat(lines);
+    const refused = "If a call is refused, stop: if the name is taken, that proposal exists; join its discussion.";
+    const counts = "The owner of `[[proposals]]` posts the versions saying in progress, merged or declined and why, and the reply under your entry labelled `subject:status-merged`: a Status or that reply counts only from that key.";
+    inOrder(section, privacy, refused, "`subject:proposal`", "`proposals`", "`proposal-<slug>` under `this-service`, `document` `true`", "the `owner` of `proposals` an admin",
+      "Problem, Evidence, Proposed change and Status", "proposed; the owner of [[proposals]] decides", "`discussion`, `specify` and `implement`",
+      "`subject:proposal` and `subject:<slug>`", "a `result` with its address and `source:github-pr`", "one with `git.commit`",
+      "then mark done any task you hold.", counts);
+    assert.doesNotMatch(section, /The owner, an admin or a coordinator accepts/);
+    assert.match(section, /The prompt `propose_change` drafts/);
+
+    const primer = flat(renderPrimer());
+    inOrder(primer, "To propose a change to this service, follow `GET /reference?section=proposing-a-change`, or the connector's prompt `propose_change`.");
+
+    const reference = flat(referenceParts(renderReference()).sections.get("proposing-a-change") ?? "");
+    inOrder(reference, privacy, refused, "`GET /v1/seek?fingerprint=subject%3Aproposal`", "`POST /v1/spaces`", '"categories":["this-service"],"document":true', "`PUT /v1/spaces/proposal-<slug>/members/<owner>` with `{\"role\":\"admin\"}`",
+      '"kind":"version"', "proposed; the owner of [[proposals]] decides", "`POST /v1/spaces/proposal-<slug>/tasks` three times", "`POST /v1/spaces/proposals/posts`",
+      "a `result` with its address and a `source:github-pr` fingerprint", "a `result` with a `git.commit` fingerprint", "then mark done any task you hold.",
+      "The owner of `[[proposals]]` posts the versions whose Status says in progress, merged or declined", "a `version` that `supersedes` the current one", "`subject:status-merged`",
+      "A Status or a `subject:status-merged` reply counts only from the owner of `[[proposals]]`.");
+    for (const t of [section, reference]) assert.doesNotMatch(t, /each task marked done|owner of `?proposals`? (decides|posted)/);
+    assert.doesNotMatch(reference, /The owner, an admin or a coordinator accepts/);
   });
 
   test("the service serves it as the file it is, and a second read is 304", async () => {

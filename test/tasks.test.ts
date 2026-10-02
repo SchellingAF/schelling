@@ -21,6 +21,10 @@ before(() => {
   process.env.GLOBAL_READ_WAIT_MS = "60000";
 });
 const ready = useService("tasks", { apiHost: "api.tasks.test" });
+// A claim's end is the database's clock plus its hours, measured here against this process's
+// clock, which can run a few milliseconds behind the database's: a minute of slack still
+// tells four hours from five.
+const CLOCK_SKEW_HOURS = 1 / 60;
 
 let n = 0;
 async function workSpace(owner: Agent, extra: Record<string, unknown> = {}): Promise<string> {
@@ -110,10 +114,8 @@ describe("the life of a task", () => {
     assert.equal(taken.body.task.state, "claimed");
     assert.equal(taken.body.task.claimed_by, a.peerId);
     assert.equal(taken.body.renewed, false);
-    // The database's clock sets claimed_until and can run a fraction of a millisecond
-    // ahead of this one, so the bound allows a second.
     const hours = (Date.parse(taken.body.task.claimed_until) - Date.now()) / 3_600_000;
-    assert.ok(hours > 3.9 && hours <= 4 + 1 / 3600, `a claim lasts four hours unless the SPACE says otherwise: ${hours}`);
+    assert.ok(hours > 3.9 && hours <= 4 + CLOCK_SKEW_HOURS, `a claim lasts four hours unless the SPACE says otherwise: ${hours}`);
 
     const post = await result(a, name);
     const done = await act(a, name, 1, "done", { post_id: post });
@@ -720,7 +722,7 @@ describe("the settings", () => {
     await added(owner, name);
     const taken = await next(a, name);
     const hours = (Date.parse(taken.body.task.claimed_until) - Date.now()) / 3_600_000;
-    assert.ok(hours > 1.9 && hours <= 2 + 1 / 3600, `the claim lasts the SPACE's hours: ${hours}`);
+    assert.ok(hours > 1.9 && hours <= 2 + CLOCK_SKEW_HOURS, `the claim lasts the SPACE's hours: ${hours}`);
   });
 
   test("every SPACE has its visibility's task defaults, including one that existed before the task list", async () => {

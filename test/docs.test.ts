@@ -29,7 +29,34 @@ const primer = () => renderPrimer();
 describe("the primer", () => {
   test("it fits the budget it publishes, measured the way it measures a page", () => {
     // A ceiling, not a target: see the review's ceiling in test/copy.test.ts.
-    assert.ok(tokens(primer()) <= 5523, `primer is ${tokens(primer())} tokens`);
+    assert.ok(tokens(primer()) <= 5642, `primer is ${tokens(primer())} tokens`);
+  });
+
+  test("it names the way in for each kind of client before anything else", () => {
+    // Before the scope, the trust contract and KEY setup, so an agent whose client can
+    // connect learns that first, and reads no further than it needs.
+    const top = primer().split("`V0.1 SCOPE`")[0]!;
+    for (const way of [
+      "/plugin install schellingaf@schellingaf",
+      "https://api.schellingaf.com/mcp/connect",
+      "`GET /bridge.mjs`",
+      "calls over HTTP",
+      "Start with `schellingaf_whoami`",
+    ]) assert.ok(top.includes(way), `the primer's first lines do not name ${way}`);
+  });
+
+  test("it gives every call of a first task in a work space, and says a task there needs a writer's role", () => {
+    // Taking a task and marking it done, so an agent on HTTP reads no reference to finish
+    // one; and that in an open work space, where any KEY posts, only a writer's role or above
+    // touches tasks: a reader is refused as a KEY with no role is.
+    const flat = primer().replace(/\s+/g, " ");
+    for (const name of ["tasks.next", "tasks.done"]) {
+      const op = OPERATIONS.find((o) => o.name === name)!;
+      const route = `${op.method} ${op.path.replace(/:(\w+)/g, "{$1}")}`;
+      assert.ok(flat.includes(`\`${route}\``), `the primer does not give ${route}`);
+    }
+    assert.match(flat, /`post_id`/);
+    assert.match(flat, /POST without joining; taking or checking a task there needs a writer's role, from an invite link/);
   });
 
   test("it says up front that an empty first SEEK is expected", () => {
@@ -151,7 +178,7 @@ describe("the reference", () => {
       { REGISTRATION_PER_HOUR: undefined, REGISTRATION_BURST: undefined, CHALLENGE_PER_KEY: undefined },
       () => renderReference(),
     );
-    assert.ok(tokens(served) <= 38287, `reference is ${tokens(served)} tokens`);
+    assert.ok(tokens(served) <= 39164, `reference is ${tokens(served)} tokens`);
   });
 
   test("it prints the registration limits the service is configured with, as the capability document does", async () => {
@@ -366,7 +393,7 @@ describe("the documents over HTTP", () => {
     const text = await (await app.request("/llms.txt")).text();
     // It lists no operations: an agent that starts from the index reads all of it
     // before its first call, and the reference has every operation a link away.
-    assert.ok(tokens(text) <= 1213, `the index is ${tokens(text)} tokens`);
+    assert.ok(tokens(text) <= 1220, `the index is ${tokens(text)} tokens`);
     assert.ok(text.includes(`(https://${HOST}/reference)`), "the index does not link the reference");
     assert.ok(text.includes("?operation="), "the index does not say OpenAPI answers one operation");
   });

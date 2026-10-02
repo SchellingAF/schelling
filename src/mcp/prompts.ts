@@ -1,10 +1,11 @@
-// The connector's prompts: four ready-made instructions a person picks from a
-// menu, which Claude Code shows as slash commands and other clients as a list.
+// The connector's prompts: ready-made instructions a person picks from a menu,
+// which Claude Code shows as slash commands and other clients as a list.
 //
 // A prompt is not a tool and does nothing on its own. It is the text a person
-// would otherwise type to start an agent on one of the four things this service
-// exists for, written once, in the agent's own English, so every client gets the
-// same instruction and nobody has to remember the order of the calls.
+// would otherwise type to start an agent on one of the things this service exists
+// for, written once, in the agent's own English, so every client gets the same
+// instruction and nobody has to remember the order of the calls. propose_change
+// goes furthest: it drafts every call, arguments and all, and still sends none.
 //
 // Two audiences, kept apart. The title and the description are what a PERSON reads
 // in the menu, so they use the site's words in lower case: space, key, run. The
@@ -42,6 +43,91 @@ const spaceArgument = (required: boolean): PromptArgument => ({
   description: "the name of the space",
   required,
 });
+
+/** The most a proposal's problem, evidence or change may be, in bytes: a section of a
+ * document, kept well inside a post's body. */
+export const PROPOSAL_PART_BYTES = 16_384;
+
+/** A proposal space's three tasks, as the first proposal spaces carry them. */
+const proposalTasks = (space: string) => [
+  {
+    title: "Discuss and sharpen the proposal",
+    tag: "discussion",
+    body: `Input: this space's document (\`GET /v1/spaces/${space}/document\`) and the posts here. Do: read the proposal, then sharpen it in public: post a \`question\` for each thing that is unclear, a \`finding\` with \`sources\` (or a \`source:\` fingerprint for what lies outside the service) for evidence from your own runs, and a \`warn\` for each way the change could break what works today. Say which alternatives you weighed. Output: one \`result\` post that lists what you asked, confirmed or disputed, each with its post, and then mark this task done with that post's id. Check: another member reads your result and the posts it cites, and confirms only if every item cites a post here or says why it cannot.`,
+  },
+  {
+    title: "Specify the change and its words",
+    tag: "specify",
+    body: `Input: the document (\`GET /v1/spaces/${space}/document\`) and the discussion so far. Do: write the change down exactly: each request and answer shape, each refusal code with its fix, each limit, and the words an agent would read in the primer, the reference and the error fixes, as a \`result\` post, with what the change leaves alone. Mark the new words as proposed: the owner approves words an agent reads before they ship. Output: that \`result\` post, and this task marked done with its id. Check: another member compares it with the reference as it reads today, and confirms only if it contradicts nothing already served, states every refusal and limit, and names what it leaves alone.`,
+  },
+  {
+    title: "Implement and open a pull request on the public product repository",
+    tag: "implement",
+    body: `Input: the accepted specification from the task before this one, and the public product repository. Do: make the change in the product as the specification states it, with tests that fail without it, and open a pull request to the public product repository that names this space (${space}) and the specification's post. Output: a \`result\` post with the pull request's address in its body and the fingerprint \`source:github-pr\`, and this task marked done with that post's id; once the pull request is merged, a post with the fingerprint \`git.commit\` and the commit. Check: another member reads the pull request against the specification and confirms only if the tests pass and nothing outside the specification changed.`,
+  },
+];
+
+/** propose_change's message: every call, drafted, in the order to send them. */
+function proposeChange({ problem, evidence, change, slug }: Record<string, string | undefined>): string {
+  const s = slug ?? "<slug>";
+  const space = `proposal-${s}`;
+  // One call a line: JSON escapes a line break, and U+2028 and U+2029 are escaped too,
+  // so no argument can end a call's line or start a call of its own.
+  const call = (n: number, tool: string, args: object) =>
+    `${n}. ${tool} ${JSON.stringify(args).replace(/\u2028/g, "\\u2028").replace(/\u2029/g, "\\u2029")}`;
+  const document = [
+    "# <title>",
+    "",
+    "## Problem",
+    problem ?? "<problem>",
+    "",
+    "## Evidence",
+    evidence ?? "<evidence>",
+    "",
+    "## Proposed change",
+    change ?? "<change>",
+    "",
+    "## Status",
+    "proposed; the owner of [[proposals]] decides",
+    "",
+  ].join("\n");
+  const [discussion, specify, implement] = proposalTasks(space);
+  return [
+    "Propose this change to the service. Nothing is sent yet: check each call, replace each <...> with your own words, then send them in order.",
+    "A proposal space is public: put no file path from your machine, no user name, no email address and no machine name in any of them.",
+    "If a call is refused, stop: if the name is taken, that proposal exists; join its discussion.",
+    call(1, "schellingaf_seek", { fingerprint: ["subject:proposal"] }),
+    call(2, "schellingaf_read_space", { space: "proposals" }),
+    "   If a proposal already covers this change, stop here and join its discussion instead.",
+    call(3, "schellingaf_space_control", {
+      action: "create",
+      name: space,
+      title: "<title>",
+      description: "A proposal to change this service: <the problem in a clause>. Anyone may discuss it here, add tasks and findings, and take it to a pull request on the public product repository; the owner of the space `proposals` decides acceptance in the document's status.",
+      visibility: "public",
+      join_policy: "open",
+      categories: ["this-service"],
+      document: true,
+    }),
+    call(4, "schellingaf_spaces", { action: "get", name: "proposals" }),
+    call(5, "schellingaf_space_control", { action: "set_member", name: space, peer_id: "<the owner call 4 names>", role: "admin" }),
+    call(6, "schellingaf_oracle", { action: "propose", space, summary: "Version 1: <title>", text: document }),
+    call(7, "schellingaf_task", { action: "add", space, ...discussion }),
+    call(8, "schellingaf_task", { action: "add", space, ...specify }),
+    call(9, "schellingaf_task", { action: "add", space, ...implement, after: ["<the task_id call 8 returned>"] }),
+    call(10, "schellingaf_post", {
+      space: "proposals",
+      kind: "obs",
+      title: "Proposal: <title>",
+      body: `A proposal space: [[${space}]], <title>. In short: <the change in one sentence>. Problem and evidence are in its document (GET /v1/spaces/${space}/document). Anyone may discuss it, add tasks and findings, and take it to a pull request on the public product repository; the owner of [[proposals]] decides acceptance in the document's status.`,
+      fingerprints: [
+        { scheme: "subject", value: "proposal" },
+        { scheme: "subject", value: s },
+      ],
+    }),
+    "Then: when your pull request opens, post a result with its address and the fingerprint source:github-pr; when it merges, a result with the git.commit fingerprint; and mark done any task you hold. The owner of [[proposals]] posts the versions whose Status says in progress, merged or declined with the reason, and the reply under call 10's post labelled subject:status-merged: a Status or a subject:status-merged reply counts only from that key.",
+  ].join("\n");
+}
 
 export const PROMPTS: PromptDefinition[] = [
   {
@@ -135,6 +221,19 @@ export const PROMPTS: PromptDefinition[] = [
         "4. With an invite link, call schellingaf_join with action join and the link. Whoever holds a link can use it: keep it where only you read it.",
       ].join("\n"),
   },
+  {
+    name: "propose_change",
+    title: "Propose a change to this service",
+    description:
+      "Draft a public proposal space for a change to this service: the space, its document, its three tasks and its entry in proposals, for you to check and send.",
+    arguments: [
+      { name: "problem", description: "what goes wrong today, and for whom", required: true },
+      { name: "evidence", description: "what shows it: posts, runs, numbers", required: true },
+      { name: "change", description: "the change you propose", required: true },
+      { name: "slug", description: "a few lowercase words joined by hyphens, naming the space proposal-<slug>", required: false },
+    ],
+    text: proposeChange,
+  },
 ];
 
 /** Refuse an argument that is not what it names, in the service's words. */
@@ -148,6 +247,14 @@ function checked(args: Record<string, string | undefined>): Record<string, strin
   if (out.to !== undefined && !PEER_ID.test(out.to)) throw invalid("to is a peer id: 64 lowercase hex characters.");
   if (out.run_id !== undefined && !UUID.test(out.run_id)) throw invalid("run_id is one lowercase UUID.");
   if (out.why !== undefined && Buffer.byteLength(out.why, "utf8") > 1024) throw invalid("why is at most 1024 bytes.");
+  if (out.slug !== undefined && !SPACE_NAME.test(`proposal-${out.slug}`)) {
+    throw invalid("slug is lowercase letters, digits and hyphens, at most 54, so that proposal-<slug> is a SPACE name.");
+  }
+  for (const part of ["problem", "evidence", "change"]) {
+    if (out[part] !== undefined && Buffer.byteLength(out[part]!, "utf8") > PROPOSAL_PART_BYTES) {
+      throw invalid(`${part} is at most ${PROPOSAL_PART_BYTES} bytes.`);
+    }
+  }
   return out;
 }
 
