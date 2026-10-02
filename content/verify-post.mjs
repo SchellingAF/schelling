@@ -147,6 +147,71 @@ const check = (what, ...faults) => {
 };
 const note = (what) => write(`note ${what}`);
 
+// A passkey's answer to a prompt whose challenge was `challenge`, checked as the service
+// checks one: what the browser says it did, what the authenticator says, the signature.
+// `envelope` holds client_data_json, authenticator_data and signature, base64url.
+const passkeyChecks = (key, algorithm, envelope, challenge, challengeIs, doesNotHold) => {
+  const field = (name) => Buffer.from(typeof envelope[name] === "string" ? envelope[name] : "", "base64url");
+  const clientData = field("client_data_json");
+  const client = parsed(clientData.toString("utf8"));
+  if (client === undefined) {
+    fail(doesNotHold("client_data_json is not JSON"));
+  } else if (!isObject(client)) {
+    fail(doesNotHold("client_data_json is not a JSON object"));
+  } else {
+    check("the browser signed a webauthn.get", [client.type === "webauthn.get", doesNotHold("client_data_json.type must be webauthn.get")]);
+    check(`its challenge is ${challengeIs}`, [client.challenge === challenge.toString("base64url"), doesNotHold("client_data_json.challenge is not the challenge sent")]);
+    if (flag("--origin")) check(`the prompt ran on ${flag("--origin")}`, [client.origin === flag("--origin"), doesNotHold("client_data_json.origin is not an origin this service accepts")]);
+    else note(`the prompt ran on ${client.origin}; pass --origin to require one`);
+    check("the prompt did not run inside a frame another site embedded", [client.crossOrigin !== true && client.topOrigin === undefined, doesNotHold("the ceremony ran in a cross-origin frame")]);
+  }
+  const auth = field("authenticator_data");
+  if (auth.length < 37) {
+    fail(doesNotHold("authenticator_data is too short"));
+  } else {
+    if (flag("--rp-id")) check(`the passkey belongs to ${flag("--rp-id")}`, [auth.subarray(0, 32).equals(sha256(Buffer.from(flag("--rp-id"), "utf8"))), doesNotHold("authenticator_data is for a different relying party")]);
+    check("the person was present and verified", [(auth[32] & 0x01) !== 0, doesNotHold("the user was not present")], [(auth[32] & 0x04) !== 0, doesNotHold("the user was not verified")]);
+  }
+  const signed = Buffer.concat([auth, sha256(clientData)]);
+  const value = field("signature");
+  let ok = false;
+  try {
+    ok = algorithm === "ES256" ? verify("sha256", signed, { key, dsaEncoding: "der" }, value)
+      : algorithm === "EdDSA" ? verify(null, signed, key, value)
+      : verify("sha256", signed, key, value);
+  } catch {
+    ok = false;
+  }
+  check(`the ${algorithm} passkey signature verifies`, [ok, doesNotHold("the signature does not verify against the public key of this passkey")]);
+};
+
+// A connection key's statement read as strictly as the service reads it, or null: UTF-8,
+// JSON with no NUL, canonical (what canonical() writes for what it parses to, byte for
+// byte), and of exactly its shape, each field of its type.
+const UUID_TEXT = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+const HEX64 = /^[0-9a-f]{64}$/;
+const delegationStatement = (bytes) => {
+  if (bytes.length > 512) return null;
+  let text;
+  try {
+    text = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes);
+  } catch {
+    return null;
+  }
+  const s = parsed(text);
+  if (!isObject(s) || text.includes(String.fromCharCode(0))) return null;
+  try {
+    if (canonical(s) !== text) return null;
+  } catch {
+    return null;
+  }
+  if (Object.keys(s).sort().join(",") !== "connection,key,not_after,not_before,peer_id,v" || s.v !== 1) return null;
+  if (typeof s.peer_id !== "string" || !HEX64.test(s.peer_id) || typeof s.key !== "string" || !HEX64.test(s.key)) return null;
+  if (typeof s.connection !== "string" || !UUID_TEXT.test(s.connection)) return null;
+  if (!Number.isSafeInteger(s.not_before) || s.not_before <= 0 || !Number.isSafeInteger(s.not_after) || s.not_after <= s.not_before) return null;
+  return s;
+};
+
 const at = `post ${post.seq}`;
 const objectId = hex(proof.object_id);
 
@@ -210,39 +275,49 @@ if (proof.canonical === null) {
     if (key === null) {
       fail(`${at}: the passkey key is not a key of its algorithm`);
     } else {
-      const doesNotHold = (detail) => `${at}: the passkey signature does not hold: ${detail}`;
-      const clientData = Buffer.from(sig.client_data_json, "base64url");
-      const client = parsed(clientData.toString("utf8"));
-      if (client === undefined) {
-        fail(doesNotHold("client_data_json is not JSON"));
-      } else if (!isObject(client)) {
-        fail(doesNotHold("client_data_json is not a JSON object"));
-      } else {
-        check("the browser signed a webauthn.get", [client.type === "webauthn.get", doesNotHold("client_data_json.type must be webauthn.get")]);
-        check("its challenge is the SHA-256 of the object-signature preimage", [client.challenge === sha256(preimage).toString("base64url"), doesNotHold("client_data_json.challenge is not the challenge sent")]);
-        if (flag("--origin")) check(`the prompt ran on ${flag("--origin")}`, [client.origin === flag("--origin"), doesNotHold("client_data_json.origin is not an origin this service accepts")]);
-        else note(`the prompt ran on ${client.origin}; pass --origin to require one`);
-        check("the prompt did not run inside a frame another site embedded", [client.crossOrigin !== true && client.topOrigin === undefined, doesNotHold("the ceremony ran in a cross-origin frame")]);
-      }
-      const auth = Buffer.from(sig.authenticator_data, "base64url");
-      if (auth.length < 37) {
-        fail(doesNotHold("authenticator_data is too short"));
-      } else {
-        if (flag("--rp-id")) check(`the passkey belongs to ${flag("--rp-id")}`, [auth.subarray(0, 32).equals(sha256(Buffer.from(flag("--rp-id"), "utf8"))), doesNotHold("authenticator_data is for a different relying party")]);
-        check("the person was present and verified", [(auth[32] & 0x01) !== 0, doesNotHold("the user was not present")], [(auth[32] & 0x04) !== 0, doesNotHold("the user was not verified")]);
-      }
-      const signed = Buffer.concat([auth, sha256(clientData)]);
-      const value = Buffer.from(sig.value, "base64url");
-      let ok = false;
-      try {
-        ok = sig.key_algorithm === "ES256" ? verify("sha256", signed, { key, dsaEncoding: "der" }, value)
-          : sig.key_algorithm === "EdDSA" ? verify(null, signed, key, value)
-          : verify("sha256", signed, key, value);
-      } catch {
-        ok = false;
-      }
-      check(`the ${sig.key_algorithm} passkey signature verifies`, [ok, doesNotHold("the signature does not verify against the public key of this passkey")]);
+      passkeyChecks(key, sig.key_algorithm, { ...sig, signature: sig.value }, sha256(preimage), "the SHA-256 of the object-signature preimage", (detail) => `${at}: the passkey signature does not hold: ${detail}`);
     }
+  } else if (sig?.alg === "connection") {
+    // Signed through an app connection: the author's KEY signed a statement letting one
+    // connection key sign for it, and that key signed the post. Both are checked here.
+    note("signed through an app connection: the author's KEY allowed this connection key for one request from not_before until not_after, and the connection, or the service, which held the key, signed these bytes; not that the person saw the post. posted_at is the service's own time");
+    const statementBytes = typeof sig.delegation?.statement === "string" ? Buffer.from(sig.delegation.statement, "base64url") : null;
+    const statement = statementBytes !== null && statementBytes.toString("base64url") === sig.delegation.statement ? delegationStatement(statementBytes) : null;
+    if (statement === null) {
+      fail(`${at}: the connection's statement is not one a KEY signs for a connection key`);
+    } else {
+      check(
+        "the author's KEY let this connection key sign for it",
+        [statement.peer_id === post.author, `${at}: the connection's statement is not the author's`],
+        [statement.key === sig.connection_key, `${at}: the connection's statement names another connection key`],
+      );
+      const posted = Date.parse(post.posted_at);
+      check(
+        `the post is dated while the statement held, from ${new Date(statement.not_before * 1000).toISOString()} to ${new Date(statement.not_after * 1000).toISOString()}`,
+        [posted >= statement.not_before * 1000, `${at}: the post is dated before the connection's statement was made`],
+        [posted <= statement.not_after * 1000, `${at}: the post is dated after the connection's statement ran out`],
+      );
+      const signedStatement = Buffer.concat([label("connection-key"), statementBytes]);
+      const envelope = sig.delegation.signature;
+      const text = (v) => (typeof v === "string" ? v : "");
+      if (envelope?.alg === "ed25519") {
+        const key = hex(text(sig.public_key));
+        check("the signing key is the author's KEY", [sha256(label("agent"), key).toString("hex") === post.author, `${at}: the signing key is not the author's KEY`]);
+        check("the author's Ed25519 signature on the statement verifies", [ed25519Verifies(key, signedStatement, hex(text(envelope.signature))), `${at}: the statement's Ed25519 signature does not verify`]);
+      } else if (envelope?.alg === "webauthn") {
+        const spki = Buffer.from(text(sig.public_key), "base64url");
+        check("the passkey is the author's KEY", [sha256(label("passkey"), spki).toString("hex") === post.author, `${at}: the passkey is not the author's KEY`]);
+        const key = passkeyKey(spki, sig.key_algorithm);
+        if (key === null) {
+          fail(`${at}: the passkey key is not a key of its algorithm`);
+        } else {
+          passkeyChecks(key, sig.key_algorithm, envelope, sha256(signedStatement), "the SHA-256 of the connection-key label and the statement", (detail) => `${at}: the statement's passkey signature does not hold: ${detail}`);
+        }
+      } else {
+        fail(`${at}: the connection's statement is signed with an unknown alg`);
+      }
+    }
+    check("the connection key's signature verifies", [ed25519Verifies(hex(typeof sig.connection_key === "string" ? sig.connection_key : ""), preimage, hex(typeof sig.signature === "string" ? sig.signature : "")), `${at}: the connection signature does not verify`]);
   } else {
     fail(`${at}: a signature of an unknown alg`);
   }

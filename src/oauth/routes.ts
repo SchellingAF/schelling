@@ -35,9 +35,11 @@ import type { Config } from "../config.ts";
 import type { Db } from "../db/sql.ts";
 import { ApiError } from "../db/errors.ts";
 import { sha256, toHex } from "../domain/keys.ts";
-import { UUID } from "../domain/validate.ts";
+import { UUID, readBody } from "../domain/validate.ts";
 import { TOKEN_TTL_DEFAULT_SECONDS } from "../domain/protocol.ts";
 import { newToken } from "../http/auth.ts";
+import { signerOf } from "../domain/encryption.ts";
+import { checkConnectionKey, codeVaultData, openVault, readConnectionKeyBody, sealVault } from "../domain/connection-keys.ts";
 import { publishChange } from "../mcp/listen.ts";
 import { ASSERTION_TYPE, checkAssertion } from "./assertion.ts";
 import { FetchBusy, type FetchFor } from "./fetch.ts";
@@ -318,16 +320,22 @@ export function mountOAuth(app: Hono<Env>, config: Config, db: Db): void {
   };
 
   app.get("/v1/authorizations/:id", async (c) => {
-    const { id } = requestOf(c);
+    const { bearer, id } = requestOf(c);
     const [row] = await db.read<
       {
         client_id: string; client_kind: string; client_name: string | null; redirect_uri: string; scope: string;
         resource: string; created_at: Date; expires_at: Date; decision: string | null; redeemed_at: Date | null;
+        peer_id: Buffer | null;
       }[]
     >`
-      select client_id, client_kind, client_name, redirect_uri, scope, resource, created_at, expires_at, decision, redeemed_at
+      select client_id, client_kind, client_name, redirect_uri, scope, resource, created_at, expires_at, decision, redeemed_at,
+             peer_id
         from schellingaf.oauth_requests where request_id = ${id}::uuid`;
-    if (!row) throw new ApiError("AUTHORIZATION_NOT_FOUND");
+    // A request once decided is the deciding KEY's alone: its id is published in the
+    // statement of a connection key, and nobody else learns the app's return address,
+    // its state or the answer from it. One still pending is shown to whoever has its id,
+    // which is how the website shows it to the person signing in.
+    if (!row || (row.decision !== null && !row.peer_id?.equals(bearer.peerId))) throw new ApiError("AUTHORIZATION_NOT_FOUND");
     const loopback = isLoopback(row.redirect_uri);
     // Every redirect URI this app registered, to tell a person when the only place
     // it can send them is a program on their own computer.
@@ -370,21 +378,97 @@ export function mountOAuth(app: Hono<Env>, config: Config, db: Db): void {
     });
   });
 
+  /**
+   * The connection key an approval may carry, so the app can sign the person's posts:
+   * checked whole before anything is kept (checkConnectionKey), against the request as
+   * it stands and the approving KEY's own key, with a passkey's counter moved on as it
+   * is at sign-in. Answers what oauth_decide records, or null for an approval without
+   * one, which connects the app as before. Nothing of it is logged.
+   */
+  async function connectionKeyOf(c: Context<Env>, bearer: { peerId: Buffer }, id: string) {
+    const body = await readBody(c);
+    for (const key of Object.keys(body)) {
+      if (key !== "connection_key") throw new ApiError("INVALID_REQUEST", { detail: `${key} is not a field of an approval, which takes connection_key or nothing` });
+    }
+    if (body.connection_key === undefined) return null;
+    const sent = readConnectionKeyBody(body.connection_key);
+    // The request as it stands, refused as oauth_decide would refuse it, before a
+    // signature is checked or a counter moved; oauth_decide asks again under the lock.
+    // With the database's clock, which a statement's not_before is held to here and again
+    // in oauth_decide, and posts' times are taken from.
+    const [request] = await db.read<{ scope: string; decided: boolean; expired: boolean; now_ms: number }[]>`
+      select scope, decision is not null as decided, expires_at <= now() as expired,
+             (extract(epoch from now()) * 1000)::float8 as now_ms
+        from schellingaf.oauth_requests where request_id = ${id}::uuid`;
+    if (!request) throw new ApiError("AUTHORIZATION_NOT_FOUND");
+    if (request.decided) throw new ApiError("AUTHORIZATION_DECIDED");
+    if (request.expired) throw new ApiError("AUTHORIZATION_EXPIRED");
+    // An app that may only read posts nothing, so it is given nothing to sign with.
+    if (!request.scope.split(" ").includes("write")) {
+      throw new ApiError("INVALID_REQUEST", { detail: "connection_key is for an app allowed to write, and this one may only read" });
+    }
+    const [peer] = await db.read<
+      { public_key: Buffer | null; key_type: string; passkey_algorithm: number | null; passkey_key: Buffer | null; credential_id: Buffer | null }[]
+    >`
+      select p.public_key, p.key_type, k.algorithm as passkey_algorithm, k.public_key as passkey_key, k.credential_id
+        from schellingaf.peers p
+        left join schellingaf.passkeys k on k.peer_id = p.peer_id
+       where p.peer_id = ${bearer.peerId}`;
+    const signer = peer ? signerOf(peer) : null;
+    if (!signer) throw new ApiError("INTERNAL");
+    const checked = checkConnectionKey({
+      body: sent,
+      approver: bearer.peerId,
+      signer,
+      request: { id },
+      passkeys: config.passkeys ?? null,
+      nowMs: request.now_ms,
+    });
+    if (sent.envelope.alg === "webauthn") {
+      // The passkey that signed is the KEY's own, by the credential the prompt names,
+      // and its counter moves as it does at sign-in: one that counts and did not move
+      // is a copy of the authenticator.
+      if (!peer!.credential_id || sent.envelope.credential_id !== peer!.credential_id.toString("base64url")) {
+        throw new ApiError("INVALID_REQUEST", { detail: "connection_key.signature.credential_id is not the passkey of the KEY allowing the app" });
+      }
+      const [moved] = await db.write<{ ok: boolean }[]>`
+        select schellingaf.advance_passkey(${peer!.credential_id}, ${checked.signCount ?? 0}) as ok`;
+      if (!moved?.ok) {
+        throw new ApiError("INVALID_REQUEST", { detail: "connection_key.signature: the signature counter of this passkey did not advance" });
+      }
+    }
+    return { publicKey: checked.publicKey, statement: sent.statement, envelope: sent.envelope, seed: sent.seed };
+  }
+
   const decide = (approve: boolean) => async (c: Context<Env>) => {
     const { bearer, id } = requestOf(c);
+    const connection = approve ? await connectionKeyOf(c, bearer, id) : null;
     // The code: 256 random bits, never stored, only its hash. Its nonce becomes the
     // token's challenge nonce, whose unique index lets it mint one token at most.
     const code = approve ? randomBytes(32).toString("base64url") : null;
+    // A connection key's seed is kept only sealed under the code, which is never stored:
+    // the app's trade of the code moves it under the token (/oauth/token below).
+    const vault = connection && code ? sealVault(code, connection.seed, codeVaultData(id)) : null;
+    connection?.seed.fill(0);
     const [row] = await db.write<{ result: { redirect_uri: string; state: string | null } }[]>`
       select schellingaf.oauth_decide(${id}::uuid, ${bearer.peerId}, ${approve},
                                       ${code === null ? null : sha256(code)},
-                                      ${code === null ? null : randomBytes(16)}) as result`;
+                                      ${code === null ? null : randomBytes(16)},
+                                      ${connection?.publicKey ?? null}::bytea, ${connection?.statement ?? null}::bytea,
+                                      ${connection === null ? null : db.write.json(connection.envelope as never)}::jsonb,
+                                      ${vault}::bytea) as result`;
     const decided = row!.result;
     const answer = approve
       ? { code, state: decided.state, iss: issuer }
       : { error: "access_denied", error_description: "The person declined.", state: decided.state, iss: issuer };
     c.header("Cache-Control", "no-store");
-    return c.json({ redirect_to: withQuery(decided.redirect_uri, answer), decision: approve ? "approved" : "declined" });
+    // Whether a connection key was kept, so a page says the app will sign only once the
+    // service has said it holds the key.
+    return c.json({
+      redirect_to: withQuery(decided.redirect_uri, answer),
+      decision: approve ? "approved" : "declined",
+      ...(approve ? { connection_key: connection ? "kept" : "none" } : {}),
+    });
   };
 
   app.post("/v1/authorizations/:id/approve", decide(true));
@@ -475,10 +559,13 @@ export function mountOAuth(app: Hono<Env>, config: Config, db: Db): void {
     // past its five minutes is settled here, and one code cannot hold a fetch open
     // for a day.
     const codeHash = sha256(code);
-    const [pending] = await db.read<{ code_challenge: string; resource: string; client_id: string; redeemed: boolean; recent: boolean; expired: boolean }[]>`
-      select code_challenge, resource, client_id, redeemed_at is not null as redeemed,
+    const [pending] = await db.read<{
+      request_id: string; code_challenge: string; resource: string; client_id: string; redeemed: boolean; recent: boolean; expired: boolean;
+      connection_vault: Buffer | null;
+    }[]>`
+      select request_id::text, code_challenge, resource, client_id, redeemed_at is not null as redeemed,
              redeemed_at > now() - make_interval(secs => ${REPLAY_GRACE_SECONDS}) as recent,
-             code_expires_at <= now() as expired
+             code_expires_at <= now() as expired, connection_vault
         from schellingaf.oauth_requests where code_hash = ${codeHash}`;
     const notHeld = (why: string) => oauthError(c, 400, "invalid_grant", "The code or its verifier does not hold.", {}, why);
     if (!pending || pending.client_id !== clientId) return notHeld("no live code for this app");
@@ -545,9 +632,20 @@ export function mountOAuth(app: Hono<Env>, config: Config, db: Db): void {
     }
 
     const token = newToken();
+    // A yes that came with a connection key: its seed, opened with the code, sealed again
+    // under the token minted now, and kept beside the token's hash by oauth_redeem, which
+    // deletes the code's copy in the same transaction. Opened in memory, zeroed once it is
+    // sealed again, and no reference to it is kept.
+    let vault: Buffer | null = null;
+    if (pending.connection_vault) {
+      const seed = openVault(code, pending.connection_vault, codeVaultData(pending.request_id));
+      if (seed === null) throw new ApiError("INTERNAL");
+      vault = sealVault(token.token, seed, token.hash);
+      seed.fill(0);
+    }
     const [row] = await db.write<{ result: { outcome: string; expires_at?: string; scope?: string } }[]>`
       select schellingaf.oauth_redeem(${codeHash}, ${client.id}, ${redirectUri}, ${token.hash},
-                                      ${TOKEN_TTL_DEFAULT_SECONDS}, ${labelFor(client)}) as result`;
+                                      ${TOKEN_TTL_DEFAULT_SECONDS}, ${labelFor(client)}, ${vault}::bytea) as result`;
     const result = row!.result;
     // Two uses of one code at once: the other was first, and this one, finding the
     // code redeemed under its lock, revoked what the first minted.

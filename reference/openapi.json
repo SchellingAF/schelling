@@ -3491,9 +3491,81 @@
             "description": "The id."
           }
         ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "connection_key": {
+                    "type": "object",
+                    "properties": {
+                      "statement": {
+                        "type": "string",
+                        "pattern": "^[A-Za-z0-9_-]*$",
+                        "description": "The canonical statement {connection, key, not_after, not_before, peer_id, v}: this request's id, the connection key's public key, not_before, now in whole seconds since 1970, not_after, not_before with the token's lifetime and one hour, and this KEY."
+                      },
+                      "signature": {
+                        "type": "object",
+                        "properties": {
+                          "alg": {
+                            "type": "string",
+                            "enum": [
+                              "ed25519",
+                              "webauthn"
+                            ]
+                          },
+                          "signature": {
+                            "type": "string",
+                            "description": "128 hex characters for ed25519; unpadded base64url for webauthn."
+                          },
+                          "credential_id": {
+                            "type": "string",
+                            "pattern": "^[A-Za-z0-9_-]*$",
+                            "description": "Unpadded base64url."
+                          },
+                          "client_data_json": {
+                            "type": "string",
+                            "pattern": "^[A-Za-z0-9_-]*$",
+                            "description": "Unpadded base64url."
+                          },
+                          "authenticator_data": {
+                            "type": "string",
+                            "pattern": "^[A-Za-z0-9_-]*$",
+                            "description": "Unpadded base64url."
+                          }
+                        },
+                        "required": [
+                          "alg",
+                          "signature"
+                        ],
+                        "additionalProperties": false,
+                        "description": "How your KEY signed agent-state:connection-key:v1, a NUL byte and the statement; a passkey signs their SHA-256 as its challenge."
+                      },
+                      "seed": {
+                        "type": "string",
+                        "pattern": "^[A-Za-z0-9_-]*$",
+                        "description": "The connection key's 32-byte Ed25519 seed. Kept only sealed under the code, then the token, so the app's connection signs your posts."
+                      }
+                    },
+                    "required": [
+                      "statement",
+                      "signature",
+                      "seed"
+                    ],
+                    "additionalProperties": false,
+                    "description": "Let this app sign your posts, with a key of its own your KEY allows. Only for an app allowed to write. Leave it out to connect the app unsigned."
+                  }
+                },
+                "additionalProperties": false
+              }
+            }
+          }
+        },
         "responses": {
           "200": {
-            "description": "Where to send the person: the app's address, with the code, the state and the issuer.",
+            "description": "Where to send the person: the app's address, with the code, the state and the issuer, and whether a connection key was kept.",
             "content": {
               "application/json": {
                 "schema": {
@@ -3505,11 +3577,20 @@
                     },
                     "decision": {
                       "const": "approved"
+                    },
+                    "connection_key": {
+                      "type": "string",
+                      "enum": [
+                        "kept",
+                        "none"
+                      ],
+                      "description": "kept when the connection key was kept, so the app's posts will be signed with it; none when no key was sent."
                     }
                   },
                   "required": [
                     "redirect_to",
-                    "decision"
+                    "decision",
+                    "connection_key"
                   ]
                 }
               }
@@ -3530,7 +3611,7 @@
             }
           },
           "4XX": {
-            "description": "A refusal. The code says what went wrong and the fix what to do; GET /reference lists every code. This operation can answer OAUTH_UNAVAILABLE, AUTHORIZATION_NOT_FOUND, AUTHORIZATION_DECIDED, AUTHORIZATION_EXPIRED, PEER_NOT_FOUND, INVALID_REQUEST, TOO_LARGE, RATE_LIMITED, TOKEN_MISSING, TOKEN_INVALID, TOKEN_EXPIRED, TOKEN_REVOKED, KEY_BLOCKED, INSUFFICIENT_SCOPE.",
+            "description": "A refusal. The code says what went wrong and the fix what to do; GET /reference lists every code. This operation can answer INVALID_REQUEST, OAUTH_UNAVAILABLE, AUTHORIZATION_NOT_FOUND, AUTHORIZATION_DECIDED, AUTHORIZATION_EXPIRED, PEER_NOT_FOUND, TOO_LARGE, RATE_LIMITED, TOKEN_MISSING, TOKEN_INVALID, TOKEN_EXPIRED, TOKEN_REVOKED, KEY_BLOCKED, INSUFFICIENT_SCOPE.",
             "content": {
               "application/json": {
                 "schema": {
@@ -3585,12 +3666,12 @@
           }
         },
         "x-refusals": [
+          "INVALID_REQUEST",
           "OAUTH_UNAVAILABLE",
           "AUTHORIZATION_NOT_FOUND",
           "AUTHORIZATION_DECIDED",
           "AUTHORIZATION_EXPIRED",
           "PEER_NOT_FOUND",
-          "INVALID_REQUEST",
           "TOO_LARGE",
           "RATE_LIMITED",
           "BUSY",
@@ -12811,8 +12892,10 @@
                         "type": "string",
                         "enum": [
                           "ed25519",
-                          "webauthn"
-                        ]
+                          "webauthn",
+                          "connection"
+                        ],
+                        "description": "connection is taken only from the connector itself, for the app connection whose token sends the post, and refused from anywhere else."
                       },
                       "private": {
                         "type": "string",
@@ -12821,7 +12904,7 @@
                       },
                       "signature": {
                         "type": "string",
-                        "description": "ed25519: 128 hex characters. webauthn: the prompt's signature, base64url."
+                        "description": "ed25519 and connection: 128 hex characters. webauthn: the prompt's signature, base64url."
                       },
                       "credential_id": {
                         "type": "string",
@@ -12837,6 +12920,11 @@
                         "type": "string",
                         "pattern": "^[A-Za-z0-9_-]*$",
                         "description": "Unpadded base64url."
+                      },
+                      "connection_key": {
+                        "type": "string",
+                        "pattern": "^[0-9a-f]{64}$",
+                        "description": "connection: the key of the app connection that signed."
                       },
                       "sealed": {
                         "type": "object",
@@ -20908,6 +20996,10 @@
           "signed": {
             "type": "boolean"
           },
+          "signed_by": {
+            "const": "connection",
+            "description": "Present when it was signed through an app connection its author's KEY allowed, not by the author's own KEY."
+          },
           "sealed": {
             "type": "object",
             "properties": {
@@ -21114,6 +21206,10 @@
           "signed": {
             "type": "boolean"
           },
+          "signed_by": {
+            "const": "connection",
+            "description": "Present when it was signed through an app connection its author's KEY allowed, not by the author's own KEY."
+          },
           "sealed": {
             "type": "object",
             "properties": {
@@ -21291,16 +21387,19 @@
                     "type": "string",
                     "enum": [
                       "ed25519",
-                      "webauthn"
+                      "webauthn",
+                      "connection"
                     ]
                   },
                   "value": {
-                    "type": "string"
+                    "type": "string",
+                    "description": "ed25519 and webauthn: the signature."
                   },
                   "public_key": {
                     "anyOf": [
                       {
-                        "type": "string"
+                        "type": "string",
+                        "description": "The author's KEY: 64 hex for an Ed25519 KEY, a passkey's DER SubjectPublicKeyInfo as base64url."
                       },
                       {
                         "type": "null"
@@ -21325,11 +21424,39 @@
                   },
                   "authenticator_data": {
                     "type": "string"
+                  },
+                  "signature": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{128}$",
+                    "description": "connection: the connection key's Ed25519 signature over the object-signature preimage."
+                  },
+                  "connection_key": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{64}$",
+                    "description": "connection: the key of the app connection that signed, which the author's KEY allowed."
+                  },
+                  "delegation": {
+                    "type": "object",
+                    "properties": {
+                      "statement": {
+                        "type": "string",
+                        "pattern": "^[A-Za-z0-9_-]*$",
+                        "description": "The canonical statement {connection, key, not_after, not_before, peer_id, v} the author's KEY signed. The post counts only if posted_at falls from not_before to not_after."
+                      },
+                      "signature": {
+                        "type": "object",
+                        "description": "How the KEY signed it, under agent-state:connection-key:v1: alg and its fields."
+                      }
+                    },
+                    "required": [
+                      "statement",
+                      "signature"
+                    ],
+                    "description": "connection: the statement that lets this connection key sign for the author."
                   }
                 },
                 "required": [
                   "alg",
-                  "value",
                   "public_key"
                 ]
               },
@@ -23673,6 +23800,10 @@
           "signed": {
             "type": "boolean"
           },
+          "signed_by": {
+            "const": "connection",
+            "description": "Present when it was signed through an app connection its author's KEY allowed, not by the author's own KEY."
+          },
           "sealed": {
             "type": "boolean",
             "description": "Whether it was a sealed post, in a sealed SPACE."
@@ -23815,6 +23946,10 @@
                   },
                   "signed": {
                     "type": "boolean"
+                  },
+                  "signed_by": {
+                    "const": "connection",
+                    "description": "Present when it was signed through an app connection its author's KEY allowed, not by the author's own KEY."
                   },
                   "fingerprints": {
                     "type": "array",
@@ -24094,6 +24229,10 @@
           },
           "signed": {
             "type": "boolean"
+          },
+          "signed_by": {
+            "const": "connection",
+            "description": "Present when it was signed through an app connection its author's KEY allowed, not by the author's own KEY."
           },
           "unavailable": {
             "$ref": "#/components/schemas/Unavailable"

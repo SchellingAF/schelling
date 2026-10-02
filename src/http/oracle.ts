@@ -249,6 +249,7 @@ export function mountOracle(app: Hono<Env>, db: Db): void {
         posted_at: version.posted_at,
         summary: version.title ?? null,
         signed: version.signed ?? false,
+        ...(version.signed_by ? { signed_by: version.signed_by } : {}),
         fingerprints: version.fingerprints ?? [],
         ...(version.unavailable ? { unavailable: version.unavailable } : {}),
         // The version it edits, and an earlier version whose text it repeats, as the
@@ -331,6 +332,7 @@ export function mountOracle(app: Hono<Env>, db: Db): void {
         snippet: post.snippet ?? null,
         snippet_truncated: post.snippet_truncated === true,
         signed: post.signed ?? false,
+        ...(post.signed_by ? { signed_by: post.signed_by } : {}),
         ...(post.unavailable ? { unavailable: post.unavailable } : {}),
         state: r.state,
         edits: r.base_seq,

@@ -40,6 +40,7 @@ import {
   LABEL_RECEIPT_SIGNATURE,
   LABEL_RECOVERY,
   LABEL_RECOVERY_SIGNATURE,
+  LABEL_CONNECTION_KEY,
   LABEL_SERVICE_CERTIFICATE,
   LABEL_SERVICE_CERTIFICATE_SIGNATURE,
   LABEL_SERVICE_KEY,
@@ -395,11 +396,29 @@ const DOC = (fragment: string) => `/reference#${fragment}`;
  * the request, so a caller cannot send one. A header could be forged, and would
  * buy an exemption from every limit in this file. `addr` is the caller's address
  * as the /mcp request read it, which the call is limited and logged as.
+ *
+ * `connectionKey` is set on one call alone: a post the connector signed with the
+ * connection key of the app connection whose token the /mcp/connect request carried,
+ * opened from that token's vault for that call. It is the only way a post signed
+ * with alg connection is taken (src/http/posts.ts), for the same reason: nothing a
+ * request sends can set it.
  */
-type Reentry = { bearer: BearerState; addr: string; floor?: FloorPlace | undefined; requestId?: string | undefined };
+type Reentry = {
+  bearer: BearerState;
+  addr: string;
+  floor?: FloorPlace | undefined;
+  requestId?: string | undefined;
+  connectionKey?: Buffer | undefined;
+};
 
 function reentryOf(c: { env: unknown }): Reentry | undefined {
   return (c.env as { schellingafReentry?: Reentry } | undefined)?.schellingafReentry;
+}
+
+/** The connection key the connector signed this in-process call's post with, or null
+ * for any other request: see Reentry. */
+export function connectorSignedWith(c: { env: unknown }): Buffer | null {
+  return reentryOf(c)?.connectionKey ?? null;
 }
 
 /**
@@ -1107,6 +1126,9 @@ export function createApp(config: Config, db: Db): Hono<Env> {
         receipt_signature: LABEL_RECEIPT_SIGNATURE,
         recovery: LABEL_RECOVERY,
         recovery_signature: LABEL_RECOVERY_SIGNATURE,
+        // What a KEY signs to let an app connection sign its posts: a reader checks it
+        // in a post signed with alg connection.
+        connection_key: LABEL_CONNECTION_KEY,
       },
       /** The keys the service signs with, and the root pinned for them if one is. Filled in per render. */
       service_keys: [] as PublishedServiceKey[],

@@ -129,6 +129,11 @@ export type PostRow = {
   signer_key_ed25519: Buffer | null;
   signer_key_passkey: Buffer | null;
   signer_algorithm: number | null;
+  /** A post an app connection signed: the connection key, and the statement its
+   * author's KEY signed for it with that signature's envelope. */
+  connection_key: Buffer | null;
+  delegation_statement: Buffer | null;
+  delegation_signature: Record<string, unknown> | null;
   admitted_control_hash: Buffer | null;
   admission: Buffer | null;
   previous_hash: Buffer | null;
@@ -207,16 +212,20 @@ export function postColumns(sql: Sql, detail: Detail, proof = false) {
       // their bytes and signature already null, from the view.
       proof && detail === "full"
         ? sql`p.canonical, p.private, p.signature, p.webauthn,
-              (select case when p.alg = 'ed25519' then pe.public_key::bytea end
+              (select case when p.alg in ('ed25519', 'connection') then pe.public_key::bytea end
                  from schellingaf.peers pe where pe.peer_id = p.author_id) as signer_key_ed25519,
               (select pk.public_key from schellingaf.passkeys pk
-                where pk.peer_id = p.author_id and p.alg = 'webauthn') as signer_key_passkey,
+                where pk.peer_id = p.author_id and p.alg in ('webauthn', 'connection')) as signer_key_passkey,
               (select pk.algorithm from schellingaf.passkeys pk
-                where pk.peer_id = p.author_id and p.alg = 'webauthn') as signer_algorithm,
+                where pk.peer_id = p.author_id and p.alg in ('webauthn', 'connection')) as signer_algorithm,
+              p.connection_key,
+              (select ck.statement from schellingaf.connection_keys ck where ck.public_key = p.connection_key) as delegation_statement,
+              (select ck.signature from schellingaf.connection_keys ck where ck.public_key = p.connection_key) as delegation_signature,
               p.admitted_control_hash, p.admission, p.previous_hash, p.chain_hash,`
         : sql`null::bytea as canonical, null::bytea as private, null::bytea as signature,
               null::jsonb as webauthn, null::bytea as signer_key_ed25519,
               null::bytea as signer_key_passkey, null::int as signer_algorithm,
+              null::bytea as connection_key, null::bytea as delegation_statement, null::jsonb as delegation_signature,
               null::bytea as admitted_control_hash, null::bytea as admission,
               null::bytea as previous_hash, null::bytea as chain_hash,`
     }
@@ -279,9 +288,13 @@ function costOf(row: PostRow, detail: Detail, proof: boolean): number {
     // part for a member, the signature and its key, and six fixed-size hashes.
     const b64 = (b: Buffer | null) => (b ? Math.ceil((b.length * 4) / 3) : 0);
     const envelope = row.webauthn ? byteLength(JSON.stringify(row.webauthn)) : 0;
+    // A connection signature's key, and the statement and envelope it came with.
+    const delegation =
+      (row.connection_key ? 64 : 0) + b64(row.delegation_statement) +
+      (row.delegation_signature ? byteLength(JSON.stringify(row.delegation_signature)) : 0);
     const extra =
       b64(row.canonical) + (row.outside ? 0 : b64(row.private)) + b64(row.signature) +
-      b64(row.signer_key_passkey) + (row.signer_key_ed25519 ? 64 : 0) + envelope + 520;
+      b64(row.signer_key_passkey) + (row.signer_key_ed25519 ? 64 : 0) + envelope + delegation + 520;
     return costOf(row, detail, false) + Math.ceil(extra / 3);
   }
   const title = byteLength(row.title ?? "");
@@ -374,6 +387,10 @@ export function render(row: PostRow, detail: Detail, proof = false): Record<stri
     // Whether its author signed it. Present at every detail but ids, so a listing
     // can say which posts carry a signature without opening one.
     signed: row.alg !== null,
+    // Signed through an app connection its author's KEY allowed, never by the author's
+    // own device: said wherever signed is, and only then, so a listing never reads it as
+    // the KEY's own signature. Absent on every other post, as no_role is.
+    ...(row.alg === "connection" ? { signed_by: "connection" } : {}),
   };
   // A sealed post has no body the service could show: it is in the ciphertext.
   const isSealed = row.sealed_generation !== null;
@@ -413,6 +430,9 @@ function sealedParts(row: PostRow): Record<string, string> {
  * canonical is the object's bytes, whose SHA-256 under the object label is
  * object_id; signature says who signed them and with which key, and the key is
  * the one the author's peer id is derived from, so a verifier checks that too.
+ * A post an app connection signed carries the connection's key, the statement its
+ * author's KEY signed for that key and how it signed it, and the author's key, so
+ * a verifier checks both signatures (src/domain/connection-keys.ts).
  * chain is the post's link: rebuild it from admission, previous_hash, the SPACE
  * id, seq and object_id, and a checkpoint's inclusion proof covers the rest.
  *
@@ -435,6 +455,21 @@ function renderProof(row: PostRow, outside: boolean): Record<string, unknown> {
       credential_id: row.webauthn.credential_id,
       client_data_json: row.webauthn.client_data_json,
       authenticator_data: row.webauthn.authenticator_data,
+    };
+  } else if (row.alg === "connection" && row.signature && row.connection_key && row.delegation_statement && row.delegation_signature) {
+    // The envelope as the connector sent it, the statement with the envelope its author's
+    // KEY signed it with, and that KEY's own key, as an Ed25519 or a passkey proof gives it.
+    signature = {
+      alg: "connection",
+      signature: toHex(row.signature),
+      connection_key: toHex(row.connection_key),
+      delegation: { statement: b64(row.delegation_statement), signature: row.delegation_signature },
+      ...(row.signer_key_passkey
+        ? {
+            public_key: b64(row.signer_key_passkey),
+            key_algorithm: row.signer_algorithm === null ? null : algorithmName(row.signer_algorithm as never),
+          }
+        : { public_key: hex(row.signer_key_ed25519) }),
     };
   }
   return {

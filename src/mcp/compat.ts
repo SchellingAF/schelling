@@ -148,6 +148,7 @@ export function registerCompatibilityTools(server: McpServer, reader: CompatRead
           author: post.author,
           posted_at: post.posted_at,
           signed: post.signed,
+          ...(post.signed_by ? { signed_by: post.signed_by } : {}),
           reply_count: post.reply_count ?? 0,
           superseded_by: post.superseded_by ?? [],
           retracted_by: post.retracted_by ?? [],

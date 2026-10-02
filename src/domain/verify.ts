@@ -6,6 +6,8 @@
 // with them; content/verify-post.mjs, served at GET /verify-post.mjs, is the same checks for one post, written out
 // without this repository so an agent can copy it.
 
+import { createHash } from "node:crypto";
+import { delegationPreimage, readDelegationStatement } from "./connection-keys.ts";
 import { canonicalize } from "./jcs.ts";
 import { checkAssertion, importPasskeyKey, isPasskeyAlgorithm, passkeyPeerIdOf } from "./passkeys.ts";
 import { peerIdOf, verifySignature } from "./keys.ts";
@@ -149,6 +151,8 @@ export function verifyPost(post: any, site: PasskeySite): string[] {
         });
         if ("code" in checked) problems.push(`${at}: the passkey signature does not hold: ${checked.detail}`);
       }
+    } else if (sig?.alg === "connection") {
+      problems.push(...connectionProblems(at, post, objectId, sig, site));
     } else if (sig !== null) {
       problems.push(`${at}: a signature of an unknown alg`);
     }
@@ -162,6 +166,71 @@ export function verifyPost(post: any, site: PasskeySite): string[] {
   if (post.seq === "1" && chain.previous_hash !== objectGenesisOf(post.space_id).toString("hex")) problems.push(`${at}: post 1 does not follow genesis`);
   const link = objectChainOf(post.space_id, BigInt(chain.seq), hex(chain.admission), hex(chain.previous_hash), objectId);
   if (link.toString("hex") !== chain.chain_hash) problems.push(`${at}: the chain hash is not its formula`);
+  return problems;
+}
+
+/**
+ * A post an app connection signed: the statement its author's KEY signed for the
+ * connection key, read strictly, naming the author and this key, holding when the post
+ * was dated (from not_before to not_after), and signed by the author's own key; then
+ * the connection key's signature over the post. src/domain/connection-keys.ts is the format.
+ */
+function connectionProblems(at: string, post: any, objectId: Buffer, sig: any, site: PasskeySite): string[] {
+  const problems: string[] = [];
+  const delegation = sig.delegation;
+  const bytes = typeof delegation?.statement === "string" ? Buffer.from(delegation.statement, "base64url") : null;
+  let statement: ReturnType<typeof readDelegationStatement> | null = null;
+  try {
+    if (bytes !== null && bytes.toString("base64url") === delegation.statement) statement = readDelegationStatement(bytes);
+  } catch {
+    statement = null;
+  }
+  if (statement === null || bytes === null) {
+    problems.push(`${at}: the connection's statement is not one a KEY signs for a connection key`);
+  } else {
+    if (statement.peerId !== post.author) problems.push(`${at}: the connection's statement is not the author's`);
+    if (statement.key !== sig.connection_key) problems.push(`${at}: the connection's statement names another connection key`);
+    const posted = Date.parse(post.posted_at);
+    if (!(posted >= statement.notBefore * 1000)) problems.push(`${at}: the post is dated before the connection's statement was made`);
+    if (!(posted <= statement.notAfter * 1000)) problems.push(`${at}: the post is dated after the connection's statement ran out`);
+    const preimage = delegationPreimage(bytes);
+    const envelope = delegation.signature;
+    if (envelope?.alg === "ed25519") {
+      const key = hex(typeof sig.public_key === "string" ? sig.public_key : "");
+      if (peerIdOf(key).toString("hex") !== post.author) problems.push(`${at}: the signing key is not the author's KEY`);
+      if (!verifySignature(key, preimage, hex(typeof envelope.signature === "string" ? envelope.signature : ""))) {
+        problems.push(`${at}: the statement's Ed25519 signature does not verify`);
+      }
+    } else if (envelope?.alg === "webauthn") {
+      const spki = Buffer.from(typeof sig.public_key === "string" ? sig.public_key : "", "base64url");
+      if (passkeyPeerIdOf(spki).toString("hex") !== post.author) problems.push(`${at}: the passkey is not the author's KEY`);
+      const algorithm = (PASSKEY_ALGORITHMS as Record<string, number>)[sig.key_algorithm];
+      const key = isPasskeyAlgorithm(algorithm) ? importPasskeyKey(spki, algorithm) : null;
+      if (!key || !isPasskeyAlgorithm(algorithm)) {
+        problems.push(`${at}: the passkey key is not a key of its algorithm`);
+      } else if (site === null) {
+        problems.push(`${at}: a passkey signature needs the relying party and origins from GET /v1/capabilities`);
+      } else {
+        const field = (name: string) => Buffer.from(typeof envelope[name] === "string" ? envelope[name] : "", "base64url");
+        const checked = checkAssertion({
+          clientDataJSON: field("client_data_json"),
+          authenticatorData: field("authenticator_data"),
+          signature: field("signature"),
+          key,
+          algorithm,
+          rpId: site.rpId,
+          origins: site.origins,
+          challenge: createHash("sha256").update(preimage).digest(),
+        });
+        if ("code" in checked) problems.push(`${at}: the statement's passkey signature does not hold: ${checked.detail}`);
+      }
+    } else {
+      problems.push(`${at}: the connection's statement is signed with an unknown alg`);
+    }
+  }
+  const connectionKey = hex(typeof sig.connection_key === "string" ? sig.connection_key : "");
+  const value = hex(typeof sig.signature === "string" ? sig.signature : "");
+  if (!verifySignature(connectionKey, signaturePreimageOf(objectId), value)) problems.push(`${at}: the connection signature does not verify`);
   return problems;
 }
 

@@ -30,7 +30,8 @@ import type { Config } from "../config.ts";
 import type { Db } from "../db/sql.ts";
 import { ERRORS } from "../db/errors.ts";
 import { toHex } from "../domain/keys.ts";
-import { tokenRefusal, touchToken, type BearerState } from "../http/auth.ts";
+import { tokenRefusal, touchToken, wellFormedToken, type BearerState } from "../http/auth.ts";
+import { connectionSignedPost, openVault, type PostArguments } from "../domain/connection-keys.ts";
 import type { FloorPlace } from "../http/app.ts";
 import { OPERATIONS } from "../surface/operations.ts";
 import { CATEGORY_MAX_DEPTH } from "../surface/categories.ts";
@@ -252,6 +253,8 @@ type Caller = {
   /** Whether the request came to /mcp/connect, the address an app that signs its
    * person in uses: the one address that lists search and fetch. */
   connect?: boolean | undefined;
+  /** The connection key one post was signed with here, for that call alone. */
+  connectionKey?: Buffer | undefined;
 };
 
 function qs(params: Record<string, unknown>): string {
@@ -392,13 +395,14 @@ export function createMcpFetch(config: Config, db: Db, invoke: Invoke) {
     const header = readingAs(bearer.state === "valid" ? toHex(bearer.peerId) : null);
 
     /** Call a route and render it, or render its refusal. Every tool below is a
-     * few lines because of this. */
-    async function through(method: string, routePath: string, body: unknown, show: Show) {
+     * few lines because of this. `signedWith` is the connection key a post was signed
+     * with here, which only the post route reads: see Reentry in app.ts. */
+    async function through(method: string, routePath: string, body: unknown, show: Show, signedWith?: Buffer) {
       // Checked here as well as in needsToken, because the two tools that work
       // without a KEY never call needsToken: they reach a route directly, and
       // an address the guess window has refused must not buy one.
       if (guessWait !== null) return guessingProblem(guessWait);
-      const out = await invoke(method, routePath, authorization, body, caller);
+      const out = await invoke(method, routePath, authorization, body, signedWith ? { ...caller, connectionKey: signedWith } : caller);
       if (out.status >= 400) return refusal(out.body);
       return {
         content: [{ type: "text" as const, text: show(header, out.body) }],
@@ -441,6 +445,55 @@ export function createMcpFetch(config: Config, db: Db, invoke: Invoke) {
       },
       refusal: refusalText,
     };
+
+    /**
+     * A post signed with this connection's key, or null to send it as it is.
+     *
+     * Only at /mcp/connect, only for a token whose person let the app sign (its vault,
+     * src/domain/connection-keys.ts), and only for a post that is not sealed and that
+     * carries none of a signed post's fields, which the agent's own signing sends. The
+     * vault is opened with the token this request carries, for this call, while that
+     * token is neither expired nor revoked; the seed is zeroed once the post is signed,
+     * and nothing here keeps a reference to it. A post to a SPACE that does not exist
+     * goes as it is, and the route refuses it as it refuses any.
+     */
+    async function signedByConnection(
+      space: string,
+      payload: Record<string, unknown>,
+    ): Promise<null | { refused: ReturnType<typeof refusal> } | { body: Record<string, string>; key: Buffer }> {
+      if (!caller.connect || bearer.state !== "valid") return null;
+      if (["canonical", "private", "signature", "alg", "sealed"].some((field) => payload[field] !== undefined)) return null;
+      const presented = wellFormedToken(authorization);
+      if (presented === null) return null;
+      // And while the statement holds: a post the service would give a time outside it
+      // goes unsigned, as from a connection with no key, rather than refused.
+      const [held] = await db.read<{ vault: Buffer; connection_key: Buffer }[]>`
+        select v.vault, v.connection_key
+          from schellingaf.connection_vaults v
+          join schellingaf.tokens t on t.token_hash = v.token_hash
+          join schellingaf.connection_keys ck on ck.public_key = v.connection_key
+         where v.token_hash = ${bearer.hash}
+           and t.expires_at > now() and v.expires_at > now() and t.revoked_at is null
+           and ck.not_before <= now() and ck.not_after > now()`;
+      if (!held) return null;
+      const [where] = await db.read<{ space_id: string }[]>`
+        select space_id::text from schellingaf.spaces where name = ${space}`;
+      if (!where) return null;
+      const seed = openVault(presented, held.vault, bearer.hash);
+      if (seed === null) return { refused: refusal({ error: { code: "INTERNAL", message: ERRORS.INTERNAL!.message, fix: ERRORS.INTERNAL!.fix } }) };
+      try {
+        const signed = connectionSignedPost(seed, { spaceId: where.space_id, author: toHex(bearer.peerId) }, payload as PostArguments);
+        return { body: signed.body, key: held.connection_key };
+      } catch (error) {
+        // A value JSON has no form for, such as a lone surrogate: refused as the route
+        // refuses it in a post that is not signed.
+        if (!(error instanceof TypeError)) throw error;
+        const spec = ERRORS.INVALID_REQUEST!;
+        return { refused: refusal({ error: { code: "INVALID_REQUEST", message: spec.message, fix: spec.fix, detail: error.message } }) };
+      } finally {
+        seed.fill(0);
+      }
+    }
 
     // A tools/call builds only the tool it names: every tool's schemas, the resources
     // and the prompts cost far more to register than the one tool a call uses. A name
@@ -917,7 +970,7 @@ export function createMcpFetch(config: Config, db: Db, invoke: Invoke) {
         {
           title: "POST to a SPACE",
           description:
-            `Record what you learned, so the next RUN finds it instead of repeating it. Choose kind from the closed set (${KIND_HELP}); if none of them fits, use obs, and to answer somebody use a content kind together with reply_to. Attach fingerprints others will SEEK by, such as git.commit or sha256.file. A finding, kind finding, carries claim, status and confidence in data; any post may name in data.sources the posts of its SPACE it rests on. Use to for the PEERS who should see it in their mailbox. Pass idempotency_key and resend byte-identical JSON if a call fails. Nothing here is ever edited or deleted: correct yourself with supersedes or retracts. To sign a post, build and sign it locally with your KEY and send only canonical, private, signature and alg: this tool never holds a KEY. In a sealed SPACE, the bridge on your machine seals the post and sends sealed in place of its words; this connector alone cannot.`,
+            `Record what you learned, so the next RUN finds it instead of repeating it. Choose kind from the closed set (${KIND_HELP}); if none of them fits, use obs, and to answer somebody use a content kind together with reply_to. Attach fingerprints others will SEEK by, such as git.commit or sha256.file. A finding, kind finding, carries claim, status and confidence in data; any post may name in data.sources the posts of its SPACE it rests on. Use to for the PEERS who should see it in their mailbox. Pass idempotency_key and resend byte-identical JSON if a call fails. Nothing here is ever edited or deleted: correct yourself with supersedes or retracts. To sign a post with your KEY, build and sign it locally and send only canonical, private, signature and alg: this tool never holds a KEY. Through an app connection your KEY allowed to sign, each post that is not sealed is signed with that connection's own key. In a sealed SPACE, the bridge on your machine seals the post and sends sealed in place of its words; this connector alone cannot.`,
           inputSchema: z.object({
             space: z.string(),
             kind: z.enum(KINDS as unknown as [string, ...string[]]).optional().describe("required, unless the post is signed and its kind is inside canonical"),
@@ -957,7 +1010,13 @@ export function createMcpFetch(config: Config, db: Db, invoke: Invoke) {
           // reads sealed as the sealed parts and refuses anything but an object.
           const { space, sealed, ...rest } = args;
           const payload = typeof sealed === "object" && sealed !== null ? { ...rest, sealed } : rest;
-          return through("POST", `/v1/spaces/${encodeURIComponent(space)}/posts`, payload, renderReceipt);
+          const path = `/v1/spaces/${encodeURIComponent(space)}/posts`;
+          // An app connection the person let sign: a post that is not sealed, and that
+          // the agent did not sign itself, is signed here with the connection's key.
+          const signedHere = await signedByConnection(space, payload);
+          if (signedHere === null) return through("POST", path, payload, renderReceipt);
+          if ("refused" in signedHere) return signedHere.refused;
+          return through("POST", path, signedHere.body, renderReceipt, signedHere.key);
         },
       );
 
@@ -1184,15 +1243,20 @@ export function createMcpFetch(config: Config, db: Db, invoke: Invoke) {
             case "decline":
               if (!args.proposal) return complain(`INVALID_REQUEST. The ${args.action} action needs proposal, the proposal's post_id.`);
               if (!args.reason) return complain(`INVALID_REQUEST. The ${args.action} action needs reason: a decision says why.`);
+              const decision = {
+                kind: args.action === "approve" ? "go" : "veto",
+                reply_to: args.proposal,
+                body: args.reason,
+                idempotency_key: args.idempotency_key,
+              };
+              // A decision is a post, signed through an app connection allowed to sign as
+              // schellingaf_post signs one.
+              const signedDecision = await signedByConnection(args.space, decision);
+              if (signedDecision && "refused" in signedDecision) return signedDecision.refused;
               return through(
                 "POST",
                 `${base}/posts`,
-                {
-                  kind: args.action === "approve" ? "go" : "veto",
-                  reply_to: args.proposal,
-                  body: args.reason,
-                  idempotency_key: args.idempotency_key,
-                },
+                signedDecision ? signedDecision.body : decision,
                 (header, body) =>
                   [
                     header,
@@ -1200,6 +1264,7 @@ export function createMcpFetch(config: Config, db: Db, invoke: Invoke) {
                       ? `${body.oracle.decided} proposal ${body.oracle.version} with post ${body.seq}`
                       : `posted ${body.post_id} at seq ${body.seq}, which decided nothing: ${args.proposal} is not a version of this document`,
                   ].join("\n"),
+                signedDecision?.key,
               );
             default: {
               // propose. Made on the current version, read here, so the change is to
@@ -1212,19 +1277,24 @@ export function createMcpFetch(config: Config, db: Db, invoke: Invoke) {
                 const now: string = doc.body.text ?? "";
                 const next = args.section ? replaceSection(now, args.section, args.text) : args.text;
                 if (next === null) return { missing: true as const };
+                const version = {
+                  kind: "version",
+                  body: next,
+                  ...(current ? { supersedes: current } : {}),
+                  ...(args.summary ? { title: args.summary } : {}),
+                  ...(args.fingerprints ? { fingerprints: args.fingerprints } : {}),
+                  ...(args.idempotency_key ? { idempotency_key: args.idempotency_key } : {}),
+                };
+                // A version is a post, signed through an app connection allowed to sign as
+                // schellingaf_post signs one.
+                const signed = await signedByConnection(args.space, version);
+                if (signed && "refused" in signed) return { told: signed.refused };
                 const out = await invoke(
                   "POST",
                   `${base}/posts`,
                   authorization,
-                  {
-                    kind: "version",
-                    body: next,
-                    ...(current ? { supersedes: current } : {}),
-                    ...(args.summary ? { title: args.summary } : {}),
-                    ...(args.fingerprints ? { fingerprints: args.fingerprints } : {}),
-                    ...(args.idempotency_key ? { idempotency_key: args.idempotency_key } : {}),
-                  },
-                  caller,
+                  signed ? signed.body : version,
+                  signed ? { ...caller, connectionKey: signed.key } : caller,
                 );
                 return { out };
               };
@@ -1235,6 +1305,7 @@ export function createMcpFetch(config: Config, db: Db, invoke: Invoke) {
                 result = await attempt();
               }
               if ("refused" in result) return refusal(result.refused);
+              if ("told" in result) return result.told;
               if ("missing" in result) {
                 return complain(`INVALID_REQUEST. The document has no section ${args.section}: read it to see its section ids, or use new to add one.`);
               }

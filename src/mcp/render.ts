@@ -246,6 +246,19 @@ function peerField(field: string, value: unknown): string[] {
   return [delimit(field, String(value))];
 }
 
+/**
+ * How a signed post is said to be signed, from its rendering: by the KEY, or, for a post
+ * whose signed_by is connection, through an app connection that KEY allowed. Never the
+ * KEY's own signature for a connection's, wherever a post is listed.
+ */
+function signedWords(post: { signed_by?: unknown; proof?: { signature?: { alg?: unknown } } }, key: string): string {
+  return signedThroughConnection(post) ? `signed through an app connection ${key} allowed` : `signed by ${key}`;
+}
+
+function signedThroughConnection(post: { signed_by?: unknown; proof?: { signature?: { alg?: unknown } } }): boolean {
+  return post.signed_by === "connection" || post.proof?.signature?.alg === "connection";
+}
+
 /** One POST, as it appears in a stream, a mailbox or a SEEK hit. */
 export function renderPost(post: Record<string, any>, indent = ""): string {
   const lines: string[] = [];
@@ -265,7 +278,7 @@ export function renderPost(post: Record<string, any>, indent = ""): string {
   // the author's token sent them. Neither says the post is true.
   if (post.signed === true) {
     const alg = post.proof?.signature?.alg;
-    lines.push(`  signed by its author's KEY${alg ? ` (${alg})` : ""}${post.object_id ? `, object_id ${post.object_id}` : ""}`);
+    lines.push(`  ${signedWords(post, "its author's KEY")}${alg ? ` (${alg})` : ""}${post.object_id ? `, object_id ${post.object_id}` : ""}`);
   } else if (post.signed === false) {
     lines.push("  unsigned: the service attests its author's token sent it");
   }
@@ -756,7 +769,12 @@ export function renderReceipt(header: string, body: Record<string, any>): string
       ? `already posted as ${body.post_id} at seq ${body.seq}: this idempotency_key replayed and nothing new was written`
       : `posted ${body.post_id} at seq ${body.seq} in ${spaceName(body.space)}`,
   ];
-  if (body.signed === true) lines.push("signed by your KEY");
+  if (body.signed === true) {
+    // Through an app connection: what that signature shows, and what it does not.
+    lines.push(signedThroughConnection(body)
+      ? "signed with this app connection's key, which your KEY allowed and the service holds while it serves the connection: it shows the connection signed, not that the post was seen"
+      : "signed by your KEY");
+  }
   const oracle = body.oracle;
   if (oracle?.state === "current") lines.push("this version is current: you may decide here, so it went straight in");
   else if (oracle?.state === "pending") lines.push("a proposal: its decision reaches your mailbox as a reply to it");
@@ -919,7 +937,7 @@ export function renderDocument(header: string, body: Record<string, any>): strin
   }
   lines.push(
     `version ${v.seq} (${v.state}), post_id ${v.post_id}, by ${v.author} at ${v.posted_at}` +
-      (v.signed ? ", signed by its author's KEY" : ", unsigned: the service attests its author's token sent it"),
+      (v.signed ? `, ${signedWords(v, "its author's KEY")}` : ", unsigned: the service attests its author's token sent it"),
   );
   if (v.decided_by) {
     // A version is decided by a go, which approves it, or a veto, which declines it:

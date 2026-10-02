@@ -30,7 +30,7 @@ import {
 } from "../domain/validate.ts";
 import { authorClause, authorOf, boundedNumber, cost, cursor, postColumns, publicSeekablePerDay, detailOr, kindClause, kindsOf, readDenied, render, tokenBudget, type Detail, type PostRow, withinBudget } from "./postview.ts";
 import { charge, emptyOf, LIMITS, OPEN_POSTS_PER_SPACE_PER_DAY, openPostsPerDay, OWN, SHARED, spend } from "./ratelimit.ts";
-import { floorPlace, optionalBearer, requireBearer, type Env } from "./app.ts";
+import { connectorSignedWith, floorPlace, optionalBearer, requireBearer, type Env } from "./app.ts";
 import { receipt } from "./spaces.ts";
 import { firstDay } from "./auth.ts";
 import { ORACLE_LIMITS } from "../surface/vocabulary.ts";
@@ -119,7 +119,7 @@ function fieldReader() {
  * its header, which then decides them.
  */
 function readUnsignedPost(input: Record<string, unknown>, author: Buffer, sealed: SealedPost | null): PostInput {
-  for (const key of ["alg", "private", "signature", "credential_id", "client_data_json", "authenticator_data"]) {
+  for (const key of ["alg", "private", "signature", "credential_id", "client_data_json", "authenticator_data", "connection_key"]) {
     if (input[key] !== undefined) {
       throw new ApiError("INVALID_REQUEST", { detail: `${key} belongs to a signed post, which carries canonical` });
     }
@@ -282,9 +282,16 @@ function exportNdjson(
  * and did not move is refused as a copied authenticator — unless the very same
  * assertion already posted this very object, which is a retry of a post that
  * succeeded and gets its original receipt from append_post.
+ *
+ * A post signed with alg connection is taken from one sender alone: the connector,
+ * in its own in-process call, signing with the connection key it opened from the
+ * vault of the token that call carries (`connector`, from the reentry marker no
+ * request can set). The key must be that token's, and its author's; append_post
+ * holds it to its statement's not_after.
  */
 async function readSignedPost(
   db: Db, config: Config, spaceName: string, author: Buffer, signed: SignedPostRequest, sealed: SealedPost | null,
+  connector: { signedWith: Buffer | null; tokenHash: Buffer },
 ) {
   const [space] = await db.read<{ space_id: string }[]>`
     select space_id::text from schellingaf.spaces where name = ${spaceName}`;
@@ -300,6 +307,31 @@ async function readSignedPost(
     }
     if (!ed25519SignedObject(peer.public_key, objectId, signed.signature.value)) {
       throw new ApiError("POST_SIGNATURE_INVALID", { detail: "the ed25519 signature does not verify for the object_id of canonical" });
+    }
+    return fields;
+  }
+
+  if (signed.signature.alg === "connection") {
+    const key = signed.signature.connectionKey;
+    if (connector.signedWith === null || !connector.signedWith.equals(key)) {
+      throw new ApiError("POST_SIGNATURE_INVALID", {
+        detail: "alg connection is signed by the connector alone, for the app connection whose token sends the post",
+      });
+    }
+    if (sealed !== null) {
+      throw new ApiError("POST_SIGNATURE_INVALID", { detail: "a sealed post is signed on the machine that seals it, never by a connection" });
+    }
+    if (!ed25519SignedObject(key, objectId, signed.signature.value)) {
+      throw new ApiError("POST_SIGNATURE_INVALID", { detail: "the connection signature does not verify for the object_id of canonical" });
+    }
+    const [held] = await db.read<{ peer_id: Buffer }[]>`
+      select ck.peer_id from schellingaf.connection_vaults v
+        join schellingaf.connection_keys ck on ck.public_key = v.connection_key
+        join schellingaf.tokens t on t.token_hash = v.token_hash
+       where v.token_hash = ${connector.tokenHash} and v.connection_key = ${key}
+         and t.expires_at > now() and t.revoked_at is null`;
+    if (!held || !held.peer_id.equals(author)) {
+      throw new ApiError("POST_SIGNATURE_INVALID", { detail: "the connection key is not the one the connection of this token holds" });
     }
     return fields;
   }
@@ -363,7 +395,10 @@ export function mountPosts(app: Hono<Env>, config: Config, db: Db, service: Serv
     // checked before anything is spent, as a malformed field is.
     const signed = input.canonical !== undefined ? readSignedPostRequest(input) : null;
     const post: PostInput = signed !== null
-      ? await readSignedPost(db, config, c.req.param("name"), bearer.peerId, signed, sealed)
+      ? await readSignedPost(db, config, c.req.param("name"), bearer.peerId, signed, sealed, {
+          signedWith: connectorSignedWith(c),
+          tokenHash: bearer.hash,
+        })
       : readUnsignedPost(input, bearer.peerId, sealed);
     // A signed finding's fields are in the private part its author signed, read whole by
     // readSignedPost; held to the same rule as an unsigned one's, before anything is spent.
@@ -495,6 +530,8 @@ export function mountPosts(app: Hono<Env>, config: Config, db: Db, service: Serv
             authenticator_data: signed.signature.authenticatorData.toString("base64url"),
           }
         : null;
+    // The connection key a post signed with alg connection names, which its object keeps.
+    const connectionKey = signed?.signature.alg === "connection" ? signed.signature.connectionKey : null;
     const [row] = await db.write<{ receipt: Record<string, unknown> }[]>`
       select schellingaf.append_post(
         ${name}, ${bearer.peerId}, ${post.kind}, ${post.title}, ${post.body},
@@ -508,7 +545,7 @@ export function mountPosts(app: Hono<Env>, config: Config, db: Db, service: Serv
         ${PENDING_PER_KEY}, ${PENDING_PER_SPACE},
         ${db.write.array(quiet.map((hex) => Buffer.from(hex, "hex")))}::bytea[],
         ${sealed?.header ?? null}::bytea, ${sealed?.ciphertext ?? null}::bytea,
-        ${openPostsPerDay(firstDay(bearer))}, ${OPEN_POSTS_PER_SPACE_PER_DAY}) as receipt`;
+        ${openPostsPerDay(firstDay(bearer))}, ${OPEN_POSTS_PER_SPACE_PER_DAY}, ${connectionKey}::bytea) as receipt`;
 
     const receipt = row!.receipt;
     const replayed = receipt.replayed === true;

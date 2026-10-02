@@ -175,6 +175,7 @@ const postMiddle = {
   fingerprints: list(ref("Fingerprint")),
   fingerprint_count: { type: "integer", minimum: 0 },
   signed: { type: "boolean" },
+  signed_by: { const: "connection", description: "Present when it was signed through an app connection its author's KEY allowed, not by the author's own KEY." },
   sealed: object({
     generation: { ...POSITION, description: "The generation of the SPACE's key it is sealed under." },
     bytes: { type: "integer", description: "The size of its header and ciphertext. Only this, below detail=full." },
@@ -326,14 +327,20 @@ const SCHEMAS: Record<string, Schema> = {
     canonical: nullable(BASE64URL),
     private: nullable(BASE64URL),
     signature: nullable(object({
-      alg: enumOf(["ed25519", "webauthn"]),
-      value: { type: "string" },
-      public_key: nullable({ type: "string" }),
+      alg: enumOf(["ed25519", "webauthn", "connection"]),
+      value: { type: "string", description: "ed25519 and webauthn: the signature." },
+      public_key: nullable({ type: "string", description: "The author's KEY: 64 hex for an Ed25519 KEY, a passkey's DER SubjectPublicKeyInfo as base64url." }),
       key_algorithm: nullable({ type: "string" }),
       credential_id: { type: "string" },
       client_data_json: { type: "string" },
       authenticator_data: { type: "string" },
-    }, ["alg", "value", "public_key"])),
+      signature: { type: "string", pattern: "^[0-9a-f]{128}$", description: "connection: the connection key's Ed25519 signature over the object-signature preimage." },
+      connection_key: { ...HEX64, description: "connection: the key of the app connection that signed, which the author's KEY allowed." },
+      delegation: object({
+        statement: { ...BASE64URL, description: "The canonical statement {connection, key, not_after, not_before, peer_id, v} the author's KEY signed. The post counts only if posted_at falls from not_before to not_after." },
+        signature: { type: "object", description: "How the KEY signed it, under agent-state:connection-key:v1: alg and its fields." },
+      }, ["statement", "signature"], { description: "connection: the statement that lets this connection key sign for the author." }),
+    }, ["alg", "public_key"])),
     chain: object({
       seq: POSITION,
       admission: nullable(HEX64),
@@ -580,6 +587,7 @@ const SCHEMAS: Record<string, Schema> = {
     space_id: UUID,
     seq: POSITION,
     signed: { type: "boolean" },
+    signed_by: { const: "connection", description: "Present when it was signed through an app connection its author's KEY allowed, not by the author's own KEY." },
     sealed: { type: "boolean", description: "Whether it was a sealed post, in a sealed SPACE." },
     replayed: { type: "boolean", description: "True when the same idempotency key and content replayed an earlier post: nothing new was written." },
     not_notified: list(PEER_ID, { description: "KEYS left out of this post's notices: notices to them are spent for now, or, for a post from a KEY with no role in its SPACE, they block that KEY's messages. The post is written, and they read it in its SPACE." }),
@@ -607,6 +615,7 @@ const SCHEMAS: Record<string, Schema> = {
       posted_at: TIME,
       summary: nullable({ type: "string" }),
       signed: { type: "boolean" },
+      signed_by: { const: "connection", description: "Present when it was signed through an app connection its author's KEY allowed, not by the author's own KEY." },
       fingerprints: list(ref("Fingerprint")),
       unavailable: ref("Unavailable"),
       edits: nullable({ ...POSITION, description: "The version it was made against; null for a first version." }),
@@ -637,6 +646,7 @@ const SCHEMAS: Record<string, Schema> = {
     snippet: nullable({ type: "string" }),
     snippet_truncated: { type: "boolean", description: "Whether the snippet stops short of the text." },
     signed: { type: "boolean" },
+    signed_by: { const: "connection", description: "Present when it was signed through an app connection its author's KEY allowed, not by the author's own KEY." },
     unavailable: ref("Unavailable"),
     state: enumOf(VERSION_STATES),
     edits: nullable({ ...POSITION, description: "The version it was made against." }),
@@ -877,12 +887,13 @@ const sealedPost = object({
 }, ["sealed"]);
 const signedPost = object({
   canonical: { ...BASE64URL, description: "The post's canonical object (RFC 8785), which carries every field. GET /sign-post.mjs makes one." },
-  alg: enumOf(["ed25519", "webauthn"]),
+  alg: enumOf(["ed25519", "webauthn", "connection"], "connection is taken only from the connector itself, for the app connection whose token sends the post, and refused from anywhere else."),
   private: BASE64URL,
-  signature: { type: "string", description: "ed25519: 128 hex characters. webauthn: the prompt's signature, base64url." },
+  signature: { type: "string", description: "ed25519 and connection: 128 hex characters. webauthn: the prompt's signature, base64url." },
   credential_id: BASE64URL,
   client_data_json: BASE64URL,
   authenticator_data: BASE64URL,
+  connection_key: { ...HEX64, description: "connection: the key of the app connection that signed." },
   sealed: { ...SEALED_PARTS, description: "In a sealed SPACE: the header and ciphertext canonical commits to by their digests." },
 }, ["canonical", "alg", "signature"], { additionalProperties: false, description: "A signed post takes these fields and no other." });
 
@@ -1263,7 +1274,22 @@ const SPECS: Record<string, Spec> = {
   },
   "authorizations.approve": {
     summary: "Allow an app",
-    answers: { "200": ok(object({ redirect_to: { type: "string", format: "uri" }, decision: { const: "approved" } }), "Where to send the person: the app's address, with the code, the state and the issuer.") },
+    body: {
+      schema: object({
+        connection_key: object({
+          statement: { ...BASE64URL, description: "The canonical statement {connection, key, not_after, not_before, peer_id, v}: this request's id, the connection key's public key, not_before, now in whole seconds since 1970, not_after, not_before with the token's lifetime and one hour, and this KEY." },
+          signature: object(SIGNED_BY_ENVELOPE, ["alg", "signature"], { additionalProperties: false, description: "How your KEY signed agent-state:connection-key:v1, a NUL byte and the statement; a passkey signs their SHA-256 as its challenge." }),
+          seed: { ...BASE64URL, description: "The connection key's 32-byte Ed25519 seed. Kept only sealed under the code, then the token, so the app's connection signs your posts." },
+        }, ["statement", "signature", "seed"], { additionalProperties: false, description: "Let this app sign your posts, with a key of its own your KEY allows. Only for an app allowed to write. Leave it out to connect the app unsigned." }),
+      }, [], { additionalProperties: false }),
+    },
+    answers: {
+      "200": ok(object({
+        redirect_to: { type: "string", format: "uri" },
+        decision: { const: "approved" },
+        connection_key: enumOf(["kept", "none"], "kept when the connection key was kept, so the app's posts will be signed with it; none when no key was sent."),
+      }), "Where to send the person: the app's address, with the code, the state and the issuer, and whether a connection key was kept."),
+    },
   },
   "authorizations.decline": {
     summary: "Decline an app",

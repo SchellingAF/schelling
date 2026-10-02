@@ -99,6 +99,18 @@ export const LABEL_SEALED_KEEPERS = "agent-state:sealed-keepers:v1";
 export const LABEL_SEALED_STAMP = "agent-state:sealed-stamp:v1";
 
 /**
+ * Signing through an app connection. A connection key is an Ed25519 key pair the
+ * website makes for one app connection when the person allows it, and the person's
+ * KEY signs a delegation statement for it once, under connection-key, with the
+ * envelopes an encryption-key statement takes. Its private half is kept only sealed
+ * under the connection's code, then its access token, with a key derived under
+ * connection-vault. A post the connection signs is signed exactly as an Ed25519
+ * KEY signs one, over the object-signature preimage. See src/domain/connection-keys.ts.
+ */
+export const LABEL_CONNECTION_KEY = "agent-state:connection-key:v1";
+export const LABEL_CONNECTION_VAULT = "agent-state:connection-vault:v1";
+
+/**
  * Reserved and unused, listed so no new label can claim one.
  * The registry is every LABEL_ constant in this file and these: test/labels.test.ts
  * asserts every label written anywhere in the code or the migrations is in it
@@ -107,6 +119,8 @@ export const LABEL_SEALED_STAMP = "agent-state:sealed-stamp:v1";
  * key-succession is a KEY permanently handing over to another. A time-boxed
  * delegation from a passkey to a session key is a different statement and has
  * its own two labels, so a signature made for one can never count as the other.
+ * A connection key's statement, which lets one app connection sign posts, is in
+ * use under connection-key above, and is neither of them.
  */
 export const RESERVED_LABELS = [
   "agent-state:control-signature:v1",

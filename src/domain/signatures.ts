@@ -10,6 +10,16 @@
 // What a signature proves, and the reference says it in these words: the holder
 // of this KEY signed these bytes. Not who the holder is, not that the content is
 // true, and not that the SPACE admitted it for any reason but its policy.
+//
+// A third envelope, connection, is an app connection's: its connection key signs
+// exactly what an Ed25519 KEY signs, and the request names the key. Only the
+// connector sends one, for the connection whose token sent the post; the route
+// refuses it from anywhere else. What it proves: the author's KEY allowed this
+// connection key for this request from not_before until not_after, and the
+// connection, or the service, which held the key, signed these bytes; not that the
+// person saw the post. posted_at, which the two are compared with, is the service's
+// own time. See
+// src/domain/connection-keys.ts.
 
 import { ApiError } from "../db/errors.ts";
 import { fromHex, verifySignature } from "./keys.ts";
@@ -21,6 +31,7 @@ import { PRIVATE_MAX_BYTES, SIGNED_OBJECT_MAX_BYTES, signaturePreimageOf } from 
  * and a sealed post's in the sealed parts `canonical` commits to. */
 export const SIGNED_POST_FIELDS = [
   "alg", "canonical", "private", "signature", "credential_id", "client_data_json", "authenticator_data", "sealed",
+  "connection_key",
 ] as const;
 
 export type SignedPostRequest = {
@@ -28,7 +39,8 @@ export type SignedPostRequest = {
   private: Buffer | null;
   signature:
     | { alg: "ed25519"; value: Buffer }
-    | { alg: "webauthn"; value: Buffer; credentialId: Buffer; clientDataJSON: Buffer; authenticatorData: Buffer };
+    | { alg: "webauthn"; value: Buffer; credentialId: Buffer; clientDataJSON: Buffer; authenticatorData: Buffer }
+    | { alg: "connection"; value: Buffer; connectionKey: Buffer };
 };
 
 function refuse(detail: string): never {
@@ -59,9 +71,19 @@ export function readSignedPostRequest(input: Record<string, unknown>): SignedPos
     for (const key of ["credential_id", "client_data_json", "authenticator_data"]) {
       if (input[key] !== undefined) refuse(`${key} belongs to a passkey signature, and alg is ed25519`);
     }
+    if (input.connection_key !== undefined) refuse("connection_key belongs to a connection signature, and alg is ed25519");
     const value = fromHex(input.signature, 64) ?? refuse("signature is 128 lowercase hex characters for ed25519");
     return { canonical, private: privatePart, signature: { alg: "ed25519", value } };
   }
+  if (input.alg === "connection") {
+    for (const key of ["credential_id", "client_data_json", "authenticator_data"]) {
+      if (input[key] !== undefined) refuse(`${key} belongs to a passkey signature, and alg is connection`);
+    }
+    const value = fromHex(input.signature, 64) ?? refuse("signature is 128 lowercase hex characters for connection");
+    const connectionKey = fromHex(input.connection_key, 32) ?? refuse("connection_key is 64 lowercase hex characters");
+    return { canonical, private: privatePart, signature: { alg: "connection", value, connectionKey } };
+  }
+  if (input.connection_key !== undefined) refuse("connection_key belongs to a connection signature, and alg is not connection");
   if (input.alg === "webauthn") {
     const value = fromBase64url(input.signature, 8, 1024) ?? refuse("signature is unpadded base64url for webauthn");
     const credentialId =

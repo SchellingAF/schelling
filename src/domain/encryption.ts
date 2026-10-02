@@ -87,26 +87,32 @@ export type Signer =
  * Whether `signer` signed `preimage` with this envelope: Ed25519 over the preimage
  * itself, or a passkey whose prompt carried the preimage's SHA-256 as its
  * challenge. Refused as `refusal`, ENCRYPTION_KEY_INVALID unless given, the detail
- * naming the check.
+ * naming the check, after `field` when one is given. A passkey's answer is its
+ * signature counter, which a caller that keeps the counter moves on; an Ed25519
+ * KEY's is null.
  */
 export function checkSigned(args: {
   preimage: Buffer;
   envelope: SignatureEnvelope;
   signer: Signer;
   passkeys: { rpId: string; origins: readonly string[] } | null;
-  /** The refusal, by what was signed: an encryption key's statement, or a keeper list or stamp. */
-  refusal?: "ENCRYPTION_KEY_INVALID" | "SEALED_SIGNATURE_INVALID";
-}): void {
+  /** The refusal, by what was signed: an encryption key's statement, a keeper list or
+   *  stamp, or a connection key's statement, which a malformed approval is refused as. */
+  refusal?: "ENCRYPTION_KEY_INVALID" | "SEALED_SIGNATURE_INVALID" | "INVALID_REQUEST";
+  /** Named before each detail, where the refusal's code does not say what was signed. */
+  field?: string;
+}): { signCount: number } | null {
   const { envelope, signer } = args;
   const refusal = args.refusal ?? "ENCRYPTION_KEY_INVALID";
+  const said = (detail: string) => (args.field === undefined ? detail : `${args.field}: ${detail}`);
   if (envelope.alg === "ed25519") {
-    if (signer.keyType !== "ed25519") throw new ApiError(refusal, { detail: "this KEY is a passkey, so alg is webauthn" });
+    if (signer.keyType !== "ed25519") throw new ApiError(refusal, { detail: said("this KEY is a passkey, so alg is webauthn") });
     if (!verifySignature(signer.publicKey, args.preimage, Buffer.from(envelope.signature, "hex"))) {
-      throw new ApiError(refusal, { detail: "the signature does not verify against this KEY" });
+      throw new ApiError(refusal, { detail: said("the signature does not verify against this KEY") });
     }
-    return;
+    return null;
   }
-  if (signer.keyType !== "passkey") throw new ApiError(refusal, { detail: "this KEY is an Ed25519 KEY, so alg is ed25519" });
+  if (signer.keyType !== "passkey") throw new ApiError(refusal, { detail: said("this KEY is an Ed25519 KEY, so alg is ed25519") });
   if (!args.passkeys) throw new ApiError("PASSKEYS_UNAVAILABLE");
   if (!isPasskeyAlgorithm(signer.algorithm)) throw new ApiError("INTERNAL");
   const key = importPasskeyKey(signer.spki, signer.algorithm);
@@ -121,7 +127,8 @@ export function checkSigned(args: {
     origins: args.passkeys.origins,
     challenge: createHash("sha256").update(args.preimage).digest(),
   });
-  if ("code" in checked) throw new ApiError(refusal, { detail: checked.detail });
+  if ("code" in checked) throw new ApiError(refusal, { detail: said(checked.detail) });
+  return { signCount: checked.signCount };
 }
 
 /** A KEY's signing key from its peers row and passkey, as checkSigned takes it. */
