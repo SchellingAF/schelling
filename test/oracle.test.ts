@@ -325,6 +325,8 @@ describe("finding a document", () => {
     assert.notEqual((await call("GET", `/v1/spaces/${name}`)).body.updated_at, before);
     const newest = await call("GET", "/v1/spaces?order=recent&oracle=true&limit=2");
     assert.deepEqual(newest.body.items.map((i: { name: string }) => i.name), [name, other]);
+    // Each says when, the same time its profile gives.
+    assert.equal(newest.body.items[0].last_written_at, (await call("GET", `/v1/spaces/${name}`)).body.updated_at);
 
     const listed = await call("GET", "/v1/spaces?order=recent&oracle=true&limit=200");
     assert.equal(listed.status, 200, JSON.stringify(listed.body));

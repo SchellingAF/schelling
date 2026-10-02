@@ -250,6 +250,7 @@ describe("counters and activity", () => {
       const out = await call("GET", "/v1/spaces?order=recent&q=aarch64&limit=1", CAST[who]);
       assert.equal(out.status, 200, JSON.stringify(out.body));
       assert.equal(out.body.next_before, `${row!.made}~private-space`, `${who} was told when it was last written`);
+      assert.equal(out.body.items[0].last_written_at, null, `${who} was told when it was last written`);
     }
   });
 });

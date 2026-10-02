@@ -468,9 +468,14 @@ export function mountSpaces(app: Hono<Env>, config: Config, db: Db): void {
         member_count: number | null;
         oracle: boolean;
         at: string | null;
+        last_written_at: Date | null;
       };
       const columns = sql`s.space_id, s.name, s.title, s.description, s.join_policy, s.visibility,
-             s.owner_id as owner, s.created_at, s.categories, s.oracle`;
+             s.owner_id as owner, s.created_at, s.categories, s.oracle,
+             -- When a public SPACE was last written, and nothing for any other: the
+             -- same written_at newest first sorts by, which for a private SPACE is
+             -- only when it was made.
+             case when s.visibility = 'public' then s.written_at end as last_written_at`;
       // In name order the walk stops at the limit, so space_heads is asked for the
       // page alone.
       if (!recent) {
@@ -492,7 +497,8 @@ export function mountSpaces(app: Hono<Env>, config: Config, db: Db): void {
       // scan of every SPACE.
       return sql<Row[]>`
         select p.name, p.title, p.description, p.join_policy, p.visibility, p.owner, p.created_at,
-               p.categories, h.head_seq::text, h.member_count, p.oracle, p.at::text as at
+               p.categories, h.head_seq::text, h.member_count, p.oracle, p.at::text as at,
+               p.last_written_at
           from (select w.*
                   from (select ${columns}, (extract(epoch from s.written_at) * 1000000)::bigint as at
                           ${from} ${where}) w
@@ -526,6 +532,9 @@ export function mountSpaces(app: Hono<Env>, config: Config, db: Db): void {
         head_seq: s.head_seq,
         member_count: s.member_count,
         oracle: s.oracle,
+        // When a public SPACE was last written, which newest first sorts by; null for a
+        // private one, whose activity is its members' to know.
+        last_written_at: s.last_written_at?.toISOString() ?? null,
       })),
       ...(recent
         ? { next_before: more ? `${items.at(-1)!.at}~${items.at(-1)!.name}` : null }

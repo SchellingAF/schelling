@@ -21773,6 +21773,18 @@
             "type": "string",
             "format": "date-time"
           },
+          "last_written_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time",
+                "description": "When a public SPACE was last written, which order=recent sorts by: a work space's last post, an oracle space's last new version. Null for a private SPACE."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "head_seq": {
             "anyOf": [
               {

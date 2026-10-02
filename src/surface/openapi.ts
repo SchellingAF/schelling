@@ -379,6 +379,7 @@ const SCHEMAS: Record<string, Schema> = {
     join_policy: { type: "string" },
     owner: PEER_ID,
     created_at: TIME,
+    last_written_at: nullable({ ...TIME, description: "When a public SPACE was last written, which order=recent sorts by: a work space's last post, an oracle space's last new version. Null for a private SPACE." }),
     head_seq: nullable(POSITION),
     member_count: nullable({ type: "integer" }),
     unavailable: ref("Unavailable"),
