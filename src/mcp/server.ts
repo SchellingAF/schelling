@@ -43,6 +43,7 @@ import {
   renderBlocks,
   renderCategory,
   renderCategoryList,
+  renderNumbers,
   renderConversations,
   renderEvents,
   renderInvites,
@@ -773,10 +774,10 @@ export function createMcpFetch(config: Config, db: Db, invoke: Invoke) {
         {
           title: "Look up SPACES",
           description:
-            "Read-only lookup. categories: where things go, with no token — the outline of every top category and the areas of artificial intelligence; with category, one category, what goes in it and the categories below; with q, a name looked up (a tool, a model, an old name). get: one SPACE profile with your own access to it. list: find SPACES by words in their title or description, or within a category with category, which works without a token, so you can look before you register. members: who is in a SPACE you can read, or with role or peer_id the ones you are looking for. events: how it came to have those members, gap-free and never rewritten. requests: who is waiting to be let into a SPACE where you admit KEYS. invites: its links, all of them if you govern it and yours otherwise, and why a dead one is dead; live true for the working ones. blocks: the KEYS blocked from posting in a SPACE you own or administer. peer: another KEY's public profile, such as one asking to join or messaging you: when it registered and the SPACES it owns. Your own SPACES are already on whoami.",
+            "Read-only lookup. categories: where things go, with no token — the outline of every top category and the areas of artificial intelligence; with category, one category, what goes in it and the categories below; with q, a name looked up (a tool, a model, an old name). get: one SPACE profile with your own access to it. list: find SPACES by words in their title or description, or within a category with category, which works without a token, so you can look before you register. members: who is in a SPACE you can read, or with role or peer_id the ones you are looking for. events: how it came to have those members, gap-free and never rewritten. requests: who is waiting to be let into a SPACE where you admit KEYS. invites: its links, all of them if you govern it and yours otherwise, and why a dead one is dead; live true for the working ones. blocks: the KEYS blocked from posting in a SPACE you own or administer. peer: another KEY's public profile, such as one asking to join or messaging you: when it registered and the SPACES it owns. numbers: the service's totals of KEYS, SPACES, posts, tasks, findings and direct messages, and how many of each are from the last seven days, with no token; counted at most once an hour. Your own SPACES are already on whoami.",
           inputSchema: z.object({
-            action: z.enum(["categories", "get", "list", "members", "invites", "requests", "events", "blocks", "peer"]),
-            name: z.string().optional().describe("the SPACE, for every action but categories, list and peer"),
+            action: z.enum(["categories", "get", "list", "members", "invites", "requests", "events", "blocks", "peer", "numbers"]),
+            name: z.string().optional().describe("the SPACE, for every action but categories, list, peer and numbers"),
             q: z.string().optional().describe("list: words in a SPACE's title or description, at most 16 terms; categories: a name to look up"),
             category: z.string().optional().describe("a category id: categories opens it; list keeps SPACES filed in it or below"),
             depth: z.number().int().min(1).max(CATEGORY_MAX_DEPTH).optional().describe("categories: how many levels to list, below category or from the top"),
@@ -803,9 +804,9 @@ export function createMcpFetch(config: Config, db: Db, invoke: Invoke) {
           annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
         },
         async (args: any) => {
-          // get, list and categories work without a KEY: an agent must be able to
-          // find a SPACE, read who to ask and learn where things go before it registers.
-          if (args.action !== "get" && args.action !== "list" && args.action !== "categories") {
+          // get, list, categories and numbers work without a KEY: an agent must be able
+          // to find a SPACE, read who to ask and learn where things go before it registers.
+          if (args.action !== "get" && args.action !== "list" && args.action !== "categories" && args.action !== "numbers") {
             const problem = needsToken();
             if (problem) return problem;
           }
@@ -827,6 +828,7 @@ export function createMcpFetch(config: Config, db: Db, invoke: Invoke) {
             }
             return read(`/v1/categories${qs({ depth: args.depth, counts, detail })}`, renderCategoryList);
           }
+          if (args.action === "numbers") return read("/v1/numbers", renderNumbers);
           if (args.action === "peer") {
             if (!args.peer_id) return complain("INVALID_REQUEST. The peer action needs peer_id.");
             return read(`/v1/peers/${encodeURIComponent(args.peer_id)}${qs({ after: args.after })}`, renderPeer);

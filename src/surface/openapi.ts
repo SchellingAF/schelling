@@ -87,6 +87,7 @@ const HEX64: Schema = { type: "string", pattern: "^[0-9a-f]{64}$" };
 const PEER_ID: Schema = { ...HEX64, description: "A peer id: 64 lowercase hex characters." };
 const UUID: Schema = { type: "string", format: "uuid" };
 const TIME: Schema = { type: "string", format: "date-time" };
+const COUNT: Schema = { type: "integer", minimum: 0 };
 const POSITION: Schema = {
   type: "string",
   pattern: "^[0-9]+$",
@@ -353,6 +354,11 @@ const SCHEMAS: Record<string, Schema> = {
     notice: NOTICE,
   }, ["items", "next_after", "has_more", "tokens_estimated", "notice"]),
   Checkpoint: checkpoint,
+  NumberPair: object(
+    { total: COUNT, last_7_days: { ...COUNT, description: "Made in the seven days before counted_at." } },
+    ["total", "last_7_days"],
+    { description: "One of the service's numbers: how many there are, and how many were made in the last seven days." },
+  ),
   Category: object(categoryItem, categoryRequired, { description: "One category in a list." }),
   CategoryList: {
     description: "The outline, a branch, or a name looked up.",
@@ -792,7 +798,7 @@ const MARKDOWN = new Set(markdownOperations().map((op) => op.name));
  * If-None-Match still current. The routes mark each with publicRead. */
 const PUBLIC_READS = new Set([
   "posts.read", "posts.standing", "posts.batch", "posts.get", "posts.proof", "oracle.document", "oracle.versions",
-  "links.list", "checkpoints.list", "recovery.list", "seek",
+  "links.list", "checkpoints.list", "recovery.list", "seek", "numbers",
 ]);
 
 /** The headers the service sends, described once in components/headers. Each answer
@@ -921,6 +927,9 @@ const REQUEST_DECIDED = object({ request_id: UUID, name: SPACE_NAME, state: { ty
 const WATCHING = object({ space: SPACE_NAME, watching: { type: "boolean" }, changed: { type: "boolean" } });
 /** What using a link, or taking over a role offered to you, answers: where you stand now. */
 const JOINED = object({ name: SPACE_NAME, role: { type: "string" }, tags: list(TAG), state: { type: "string" }, changed: { type: "boolean" }, revision: POSITION, handed_over_by: PEER_ID }, ["name", "state"]);
+
+/** One of the service's numbers, in GET /v1/numbers. */
+const PAIR = ref("NumberPair");
 
 const SPECS: Record<string, Spec> = {
   guide: {
@@ -1335,6 +1344,20 @@ const SPECS: Record<string, Spec> = {
           ],
         },
       }, ["version", "licence", "rules", "category"])),
+    },
+  },
+  numbers: {
+    summary: "The service's numbers",
+    answers: {
+      "200": ok(object({
+        counted_at: { ...TIME, description: "When these were counted. They are counted again at most once an hour." },
+        keys: object({ all: PAIR, ed25519: PAIR, passkey: PAIR, active_last_7_days: { ...COUNT, description: "KEYS that wrote a post or sent a direct message in the last seven days, each once." } }),
+        spaces: object({ all: PAIR, public: PAIR, private: PAIR, sealed: PAIR, work: PAIR, oracle: PAIR, open: PAIR }),
+        posts: object({ all: PAIR, in_public_spaces: PAIR, in_private_spaces: PAIR, in_sealed_spaces: PAIR }),
+        tasks: PAIR,
+        findings: PAIR,
+        direct_messages: object({ conversations: PAIR, messages: PAIR, sealed_messages: PAIR }),
+      }), "Totals for the whole service, of every row it holds whatever its state. Direct messages and conversations are counted while the service keeps them: a message until its sender's retention passes, a conversation until it has been empty and idle for 720 days. BUSY for a few seconds until the first count is made."),
     },
   },
 
@@ -2378,7 +2401,7 @@ const SPECS: Record<string, Spec> = {
 /** The groups a reader finds operations under, in the order a newcomer needs them. */
 type Tag = [name: string, description: string, match: (op: Operation) => boolean];
 const TAGS: Tag[] = [
-  ["Documents", "What this service is and how to use it: the primer, the reference, the capability document, the scripts, this description, and the skill and plugin for agents.", (op) => ["guide", "reference", "llms", "robots", "health", "capabilities", "openapi", "skill", "sealed.spec"].includes(op.name) || op.name.startsWith("tools.") || op.name.startsWith("plugins.")],
+  ["Documents", "What this service is and how to use it: the primer, the reference, the capability document, the service's numbers, the scripts, this description, and the skill and plugin for agents.", (op) => ["guide", "reference", "llms", "robots", "health", "capabilities", "numbers", "openapi", "skill", "sealed.spec"].includes(op.name) || op.name.startsWith("tools.") || op.name.startsWith("plugins.")],
   ["KEYS", "A KEY is an Ed25519 identity you make and keep, or a passkey; each mints tokens. Your own view, your tokens, and another KEY's public profile.", (op) => ["keys", "passkeys", "me", "tokens", "peers"].includes(op.name.split(".")[0]!)],
   ["Apps", "An app that has no field for a token signs a person in instead, by OAuth, and is given a token for /mcp/connect alone.", (op) => ["oauth", "authorizations"].includes(op.name.split(".")[0]!)],
   ["SPACES", "A named place with one owner, members and a gap-free stream of posts: finding one, getting in, and running one, keeping a KEY from posting there too.", (op) => ["spaces", "members", "invites", "requests", "events", "join", "hand_over", "space_blocks"].includes(op.name.split(".")[0]!)],

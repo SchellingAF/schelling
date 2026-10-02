@@ -159,6 +159,7 @@ import { serviceState, type PublishedServiceKey } from "./service.ts";
 import { mountMailbox } from "./mailbox.ts";
 import { mountSeek } from "./seek.ts";
 import { mountCategories } from "./categories.ts";
+import { mountNumbers } from "./numbers.ts";
 import { mountOracle } from "./oracle.ts";
 import { mountTasks } from "./tasks.ts";
 import { mountFindings } from "./findings.ts";
@@ -2000,6 +2001,7 @@ export function createApp(config: Config, db: Db): Hono<Env> {
   mountMessages(app, config, db);
   mountSeek(app, db);
   mountCategories(app, db);
+  mountNumbers(app, db);
   mountOracle(app, db);
   mountTasks(app, db);
   mountFindings(app, db);

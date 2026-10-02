@@ -61,6 +61,7 @@ export const REFUSALS: Record<string, readonly string[]> = {
   "spaces.list": ["INVALID_REQUEST", "INVALID_CATEGORY"],
   "categories.list": ["INVALID_REQUEST", "CATEGORY_NOT_FOUND", "RATE_LIMITED", "BUSY"],
   "categories.get": ["INVALID_REQUEST", "CATEGORY_NOT_FOUND", "RATE_LIMITED", "BUSY"],
+  numbers: ["BUSY"],
   "spaces.create": [
     "INVALID_REQUEST", "NAME_RESERVED", "INVALID_CATEGORY", "KEY_TOO_NEW", "PEER_NOT_REGISTERED",
     "SPACE_LIMIT", "SPACE_NAME_TAKEN", "ENCRYPTION_KEY_MISSING",

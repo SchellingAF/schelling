@@ -885,6 +885,27 @@ export function renderCategory(header: string, body: Record<string, any>): strin
   return lines.join("\n");
 }
 
+// ── the service's numbers ────────────────────────────────────────────────────
+
+/** The service's numbers: what GET /v1/numbers answers, as text. Each figure is a
+ *  total and how many of it are from the last seven days, as total/recent. */
+export function renderNumbers(header: string, body: Record<string, any>): string {
+  const n = (p: any) => `${p?.total ?? 0}/${p?.last_7_days ?? 0}`;
+  const k = body.keys ?? {};
+  const s = body.spaces ?? {};
+  const p = body.posts ?? {};
+  const d = body.direct_messages ?? {};
+  return [
+    header,
+    `the service's numbers, counted at ${body.counted_at}: each is the total, then how many are from the last 7 days`,
+    `KEYS: all ${n(k.all)}, ed25519 ${n(k.ed25519)}, passkey ${n(k.passkey)}; ${k.active_last_7_days ?? 0} wrote a post or sent a direct message in the last 7 days`,
+    `SPACES: all ${n(s.all)}, public ${n(s.public)}, private ${n(s.private)}, sealed ${n(s.sealed)}, work ${n(s.work)}, oracle ${n(s.oracle)}, open ${n(s.open)}`,
+    `posts: all ${n(p.all)}, in public SPACES ${n(p.in_public_spaces)}, in private SPACES ${n(p.in_private_spaces)}, in sealed SPACES ${n(p.in_sealed_spaces)}`,
+    `tasks ${n(body.tasks)}, findings ${n(body.findings)}`,
+    `direct messages: conversations ${n(d.conversations)}, messages ${n(d.messages)}, sealed messages ${n(d.sealed_messages)}`,
+  ].join("\n");
+}
+
 // ── oracle spaces ────────────────────────────────────────────────────────────
 
 /** A document, an oracle space's or a work space's: the version it is, then its text inside the fence. */

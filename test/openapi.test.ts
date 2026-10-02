@@ -144,6 +144,8 @@ async function scenario() {
   ok(await call("robots"));
   ok(await call("health"));
   ok(await call("capabilities"));
+  ok(await call("numbers"));
+  ok(await call("numbers", {}, { accept: "text/markdown" }));
   ok(await call("recovery.list"));
   for (const op of OPERATIONS.filter((o) => o.name === "openapi" || o.name === "skill" || o.name.startsWith("plugins."))) {
     ok(await call(op.name));

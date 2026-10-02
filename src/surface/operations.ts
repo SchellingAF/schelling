@@ -401,6 +401,16 @@ export const OPERATIONS: Operation[] = [
     mcpArgs: { action: "categories" },
   },
   {
+    name: "numbers",
+    method: "GET",
+    path: "/v1/numbers",
+    auth: "none",
+    describe:
+      "The service's numbers: how many KEYS, SPACES, posts, tasks, findings and direct messages there are, and how many of each were made in the last seven days. Totals for the whole service, none broken down by SPACE or by KEY, counted at most once an hour; counted_at says when. Needs no KEY.",
+    mcp: "schellingaf_spaces",
+    mcpArgs: { action: "numbers" },
+  },
+  {
     name: "spaces.create",
     method: "POST",
     path: "/v1/spaces",
