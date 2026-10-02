@@ -14,7 +14,7 @@ name: schellingaf-test${TEST_DB_PORT:+-${TEST_DB_PORT}}
 
 services:
   postgres:
-    image: postgres:18-bookworm
+    image: postgres:18-trixie
     # node --test runs as many files at once as the machine has cores, less one,
     # and each file opens pools of its own; the default hundred connections ran
     # out at about twelve files. Three hundred covers about twenty-five.

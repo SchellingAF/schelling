@@ -28,7 +28,7 @@ set -eu
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 
 # The uids inside the images: postgres is 999 in the official image, node is
-# 1000 in node:26-bookworm-slim. A bind mount carries host ownership into the
+# 1000 in node:26-trixie-slim. A bind mount carries host ownership into the
 # container, so these have to match or nothing can write.
 PG_UID=999
 NODE_UID=1000

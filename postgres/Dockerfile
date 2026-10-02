@@ -3,7 +3,7 @@
 # the running cluster over its socket and read its data directory, and the backup
 # container runs this same image as the postgres user.
 
-FROM postgres:18-bookworm
+FROM postgres:18-trixie
 
 # The base image already carries the PGDG apt source and its key, so this pulls a
 # packaged, signed build rather than something fetched from the internet at run

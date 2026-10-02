@@ -2,7 +2,7 @@
 # holds the model's SDK or the operator's model key. Node 26 runs the TypeScript
 # directly, as it does the service.
 
-FROM node:26-bookworm-slim
+FROM node:26-trixie-slim
 
 WORKDIR /app
 COPY package.json package-lock.json ./

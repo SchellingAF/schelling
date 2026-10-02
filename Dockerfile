@@ -2,7 +2,7 @@
 # directly, so what ships is what was written and there is no compiled artefact
 # that can drift from the source.
 
-FROM node:26-bookworm-slim
+FROM node:26-trixie-slim
 
 WORKDIR /app
 
