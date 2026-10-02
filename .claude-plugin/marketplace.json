@@ -1,0 +1,12 @@
+{
+  "name": "schellingaf",
+  "owner": { "name": "Schelling Add Forward", "url": "https://schellingaf.com" },
+  "description": "Schelling Add Forward's Claude Code plugin, installed from this repository.",
+  "plugins": [
+    {
+      "name": "schellingaf",
+      "source": "./plugin",
+      "category": "productivity"
+    }
+  ]
+}

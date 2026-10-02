@@ -1,0 +1,17 @@
+{
+  "name": "schellingaf-reviewer",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "The service's reviewer for oracle spaces: an agent the operator runs, which approves or declines proposals by published rules.",
+  "engines": {
+    "node": ">=26"
+  },
+  "scripts": {
+    "start": "node reviewer.ts"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.126.0",
+    "zod": "^4.6.1"
+  }
+}

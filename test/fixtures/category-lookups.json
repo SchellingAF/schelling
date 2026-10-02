@@ -1,0 +1,1749 @@
+[
+ {
+  "name": "Claude Code",
+  "kind": "named",
+  "expected": [
+   "claude-code"
+  ],
+  "answer": [
+   {
+    "id": "claude-code",
+    "score": 100
+   },
+   {
+    "id": "coding-agents",
+    "score": 70
+   },
+   {
+    "id": "anthropic",
+    "score": 70
+   },
+   {
+    "id": "claude-agent-sdk",
+    "score": 50
+   },
+   {
+    "id": "claude-code-plugins",
+    "score": 50
+   },
+   {
+    "id": "skills-and-plugins",
+    "score": 45
+   }
+  ]
+ },
+ {
+  "name": "codex cli",
+  "kind": "named",
+  "expected": [
+   "openai-codex"
+  ],
+  "answer": [
+   {
+    "id": "openai-codex",
+    "score": 90
+   }
+  ]
+ },
+ {
+  "name": "Cursor",
+  "kind": "named",
+  "expected": [
+   "cursor"
+  ],
+  "answer": [
+   {
+    "id": "cursor",
+    "score": 100
+   },
+   {
+    "id": "coding-agents",
+    "score": 70
+   }
+  ]
+ },
+ {
+  "name": "aider",
+  "kind": "named",
+  "expected": [
+   "aider"
+  ],
+  "answer": [
+   {
+    "id": "aider",
+    "score": 100
+   },
+   {
+    "id": "coding-agents",
+    "score": 70
+   }
+  ]
+ },
+ {
+  "name": "Gemini CLI",
+  "kind": "named",
+  "expected": [
+   "gemini-cli"
+  ],
+  "answer": [
+   {
+    "id": "gemini-cli",
+    "score": 100
+   }
+  ]
+ },
+ {
+  "name": "vllm",
+  "kind": "named",
+  "expected": [
+   "vllm"
+  ],
+  "answer": [
+   {
+    "id": "vllm",
+    "score": 100
+   },
+   {
+    "id": "openrlhf",
+    "score": 70
+   },
+   {
+    "id": "serving-engines",
+    "score": 70
+   },
+   {
+    "id": "lm-evaluation-harness",
+    "score": 45
+   },
+   {
+    "id": "nvidia-dynamo",
+    "score": 30
+   }
+  ]
+ },
+ {
+  "name": "llama.cpp",
+  "kind": "named",
+  "expected": [
+   "llama-cpp"
+  ],
+  "answer": [
+   {
+    "id": "llama-cpp",
+    "score": 95
+   },
+   {
+    "id": "local-runtimes",
+    "score": 70
+   },
+   {
+    "id": "lm-studio",
+    "score": 45
+   },
+   {
+    "id": "gguf",
+    "score": 30
+   }
+  ]
+ },
+ {
+  "name": "ollama",
+  "kind": "named",
+  "expected": [
+   "ollama"
+  ],
+  "answer": [
+   {
+    "id": "ollama",
+    "score": 100
+   },
+   {
+    "id": "local-runtimes",
+    "score": 70
+   }
+  ]
+ },
+ {
+  "name": "SGLang",
+  "kind": "named",
+  "expected": [
+   "sglang"
+  ],
+  "answer": [
+   {
+    "id": "sglang",
+    "score": 100
+   },
+   {
+    "id": "serving-engines",
+    "score": 70
+   },
+   {
+    "id": "nvidia-dynamo",
+    "score": 30
+   }
+  ]
+ },
+ {
+  "name": "TensorRT-LLM",
+  "kind": "named",
+  "expected": [
+   "tensorrt-llm"
+  ],
+  "answer": [
+   {
+    "id": "tensorrt-llm",
+    "score": 100
+   },
+   {
+    "id": "serving-engines",
+    "score": 70
+   },
+   {
+    "id": "nvidia-dynamo",
+    "score": 30
+   }
+  ]
+ },
+ {
+  "name": "pytorch",
+  "kind": "named",
+  "expected": [
+   "pytorch"
+  ],
+  "answer": [
+   {
+    "id": "pytorch",
+    "score": 100
+   },
+   {
+    "id": "training-frameworks",
+    "score": 70
+   },
+   {
+    "id": "xla",
+    "score": 45
+   },
+   {
+    "id": "lmdeploy",
+    "score": 45
+   },
+   {
+    "id": "fsdp",
+    "score": 30
+   },
+   {
+    "id": "keras",
+    "score": 30
+   },
+   {
+    "id": "nnsight",
+    "score": 30
+   },
+   {
+    "id": "torchtitan",
+    "score": 30
+   },
+   {
+    "id": "bitsandbytes",
+    "score": 30
+   },
+   {
+    "id": "torchtune",
+    "score": 30
+   }
+  ]
+ },
+ {
+  "name": "JAX",
+  "kind": "named",
+  "expected": [
+   "jax"
+  ],
+  "answer": [
+   {
+    "id": "jax",
+    "score": 100
+   },
+   {
+    "id": "training-frameworks",
+    "score": 70
+   },
+   {
+    "id": "xla",
+    "score": 30
+   },
+   {
+    "id": "keras",
+    "score": 30
+   },
+   {
+    "id": "maxtext",
+    "score": 30
+   }
+  ]
+ },
+ {
+  "name": "DeepSpeed",
+  "kind": "named",
+  "expected": [
+   "deepspeed"
+  ],
+  "answer": [
+   {
+    "id": "deepspeed",
+    "score": 100
+   },
+   {
+    "id": "training-frameworks",
+    "score": 70
+   }
+  ]
+ },
+ {
+  "name": "FSDP",
+  "kind": "named",
+  "expected": [
+   "fsdp"
+  ],
+  "answer": [
+   {
+    "id": "fsdp",
+    "score": 100
+   },
+   {
+    "id": "training-frameworks",
+    "score": 70
+   }
+  ]
+ },
+ {
+  "name": "unsloth",
+  "kind": "named",
+  "expected": [
+   "unsloth"
+  ],
+  "answer": [
+   {
+    "id": "unsloth",
+    "score": 100
+   },
+   {
+    "id": "fine-tuning",
+    "score": 70
+   }
+  ]
+ },
+ {
+  "name": "LoRA",
+  "kind": "named",
+  "expected": [
+   "lora"
+  ],
+  "answer": [
+   {
+    "id": "lora",
+    "score": 100
+   },
+   {
+    "id": "fine-tuning",
+    "score": 70
+   },
+   {
+    "id": "axolotl",
+    "score": 70
+   },
+   {
+    "id": "unsloth",
+    "score": 70
+   },
+   {
+    "id": "llama-factory",
+    "score": 70
+   },
+   {
+    "id": "stable-diffusion",
+    "score": 70
+   },
+   {
+    "id": "qlora",
+    "score": 50
+   },
+   {
+    "id": "openpipe-art",
+    "score": 45
+   },
+   {
+    "id": "mlx",
+    "score": 45
+   },
+   {
+    "id": "deepinfra",
+    "score": 45
+   }
+  ]
+ },
+ {
+  "name": "DPO",
+  "kind": "named",
+  "expected": [
+   "dpo"
+  ],
+  "answer": [
+   {
+    "id": "dpo",
+    "score": 100
+   },
+   {
+    "id": "fine-tuning",
+    "score": 70
+   },
+   {
+    "id": "llama-factory",
+    "score": 70
+   },
+   {
+    "id": "nemo-rl",
+    "score": 70
+   }
+  ]
+ },
+ {
+  "name": "GRPO",
+  "kind": "named",
+  "expected": [
+   "grpo"
+  ],
+  "answer": [
+   {
+    "id": "grpo",
+    "score": 100
+   },
+   {
+    "id": "unsloth",
+    "score": 70
+   },
+   {
+    "id": "reinforcement-learning",
+    "score": 70
+   },
+   {
+    "id": "verl",
+    "score": 70
+   },
+   {
+    "id": "openrlhf",
+    "score": 70
+   },
+   {
+    "id": "nemo-rl",
+    "score": 70
+   },
+   {
+    "id": "openpipe-art",
+    "score": 45
+   }
+  ]
+ },
+ {
+  "name": "RLHF",
+  "kind": "named",
+  "expected": [
+   "rlhf"
+  ],
+  "answer": [
+   {
+    "id": "rlhf",
+    "score": 100
+   },
+   {
+    "id": "scale-ai",
+    "score": 45
+   },
+   {
+    "id": "surge-ai",
+    "score": 45
+   },
+   {
+    "id": "ppo",
+    "score": 30
+   },
+   {
+    "id": "reinforcement-learning",
+    "score": 30
+   }
+  ]
+ },
+ {
+  "name": "transformers",
+  "kind": "named",
+  "expected": [
+   "hf-transformers"
+  ],
+  "answer": [
+   {
+    "id": "hf-transformers",
+    "score": 95
+   },
+   {
+    "id": "hugging-face",
+    "score": 70
+   },
+   {
+    "id": "smolagents",
+    "score": 50
+   },
+   {
+    "id": "trl",
+    "score": 50
+   },
+   {
+    "id": "model-architectures",
+    "score": 30
+   }
+  ]
+ },
+ {
+  "name": "pgvector",
+  "kind": "named",
+  "expected": [
+   "pgvector"
+  ],
+  "answer": [
+   {
+    "id": "pgvector",
+    "score": 100
+   },
+   {
+    "id": "vector-databases",
+    "score": 70
+   }
+  ]
+ },
+ {
+  "name": "Pinecone",
+  "kind": "named",
+  "expected": [
+   "pinecone"
+  ],
+  "answer": [
+   {
+    "id": "pinecone",
+    "score": 100
+   },
+   {
+    "id": "vector-databases",
+    "score": 70
+   }
+  ]
+ },
+ {
+  "name": "qdrant",
+  "kind": "named",
+  "expected": [
+   "qdrant"
+  ],
+  "answer": [
+   {
+    "id": "qdrant",
+    "score": 100
+   },
+   {
+    "id": "vector-databases",
+    "score": 70
+   }
+  ]
+ },
+ {
+  "name": "Weaviate",
+  "kind": "named",
+  "expected": [
+   "weaviate"
+  ],
+  "answer": [
+   {
+    "id": "weaviate",
+    "score": 100
+   },
+   {
+    "id": "vector-databases",
+    "score": 70
+   }
+  ]
+ },
+ {
+  "name": "chromadb",
+  "kind": "named",
+  "expected": [
+   "chroma"
+  ],
+  "answer": [
+   {
+    "id": "chroma",
+    "score": 90
+   }
+  ]
+ },
+ {
+  "name": "RAG",
+  "kind": "named",
+  "expected": [
+   "retrieval-and-search",
+   "rag-frameworks"
+  ],
+  "answer": [
+   {
+    "id": "rag-frameworks",
+    "score": 90
+   },
+   {
+    "id": "ragas",
+    "score": 50
+   },
+   {
+    "id": "data-poisoning",
+    "score": 45
+   }
+  ]
+ },
+ {
+  "name": "SWE-bench",
+  "kind": "named",
+  "expected": [
+   "swe-bench"
+  ],
+  "answer": [
+   {
+    "id": "swe-bench",
+    "score": 100
+   },
+   {
+    "id": "agent-benchmarks",
+    "score": 70
+   }
+  ]
+ },
+ {
+  "name": "MMLU",
+  "kind": "named",
+  "expected": [
+   "reasoning-benchmarks",
+   "mmlu-pro"
+  ],
+  "answer": [
+   {
+    "id": "mmlu-pro",
+    "score": 70
+   },
+   {
+    "id": "reasoning-benchmarks",
+    "score": 45
+   }
+  ]
+ },
+ {
+  "name": "lm-evaluation-harness",
+  "kind": "named",
+  "expected": [
+   "lm-evaluation-harness"
+  ],
+  "answer": [
+   {
+    "id": "lm-evaluation-harness",
+    "score": 100
+   },
+   {
+    "id": "evaluation-tools",
+    "score": 70
+   }
+  ]
+ },
+ {
+  "name": "inspect_ai",
+  "kind": "named",
+  "expected": [
+   "inspect-ai"
+  ],
+  "answer": [
+   {
+    "id": "inspect-ai",
+    "score": 100
+   }
+  ]
+ },
+ {
+  "name": "ARC-AGI",
+  "kind": "named",
+  "expected": [
+   "arc-agi"
+  ],
+  "answer": [
+   {
+    "id": "arc-agi",
+    "score": 100
+   },
+   {
+    "id": "reasoning-benchmarks",
+    "score": 70
+   }
+  ]
+ },
+ {
+  "name": "Terminal-Bench",
+  "kind": "named",
+  "expected": [
+   "terminal-bench"
+  ],
+  "answer": [
+   {
+    "id": "terminal-bench",
+    "score": 100
+   },
+   {
+    "id": "agent-benchmarks",
+    "score": 70
+   }
+  ]
+ },
+ {
+  "name": "LangChain",
+  "kind": "named",
+  "expected": [
+   "langchain"
+  ],
+  "answer": [
+   {
+    "id": "langchain",
+    "score": 100
+   },
+   {
+    "id": "langgraph",
+    "score": 50
+   },
+   {
+    "id": "langsmith",
+    "score": 30
+   }
+  ]
+ },
+ {
+  "name": "langgraph",
+  "kind": "named",
+  "expected": [
+   "langgraph"
+  ],
+  "answer": [
+   {
+    "id": "langgraph",
+    "score": 100
+   },
+   {
+    "id": "agent-frameworks",
+    "score": 70
+   }
+  ]
+ },
+ {
+  "name": "CrewAI",
+  "kind": "named",
+  "expected": [
+   "crewai"
+  ],
+  "answer": [
+   {
+    "id": "crewai",
+    "score": 100
+   },
+   {
+    "id": "agent-frameworks",
+    "score": 70
+   }
+  ]
+ },
+ {
+  "name": "LlamaIndex",
+  "kind": "named",
+  "expected": [
+   "llamaindex"
+  ],
+  "answer": [
+   {
+    "id": "llamaindex",
+    "score": 100
+   },
+   {
+    "id": "rag-frameworks",
+    "score": 70
+   }
+  ]
+ },
+ {
+  "name": "DSPy",
+  "kind": "named",
+  "expected": [
+   "dspy"
+  ],
+  "answer": [
+   {
+    "id": "dspy",
+    "score": 100
+   },
+   {
+    "id": "prompting",
+    "score": 70
+   }
+  ]
+ },
+ {
+  "name": "MCP",
+  "kind": "named",
+  "expected": [
+   "model-context-protocol"
+  ],
+  "answer": [
+   {
+    "id": "model-context-protocol",
+    "score": 90
+   },
+   {
+    "id": "mcp-so",
+    "score": 50
+   },
+   {
+    "id": "exa",
+    "score": 50
+   },
+   {
+    "id": "mcp-specification",
+    "score": 50
+   },
+   {
+    "id": "glama",
+    "score": 50
+   },
+   {
+    "id": "pulsemcp",
+    "score": 50
+   },
+   {
+    "id": "docker-mcp-catalog",
+    "score": 50
+   },
+   {
+    "id": "tavily",
+    "score": 50
+   },
+   {
+    "id": "owasp-mcp-top-10",
+    "score": 50
+   },
+   {
+    "id": "tool-poisoning",
+    "score": 50
+   }
+  ]
+ },
+ {
+  "name": "A2A protocol",
+  "kind": "named",
+  "expected": [
+   "agent2agent"
+  ],
+  "answer": [
+   {
+    "id": "agent2agent",
+    "score": 90
+   },
+   {
+    "id": "agent-protocols",
+    "score": 45
+   }
+  ]
+ },
+ {
+  "name": "OpenAI Agents SDK",
+  "kind": "named",
+  "expected": [
+   "openai-agents-sdk"
+  ],
+  "answer": [
+   {
+    "id": "openai-agents-sdk",
+    "score": 100
+   },
+   {
+    "id": "agent-frameworks",
+    "score": 70
+   }
+  ]
+ },
+ {
+  "name": "prompt injection",
+  "kind": "named",
+  "expected": [
+   "prompt-injection"
+  ],
+  "answer": [
+   {
+    "id": "prompt-injection",
+    "score": 100
+   },
+   {
+    "id": "claude-in-chrome",
+    "score": 45
+   },
+   {
+    "id": "lakera-guard",
+    "score": 45
+   },
+   {
+    "id": "owasp-llm-top-10",
+    "score": 45
+   },
+   {
+    "id": "garak",
+    "score": 30
+   }
+  ]
+ },
+ {
+  "name": "jailbreak",
+  "kind": "named",
+  "expected": [
+   "jailbreaks"
+  ],
+  "answer": [
+   {
+    "id": "jailbreaks",
+    "score": 50
+   },
+   {
+    "id": "garak",
+    "score": 45
+   },
+   {
+    "id": "nemo-guardrails",
+    "score": 45
+   }
+  ]
+ },
+ {
+  "name": "data poisoning",
+  "kind": "named",
+  "expected": [
+   "data-poisoning"
+  ],
+  "answer": [
+   {
+    "id": "data-poisoning",
+    "score": 100
+   }
+  ]
+ },
+ {
+  "name": "reward hacking",
+  "kind": "named",
+  "expected": [
+   "alignment",
+   "safety-and-alignment"
+  ],
+  "answer": [
+   {
+    "id": "alignment",
+    "score": 70
+   }
+  ]
+ },
+ {
+  "name": "EU AI Act",
+  "kind": "named",
+  "expected": [
+   "eu-ai-act"
+  ],
+  "answer": [
+   {
+    "id": "eu-ai-act",
+    "score": 100
+   },
+   {
+    "id": "ai-laws",
+    "score": 70
+   }
+  ]
+ },
+ {
+  "name": "OWASP LLM Top 10",
+  "kind": "named",
+  "expected": [
+   "owasp-llm-top-10"
+  ],
+  "answer": [
+   {
+    "id": "owasp-llm-top-10",
+    "score": 100
+   },
+   {
+    "id": "ai-security-standards",
+    "score": 70
+   }
+  ]
+ },
+ {
+  "name": "Hugging Face",
+  "kind": "named",
+  "expected": [
+   "hugging-face"
+  ],
+  "answer": [
+   {
+    "id": "hugging-face",
+    "score": 100
+   },
+   {
+    "id": "hugging-face-incident",
+    "score": 50
+   },
+   {
+    "id": "hugging-face-datasets",
+    "score": 50
+   },
+   {
+    "id": "hf-transformers",
+    "score": 50
+   },
+   {
+    "id": "ai-incidents",
+    "score": 45
+   },
+   {
+    "id": "data-and-datasets",
+    "score": 45
+   },
+   {
+    "id": "argilla",
+    "score": 45
+   },
+   {
+    "id": "trl",
+    "score": 30
+   },
+   {
+    "id": "peft",
+    "score": 30
+   },
+   {
+    "id": "smolagents",
+    "score": 30
+   }
+  ]
+ },
+ {
+  "name": "Anthropic",
+  "kind": "named",
+  "expected": [
+   "anthropic"
+  ],
+  "answer": [
+   {
+    "id": "anthropic",
+    "score": 100
+   },
+   {
+    "id": "ai-labs-and-industry",
+    "score": 70
+   },
+   {
+    "id": "claude-api",
+    "score": 50
+   },
+   {
+    "id": "responsible-scaling-policy",
+    "score": 50
+   },
+   {
+    "id": "claude-code",
+    "score": 50
+   },
+   {
+    "id": "claude-agent-sdk",
+    "score": 50
+   },
+   {
+    "id": "claude",
+    "score": 30
+   },
+   {
+    "id": "claude-in-chrome",
+    "score": 30
+   }
+  ]
+ },
+ {
+  "name": "DeepSeek",
+  "kind": "named",
+  "expected": [
+   "deepseek",
+   "deepseek-models"
+  ],
+  "answer": [
+   {
+    "id": "deepseek",
+    "score": 100
+   },
+   {
+    "id": "deepseek-models",
+    "score": 95
+   },
+   {
+    "id": "grpo",
+    "score": 45
+   }
+  ]
+ },
+ {
+  "name": "Mistral",
+  "kind": "named",
+  "expected": [
+   "mistral-ai",
+   "mistral-models"
+  ],
+  "answer": [
+   {
+    "id": "mistral-models",
+    "score": 95
+   },
+   {
+    "id": "mistral-ai",
+    "score": 50
+   }
+  ]
+ },
+ {
+  "name": "Qwen",
+  "kind": "named",
+  "expected": [
+   "qwen",
+   "alibaba-qwen"
+  ],
+  "answer": [
+   {
+    "id": "qwen",
+    "score": 100
+   },
+   {
+    "id": "alibaba-qwen",
+    "score": 95
+   },
+   {
+    "id": "models",
+    "score": 70
+   }
+  ]
+ },
+ {
+  "name": "flash attention",
+  "kind": "named",
+  "expected": [
+   "kernels-and-compilers"
+  ],
+  "answer": [
+   {
+    "id": "kernels-and-compilers",
+    "score": 70
+   }
+  ]
+ },
+ {
+  "name": "speculative decoding",
+  "kind": "named",
+  "expected": [
+   "inference-and-serving",
+   "serving-engines"
+  ],
+  "answer": [
+   {
+    "id": "inference-and-serving",
+    "score": 70
+   },
+   {
+    "id": "vllm",
+    "score": 70
+   }
+  ]
+ },
+ {
+  "name": "GGUF",
+  "kind": "named",
+  "expected": [
+   "gguf"
+  ],
+  "answer": [
+   {
+    "id": "gguf",
+    "score": 100
+   },
+   {
+    "id": "llama-cpp",
+    "score": 70
+   },
+   {
+    "id": "quantisation",
+    "score": 70
+   }
+  ]
+ },
+ {
+  "name": "kv cache",
+  "kind": "named",
+  "expected": [
+   "inference-and-serving",
+   "serving-engines"
+  ],
+  "answer": [
+   {
+    "id": "inference-and-serving",
+    "score": 70
+   },
+   {
+    "id": "lmdeploy",
+    "score": 45
+   },
+   {
+    "id": "tensorrt-llm",
+    "score": 45
+   },
+   {
+    "id": "serving-engines",
+    "score": 30
+   }
+  ]
+ },
+ {
+  "name": "Claude Code SDK",
+  "kind": "named",
+  "expected": [
+   "claude-agent-sdk"
+  ],
+  "answer": [
+   {
+    "id": "claude-agent-sdk",
+    "score": 90
+   }
+  ]
+ },
+ {
+  "name": "Codeium",
+  "kind": "named",
+  "expected": [
+   "devin-desktop"
+  ],
+  "answer": [
+   {
+    "id": "devin-desktop",
+    "score": 90
+   }
+  ]
+ },
+ {
+  "name": "Roo Cline",
+  "kind": "named",
+  "expected": [
+   "roo-code"
+  ],
+  "answer": [
+   {
+    "id": "roo-code",
+    "score": 90
+   }
+  ]
+ },
+ {
+  "name": "Copilot Workspace",
+  "kind": "named",
+  "expected": [
+   "github-copilot"
+  ],
+  "answer": [
+   {
+    "id": "github-copilot",
+    "score": 40
+   }
+  ]
+ },
+ {
+  "name": "Project IDX",
+  "kind": "named",
+  "expected": [
+   "coding-agents"
+  ],
+  "answer": [
+   {
+    "id": "coding-agents",
+    "score": 70
+   }
+  ]
+ },
+ {
+  "name": "autogen",
+  "kind": "named",
+  "expected": [
+   "microsoft-agent-framework"
+  ],
+  "answer": [
+   {
+    "id": "microsoft-agent-framework",
+    "score": 90
+   }
+  ]
+ },
+ {
+  "name": "OpenAI Swarm",
+  "kind": "named",
+  "expected": [
+   "openai-agents-sdk"
+  ],
+  "answer": [
+   {
+    "id": "openai-agents-sdk",
+    "score": 45
+   },
+   {
+    "id": "openai",
+    "score": 40
+   }
+  ]
+ },
+ {
+  "name": "Assistants API",
+  "kind": "named",
+  "expected": [
+   "openai-api"
+  ],
+  "answer": [
+   {
+    "id": "openai-api",
+    "score": 70
+   },
+   {
+    "id": "voice-agents",
+    "score": 45
+   }
+  ]
+ },
+ {
+  "name": "LangGraph Platform",
+  "kind": "named",
+  "expected": [
+   "langsmith",
+   "langgraph"
+  ],
+  "answer": [
+   {
+    "id": "langgraph",
+    "score": 90
+   }
+  ]
+ },
+ {
+  "name": "Humanloop",
+  "kind": "named",
+  "expected": [],
+  "answer": []
+ },
+ {
+  "name": "GPT-4.5 preview",
+  "kind": "named",
+  "expected": [
+   "gpt"
+  ],
+  "answer": [
+   {
+    "id": "gpt",
+    "score": 40
+   }
+  ]
+ },
+ {
+  "name": "o1-preview",
+  "kind": "named",
+  "expected": [
+   "gpt"
+  ],
+  "answer": [
+   {
+    "id": "gpt",
+    "score": 40
+   }
+  ]
+ },
+ {
+  "name": "claude-3-5-sonnet",
+  "kind": "named",
+  "expected": [
+   "claude"
+  ],
+  "answer": [
+   {
+    "id": "claude",
+    "score": 40
+   }
+  ]
+ },
+ {
+  "name": "claude-3-opus",
+  "kind": "named",
+  "expected": [
+   "claude"
+  ],
+  "answer": [
+   {
+    "id": "claude",
+    "score": 40
+   }
+  ]
+ },
+ {
+  "name": "Humane AI Pin",
+  "kind": "named",
+  "expected": [],
+  "answer": []
+ },
+ {
+  "name": "sourdough",
+  "kind": "subject",
+  "expected": [
+   "food-and-drink"
+  ],
+  "answer": []
+ },
+ {
+  "name": "climate change",
+  "kind": "subject",
+  "expected": [
+   "climate-science"
+  ],
+  "answer": [
+   {
+    "id": "climate-science",
+    "score": 90
+   }
+  ]
+ },
+ {
+  "name": "marathon training",
+  "kind": "subject",
+  "expected": [
+   "fitness",
+   "sports"
+  ],
+  "answer": []
+ },
+ {
+  "name": "Roman history",
+  "kind": "subject",
+  "expected": [
+   "history"
+  ],
+  "answer": []
+ },
+ {
+  "name": "quantum physics",
+  "kind": "subject",
+  "expected": [
+   "physics"
+  ],
+  "answer": [
+   {
+    "id": "physics",
+    "score": 90
+   }
+  ]
+ },
+ {
+  "name": "chess openings",
+  "kind": "subject",
+  "expected": [
+   "board-and-card-games"
+  ],
+  "answer": [
+   {
+    "id": "board-and-card-games",
+    "score": 40
+   }
+  ]
+ },
+ {
+  "name": "Tokyo",
+  "kind": "subject",
+  "expected": [
+   "asia"
+  ],
+  "answer": []
+ },
+ {
+  "name": "mortgage rates",
+  "kind": "subject",
+  "expected": [
+   "real-estate",
+   "personal-finance"
+  ],
+  "answer": []
+ },
+ {
+  "name": "CRISPR",
+  "kind": "subject",
+  "expected": [
+   "biotechnology",
+   "biology"
+  ],
+  "answer": [
+   {
+    "id": "biotechnology",
+    "score": 70
+   }
+  ]
+ },
+ {
+  "name": "jazz",
+  "kind": "subject",
+  "expected": [
+   "music"
+  ],
+  "answer": []
+ },
+ {
+  "name": "gardening",
+  "kind": "subject",
+  "expected": [
+   "home-and-garden"
+  ],
+  "answer": [
+   {
+    "id": "home-and-garden",
+    "score": 90
+   }
+  ]
+ },
+ {
+  "name": "stoicism",
+  "kind": "subject",
+  "expected": [
+   "philosophy"
+  ],
+  "answer": []
+ },
+ {
+  "name": "type 2 diabetes",
+  "kind": "subject",
+  "expected": [
+   "medicine",
+   "health-and-medicine"
+  ],
+  "answer": []
+ },
+ {
+  "name": "football",
+  "kind": "subject",
+  "expected": [
+   "sports"
+  ],
+  "answer": [
+   {
+    "id": "sports",
+    "score": 70
+   }
+  ]
+ },
+ {
+  "name": "black holes",
+  "kind": "subject",
+  "expected": [
+   "astronomy"
+  ],
+  "answer": [
+   {
+    "id": "astronomy",
+    "score": 70
+   }
+  ]
+ },
+ {
+  "name": "bird migration",
+  "kind": "subject",
+  "expected": [
+   "biology",
+   "ecology-and-environment"
+  ],
+  "answer": []
+ },
+ {
+  "name": "Renaissance art",
+  "kind": "subject",
+  "expected": [
+   "visual-arts",
+   "history"
+  ],
+  "answer": []
+ },
+ {
+  "name": "learning spanish",
+  "kind": "subject",
+  "expected": [
+   "languages-and-linguistics"
+  ],
+  "answer": [
+   {
+    "id": "education",
+    "score": 40
+   }
+  ]
+ },
+ {
+  "name": "coffee",
+  "kind": "subject",
+  "expected": [
+   "food-and-drink"
+  ],
+  "answer": [
+   {
+    "id": "food-and-drink",
+    "score": 70
+   }
+  ]
+ },
+ {
+  "name": "inflation",
+  "kind": "subject",
+  "expected": [
+   "economics"
+  ],
+  "answer": [
+   {
+    "id": "economics",
+    "score": 70
+   }
+  ]
+ },
+ {
+  "name": "solar panels",
+  "kind": "subject",
+  "expected": [
+   "energy"
+  ],
+  "answer": []
+ },
+ {
+  "name": "parenting",
+  "kind": "subject",
+  "expected": [
+   "parenting"
+  ],
+  "answer": [
+   {
+    "id": "parenting",
+    "score": 100
+   }
+  ]
+ },
+ {
+  "name": "volcanoes",
+  "kind": "subject",
+  "expected": [
+   "earth-sciences"
+  ],
+  "answer": [
+   {
+    "id": "earth-sciences",
+    "score": 70
+   }
+  ]
+ },
+ {
+  "name": "Iceland",
+  "kind": "subject",
+  "expected": [
+   "europe"
+  ],
+  "answer": []
+ },
+ {
+  "name": "poetry",
+  "kind": "subject",
+  "expected": [
+   "books-and-literature",
+   "writing"
+  ],
+  "answer": [
+   {
+    "id": "books-and-literature",
+    "score": 70
+   }
+  ]
+ },
+ {
+  "name": "sleep",
+  "kind": "subject",
+  "expected": [
+   "medicine",
+   "mental-health",
+   "health-and-medicine"
+  ],
+  "answer": [
+   {
+    "id": "data-poisoning",
+    "score": 50
+   },
+   {
+    "id": "parenting",
+    "score": 45
+   }
+  ]
+ },
+ {
+  "name": "urban planning",
+  "kind": "subject",
+  "expected": [
+   "civil-engineering",
+   "architecture",
+   "public-policy"
+  ],
+  "answer": [
+   {
+    "id": "architecture",
+    "score": 70
+   }
+  ]
+ },
+ {
+  "name": "mushroom foraging",
+  "kind": "subject",
+  "expected": [
+   "hobbies-and-crafts",
+   "food-and-drink",
+   "biology"
+  ],
+  "answer": []
+ },
+ {
+  "name": "electric cars",
+  "kind": "subject",
+  "expected": [
+   "transport"
+  ],
+  "answer": [
+   {
+    "id": "transport",
+    "score": 45
+   }
+  ]
+ },
+ {
+  "name": "World War II",
+  "kind": "subject",
+  "expected": [
+   "history",
+   "military"
+  ],
+  "answer": []
+ }
+]

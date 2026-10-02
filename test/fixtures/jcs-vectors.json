@@ -1,0 +1,77 @@
+{
+  "about": "RFC 8785 canonical JSON vectors for src/domain/jcs.ts; other copies of this file reproduce every value. Each canonical vector: parsing input and canonicalising gives output exactly. Each not_canonical text parses, and is refused as canonical bytes. The first two canonical vectors and their outputs are copied from RFC 8785 itself.",
+  "canonical": [
+    {
+      "name": "RFC 8785 3.2.2: numbers, escapes and literals",
+      "input": "{\"numbers\": [333333333.33333329, 1E30, 4.50, 2e-3, 0.000000000000000000000000001], \"string\": \"\\u20ac$\\u000F\\u000aA'\\u0042\\u0022\\u005c\\\\\\\"\\/\", \"literals\": [null, true, false]}",
+      "output": "{\"literals\":[null,true,false],\"numbers\":[333333333.3333333,1e+30,4.5,0.002,1e-27],\"string\":\"\u20ac$\\u000f\\nA'B\\\"\\\\\\\\\\\"/\"}"
+    },
+    {
+      "name": "RFC 8785 3.2.3: member names by UTF-16 code units",
+      "input": "{\"\\u20ac\": \"Euro Sign\", \"\\r\": \"Carriage Return\", \"\\ufb33\": \"Hebrew Letter Dalet With Dagesh\", \"1\": \"One\", \"\\ud83d\\ude00\": \"Emoji: Grinning Face\", \"\\u0080\": \"Control\", \"\\u00f6\": \"Latin Small Letter O With Diaeresis\"}",
+      "output": "{\"\\r\":\"Carriage Return\",\"1\":\"One\",\"\u0080\":\"Control\",\"\u00f6\":\"Latin Small Letter O With Diaeresis\",\"\u20ac\":\"Euro Sign\",\"\ud83d\ude00\":\"Emoji: Grinning Face\",\"\ufb33\":\"Hebrew Letter Dalet With Dagesh\"}"
+    },
+    {
+      "name": "nesting and empty containers",
+      "input": "{ \"b\": [ ], \"a\": { \"z\": {}, \"y\": [[ ], {\"c\": null}] } }",
+      "output": "{\"a\":{\"y\":[[],{\"c\":null}],\"z\":{}},\"b\":[]}"
+    },
+    {
+      "name": "numbers as ECMAScript writes them",
+      "input": "[0, -0, 1, -1, 1.0, 1.5, 100, 1e2, 123e-2, 0.1, 1e21, 1e-7, 0.000001, 9007199254740991, 5e-324, 1.7976931348623157e308]",
+      "output": "[0,0,1,-1,1,1.5,100,100,1.23,0.1,1e+21,1e-7,0.000001,9007199254740991,5e-324,1.7976931348623157e+308]"
+    },
+    {
+      "name": "string escapes: only quote, backslash and C0 controls are escaped",
+      "input": "[\"\\u0001\\b\\t\\n\\f\\r\\\"\\\\\\/\\u007f\\u2028\\u00e9\"]",
+      "output": "[\"\\u0001\\b\\t\\n\\f\\r\\\"\\\\/\u007f\u2028\u00e9\"]"
+    },
+    {
+      "name": "a post object as a KEY signs it",
+      "input": "{\"v\":1,\"kind\":\"result\",\"space_id\":\"0199aaaa-0000-7000-8000-000000000001\",\"author_id\":\"abababababababababababababababababababababababababababababababab\",\"idempotency_key\":\"k-1\",\"title\":\"Build passes\",\"body\":\"Line one\\u000aline two\",\"fingerprints\":[{\"value\":\"b75e527\",\"scheme\":\"git.commit\"}]}",
+      "output": "{\"author_id\":\"abababababababababababababababababababababababababababababababab\",\"body\":\"Line one\\nline two\",\"fingerprints\":[{\"scheme\":\"git.commit\",\"value\":\"b75e527\"}],\"idempotency_key\":\"k-1\",\"kind\":\"result\",\"space_id\":\"0199aaaa-0000-7000-8000-000000000001\",\"title\":\"Build passes\",\"v\":1}"
+    }
+  ],
+  "not_canonical": [
+    {
+      "name": "whitespace",
+      "text": "{\"a\":1, \"b\":2}"
+    },
+    {
+      "name": "members out of order",
+      "text": "{\"b\":1,\"a\":2}"
+    },
+    {
+      "name": "a number not as ECMAScript writes it",
+      "text": "{\"a\":1.0}"
+    },
+    {
+      "name": "an exponent not as ECMAScript writes it",
+      "text": "[1e21]"
+    },
+    {
+      "name": "an escaped slash",
+      "text": "[\"\\/\"]"
+    },
+    {
+      "name": "an escaped letter",
+      "text": "[\"\\u00e9\"]"
+    },
+    {
+      "name": "uppercase hex in an escape",
+      "text": "[\"\\u001F\"]"
+    },
+    {
+      "name": "a duplicate member name",
+      "text": "{\"a\":1,\"a\":1}"
+    },
+    {
+      "name": "a byte-order mark",
+      "text": "\ufeff{\"a\":1}"
+    },
+    {
+      "name": "a trailing newline",
+      "text": "{\"a\":1}\n"
+    }
+  ]
+}

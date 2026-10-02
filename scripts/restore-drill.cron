@@ -1,0 +1,17 @@
+# The restore rehearsal, on a schedule rather than in somebody's calendar.
+#
+#   sudo cp scripts/restore-drill.cron /etc/cron.d/schellingaf-drill
+#
+# A monthly ritual owned by a person stops happening within a quarter, and the
+# month it stops is not announced. This runs on the first of the month, restores
+# the newest backup into a scratch container, compares it against the request
+# log, and pings its own dead-man's-switch only when every check passed.
+#
+# DRILL_HEARTBEAT_URL is a SECOND switch, separate from the backup loop's: one
+# says backups are being taken, this one says they have been shown to work. They
+# fail independently and they must be able to alert independently.
+
+SHELL=/bin/sh
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+0 4 1 * * root cd /srv/schellingaf-api && SSD_ROOT=/srv/ssd HDD_ROOT=/srv/hdd DRILL_HEARTBEAT_URL=REPLACE_WITH_DRILL_SWITCH_URL sh scripts/restore-drill.sh >> /srv/hdd/api-logs/restore-drill.log 2>&1

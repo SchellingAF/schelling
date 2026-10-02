@@ -1,0 +1,991 @@
+{
+  "about": "The vectors src/domain/document.ts is held to byte for byte; other copies of this file reproduce every value. Regenerate only with a change to the grammar, in the same commit.",
+  "parse": [
+    {
+      "name": "empty",
+      "text": "",
+      "blocks": [],
+      "sections": [
+        {
+          "id": "lead",
+          "level": 0,
+          "heading": "",
+          "start": 0,
+          "end": 1
+        }
+      ],
+      "references": [],
+      "links": []
+    },
+    {
+      "name": "lead only",
+      "text": "One line.\nSame paragraph.\n\nSecond paragraph.",
+      "blocks": [
+        {
+          "t": "paragraph",
+          "inline": [
+            {
+              "t": "text",
+              "v": "One line. Same paragraph."
+            }
+          ]
+        },
+        {
+          "t": "paragraph",
+          "inline": [
+            {
+              "t": "text",
+              "v": "Second paragraph."
+            }
+          ]
+        }
+      ],
+      "sections": [
+        {
+          "id": "lead",
+          "level": 0,
+          "heading": "",
+          "start": 0,
+          "end": 4
+        }
+      ],
+      "references": [],
+      "links": []
+    },
+    {
+      "name": "headings and sections",
+      "text": "Lead.\n\n# One\n\nA.\n\n## Two\n\nB.\n\n### Three\n\nC.",
+      "blocks": [
+        {
+          "t": "paragraph",
+          "inline": [
+            {
+              "t": "text",
+              "v": "Lead."
+            }
+          ]
+        },
+        {
+          "t": "heading",
+          "level": 1,
+          "id": "one",
+          "inline": [
+            {
+              "t": "text",
+              "v": "One"
+            }
+          ]
+        },
+        {
+          "t": "paragraph",
+          "inline": [
+            {
+              "t": "text",
+              "v": "A."
+            }
+          ]
+        },
+        {
+          "t": "heading",
+          "level": 2,
+          "id": "two",
+          "inline": [
+            {
+              "t": "text",
+              "v": "Two"
+            }
+          ]
+        },
+        {
+          "t": "paragraph",
+          "inline": [
+            {
+              "t": "text",
+              "v": "B."
+            }
+          ]
+        },
+        {
+          "t": "heading",
+          "level": 3,
+          "id": "three",
+          "inline": [
+            {
+              "t": "text",
+              "v": "Three"
+            }
+          ]
+        },
+        {
+          "t": "paragraph",
+          "inline": [
+            {
+              "t": "text",
+              "v": "C."
+            }
+          ]
+        }
+      ],
+      "sections": [
+        {
+          "id": "lead",
+          "level": 0,
+          "heading": "",
+          "start": 0,
+          "end": 2
+        },
+        {
+          "id": "one",
+          "level": 1,
+          "heading": "One",
+          "start": 2,
+          "end": 6
+        },
+        {
+          "id": "two",
+          "level": 2,
+          "heading": "Two",
+          "start": 6,
+          "end": 10
+        },
+        {
+          "id": "three",
+          "level": 3,
+          "heading": "Three",
+          "start": 10,
+          "end": 13
+        }
+      ],
+      "references": [],
+      "links": []
+    },
+    {
+      "name": "duplicate headings",
+      "text": "## Notes\n\nA\n\n## Notes\n\nB\n\n## notes!\n\nC",
+      "blocks": [
+        {
+          "t": "heading",
+          "level": 2,
+          "id": "notes",
+          "inline": [
+            {
+              "t": "text",
+              "v": "Notes"
+            }
+          ]
+        },
+        {
+          "t": "paragraph",
+          "inline": [
+            {
+              "t": "text",
+              "v": "A"
+            }
+          ]
+        },
+        {
+          "t": "heading",
+          "level": 2,
+          "id": "notes-2",
+          "inline": [
+            {
+              "t": "text",
+              "v": "Notes"
+            }
+          ]
+        },
+        {
+          "t": "paragraph",
+          "inline": [
+            {
+              "t": "text",
+              "v": "B"
+            }
+          ]
+        },
+        {
+          "t": "heading",
+          "level": 2,
+          "id": "notes-3",
+          "inline": [
+            {
+              "t": "text",
+              "v": "notes!"
+            }
+          ]
+        },
+        {
+          "t": "paragraph",
+          "inline": [
+            {
+              "t": "text",
+              "v": "C"
+            }
+          ]
+        }
+      ],
+      "sections": [
+        {
+          "id": "lead",
+          "level": 0,
+          "heading": "",
+          "start": 0,
+          "end": 0
+        },
+        {
+          "id": "notes",
+          "level": 2,
+          "heading": "Notes",
+          "start": 0,
+          "end": 4
+        },
+        {
+          "id": "notes-2",
+          "level": 2,
+          "heading": "Notes",
+          "start": 4,
+          "end": 8
+        },
+        {
+          "id": "notes-3",
+          "level": 2,
+          "heading": "notes!",
+          "start": 8,
+          "end": 11
+        }
+      ],
+      "references": [],
+      "links": []
+    },
+    {
+      "name": "heading that slugs to nothing",
+      "text": "## ???\n\nx\n\n## lead\n\ny",
+      "blocks": [
+        {
+          "t": "heading",
+          "level": 2,
+          "id": "section",
+          "inline": [
+            {
+              "t": "text",
+              "v": "???"
+            }
+          ]
+        },
+        {
+          "t": "paragraph",
+          "inline": [
+            {
+              "t": "text",
+              "v": "x"
+            }
+          ]
+        },
+        {
+          "t": "heading",
+          "level": 2,
+          "id": "section-2",
+          "inline": [
+            {
+              "t": "text",
+              "v": "lead"
+            }
+          ]
+        },
+        {
+          "t": "paragraph",
+          "inline": [
+            {
+              "t": "text",
+              "v": "y"
+            }
+          ]
+        }
+      ],
+      "sections": [
+        {
+          "id": "lead",
+          "level": 0,
+          "heading": "",
+          "start": 0,
+          "end": 0
+        },
+        {
+          "id": "section",
+          "level": 2,
+          "heading": "???",
+          "start": 0,
+          "end": 4
+        },
+        {
+          "id": "section-2",
+          "level": 2,
+          "heading": "lead",
+          "start": 4,
+          "end": 7
+        }
+      ],
+      "references": [],
+      "links": []
+    },
+    {
+      "name": "lists",
+      "text": "- one\n- two [[some-space]]\n-not a list\n\n- three",
+      "blocks": [
+        {
+          "t": "list",
+          "items": [
+            [
+              {
+                "t": "text",
+                "v": "one"
+              }
+            ],
+            [
+              {
+                "t": "text",
+                "v": "two "
+              },
+              {
+                "t": "link",
+                "kind": "space",
+                "target": "some-space",
+                "label": null
+              }
+            ]
+          ]
+        },
+        {
+          "t": "paragraph",
+          "inline": [
+            {
+              "t": "text",
+              "v": "-not a list"
+            }
+          ]
+        },
+        {
+          "t": "list",
+          "items": [
+            [
+              {
+                "t": "text",
+                "v": "three"
+              }
+            ]
+          ]
+        }
+      ],
+      "sections": [
+        {
+          "id": "lead",
+          "level": 0,
+          "heading": "",
+          "start": 0,
+          "end": 5
+        }
+      ],
+      "references": [
+        {
+          "kind": "space",
+          "target": "some-space"
+        }
+      ],
+      "links": [
+        "space:some-space"
+      ]
+    },
+    {
+      "name": "list then paragraph",
+      "text": "- a\ntext after\n- b",
+      "blocks": [
+        {
+          "t": "list",
+          "items": [
+            [
+              {
+                "t": "text",
+                "v": "a"
+              }
+            ]
+          ]
+        },
+        {
+          "t": "paragraph",
+          "inline": [
+            {
+              "t": "text",
+              "v": "text after"
+            }
+          ]
+        },
+        {
+          "t": "list",
+          "items": [
+            [
+              {
+                "t": "text",
+                "v": "b"
+              }
+            ]
+          ]
+        }
+      ],
+      "sections": [
+        {
+          "id": "lead",
+          "level": 0,
+          "heading": "",
+          "start": 0,
+          "end": 3
+        }
+      ],
+      "references": [],
+      "links": []
+    },
+    {
+      "name": "code fence",
+      "text": "Before.\n\n```sh\n## not a heading\n[[not-a-link]]\n```\n\nAfter.",
+      "blocks": [
+        {
+          "t": "paragraph",
+          "inline": [
+            {
+              "t": "text",
+              "v": "Before."
+            }
+          ]
+        },
+        {
+          "t": "code",
+          "info": "sh",
+          "text": "## not a heading\n[[not-a-link]]"
+        },
+        {
+          "t": "paragraph",
+          "inline": [
+            {
+              "t": "text",
+              "v": "After."
+            }
+          ]
+        }
+      ],
+      "sections": [
+        {
+          "id": "lead",
+          "level": 0,
+          "heading": "",
+          "start": 0,
+          "end": 8
+        }
+      ],
+      "references": [],
+      "links": []
+    },
+    {
+      "name": "unclosed fence",
+      "text": "```\nall of this\n## is code",
+      "blocks": [
+        {
+          "t": "code",
+          "info": "",
+          "text": "all of this\n## is code"
+        }
+      ],
+      "sections": [
+        {
+          "id": "lead",
+          "level": 0,
+          "heading": "",
+          "start": 0,
+          "end": 3
+        }
+      ],
+      "references": [],
+      "links": []
+    },
+    {
+      "name": "inline code and links",
+      "text": "Run `npm [[x]] test` then read [[docs-space]] or [[docs-space/12|post twelve]].",
+      "blocks": [
+        {
+          "t": "paragraph",
+          "inline": [
+            {
+              "t": "text",
+              "v": "Run "
+            },
+            {
+              "t": "code",
+              "v": "npm [[x]] test"
+            },
+            {
+              "t": "text",
+              "v": " then read "
+            },
+            {
+              "t": "link",
+              "kind": "space",
+              "target": "docs-space",
+              "label": null
+            },
+            {
+              "t": "text",
+              "v": " or "
+            },
+            {
+              "t": "link",
+              "kind": "post",
+              "target": "docs-space/12",
+              "label": "post twelve"
+            },
+            {
+              "t": "text",
+              "v": "."
+            }
+          ]
+        }
+      ],
+      "sections": [
+        {
+          "id": "lead",
+          "level": 0,
+          "heading": "",
+          "start": 0,
+          "end": 1
+        }
+      ],
+      "references": [
+        {
+          "kind": "space",
+          "target": "docs-space"
+        },
+        {
+          "kind": "post",
+          "target": "docs-space/12"
+        }
+      ],
+      "links": [
+        "space:docs-space",
+        "post:docs-space/12"
+      ]
+    },
+    {
+      "name": "web and identifiers",
+      "text": "See [[https://example.org/a?b=1]] and [[git.commit:ab12cd]] and [[package.version:vllm@0.6.3|vLLM]].",
+      "blocks": [
+        {
+          "t": "paragraph",
+          "inline": [
+            {
+              "t": "text",
+              "v": "See "
+            },
+            {
+              "t": "link",
+              "kind": "web",
+              "target": "https://example.org/a?b=1",
+              "label": null
+            },
+            {
+              "t": "text",
+              "v": " and "
+            },
+            {
+              "t": "link",
+              "kind": "identifier",
+              "target": "git.commit:ab12cd",
+              "label": null
+            },
+            {
+              "t": "text",
+              "v": " and "
+            },
+            {
+              "t": "link",
+              "kind": "identifier",
+              "target": "package.version:vllm@0.6.3",
+              "label": "vLLM"
+            },
+            {
+              "t": "text",
+              "v": "."
+            }
+          ]
+        }
+      ],
+      "sections": [
+        {
+          "id": "lead",
+          "level": 0,
+          "heading": "",
+          "start": 0,
+          "end": 1
+        }
+      ],
+      "references": [
+        {
+          "kind": "web",
+          "target": "https://example.org/a?b=1"
+        },
+        {
+          "kind": "identifier",
+          "target": "git.commit:ab12cd"
+        },
+        {
+          "kind": "identifier",
+          "target": "package.version:vllm@0.6.3"
+        }
+      ],
+      "links": []
+    },
+    {
+      "name": "not links",
+      "text": "[[Ab]] [[no spaces here]] [[a]] [[javascript:alert(1)]] [[http://]] [[]] [[x|]] [[ docs-space ]]",
+      "blocks": [
+        {
+          "t": "paragraph",
+          "inline": [
+            {
+              "t": "text",
+              "v": "[[Ab]] [[no spaces here]] [[a]] [[javascript:alert(1)]] [[http://]] [[]] [[x|]] "
+            },
+            {
+              "t": "link",
+              "kind": "space",
+              "target": "docs-space",
+              "label": null
+            }
+          ]
+        }
+      ],
+      "sections": [
+        {
+          "id": "lead",
+          "level": 0,
+          "heading": "",
+          "start": 0,
+          "end": 1
+        }
+      ],
+      "references": [
+        {
+          "kind": "space",
+          "target": "docs-space"
+        }
+      ],
+      "links": [
+        "space:docs-space"
+      ]
+    },
+    {
+      "name": "hostile markup is text",
+      "text": "<script>alert(1)</script>\n\n## <img src=x onerror=alert(1)>\n\n- \"quotes\" & 'apostrophes'",
+      "blocks": [
+        {
+          "t": "paragraph",
+          "inline": [
+            {
+              "t": "text",
+              "v": "<script>alert(1)</script>"
+            }
+          ]
+        },
+        {
+          "t": "heading",
+          "level": 2,
+          "id": "img-src-x-onerror-alert-1",
+          "inline": [
+            {
+              "t": "text",
+              "v": "<img src=x onerror=alert(1)>"
+            }
+          ]
+        },
+        {
+          "t": "list",
+          "items": [
+            [
+              {
+                "t": "text",
+                "v": "\"quotes\" & 'apostrophes'"
+              }
+            ]
+          ]
+        }
+      ],
+      "sections": [
+        {
+          "id": "lead",
+          "level": 0,
+          "heading": "",
+          "start": 0,
+          "end": 2
+        },
+        {
+          "id": "img-src-x-onerror-alert-1",
+          "level": 2,
+          "heading": "<img src=x onerror=alert(1)>",
+          "start": 2,
+          "end": 5
+        }
+      ],
+      "references": [],
+      "links": []
+    },
+    {
+      "name": "the mark",
+      "text": "## Schelling+>\n\nSchelling+> is [[this-service]].",
+      "blocks": [
+        {
+          "t": "heading",
+          "level": 2,
+          "id": "schelling",
+          "inline": [
+            {
+              "t": "text",
+              "v": "Schelling+>"
+            }
+          ]
+        },
+        {
+          "t": "paragraph",
+          "inline": [
+            {
+              "t": "text",
+              "v": "Schelling+> is "
+            },
+            {
+              "t": "link",
+              "kind": "space",
+              "target": "this-service",
+              "label": null
+            },
+            {
+              "t": "text",
+              "v": "."
+            }
+          ]
+        }
+      ],
+      "sections": [
+        {
+          "id": "lead",
+          "level": 0,
+          "heading": "",
+          "start": 0,
+          "end": 0
+        },
+        {
+          "id": "schelling",
+          "level": 2,
+          "heading": "Schelling+>",
+          "start": 0,
+          "end": 3
+        }
+      ],
+      "references": [
+        {
+          "kind": "space",
+          "target": "this-service"
+        }
+      ],
+      "links": [
+        "space:this-service"
+      ]
+    },
+    {
+      "name": "crlf",
+      "text": "Lead\r\n\r\n## A\r\nx\r\n",
+      "blocks": [
+        {
+          "t": "paragraph",
+          "inline": [
+            {
+              "t": "text",
+              "v": "Lead"
+            }
+          ]
+        },
+        {
+          "t": "heading",
+          "level": 2,
+          "id": "a",
+          "inline": [
+            {
+              "t": "text",
+              "v": "A"
+            }
+          ]
+        },
+        {
+          "t": "paragraph",
+          "inline": [
+            {
+              "t": "text",
+              "v": "x"
+            }
+          ]
+        }
+      ],
+      "sections": [
+        {
+          "id": "lead",
+          "level": 0,
+          "heading": "",
+          "start": 0,
+          "end": 2
+        },
+        {
+          "id": "a",
+          "level": 2,
+          "heading": "A",
+          "start": 2,
+          "end": 5
+        }
+      ],
+      "references": [],
+      "links": []
+    },
+    {
+      "name": "unicode heading",
+      "text": "## Überblick über Größen\n\nx\n\n## 日本語の見出し\n\ny",
+      "blocks": [
+        {
+          "t": "heading",
+          "level": 2,
+          "id": "überblick-über-größen",
+          "inline": [
+            {
+              "t": "text",
+              "v": "Überblick über Größen"
+            }
+          ]
+        },
+        {
+          "t": "paragraph",
+          "inline": [
+            {
+              "t": "text",
+              "v": "x"
+            }
+          ]
+        },
+        {
+          "t": "heading",
+          "level": 2,
+          "id": "日本語の見出し",
+          "inline": [
+            {
+              "t": "text",
+              "v": "日本語の見出し"
+            }
+          ]
+        },
+        {
+          "t": "paragraph",
+          "inline": [
+            {
+              "t": "text",
+              "v": "y"
+            }
+          ]
+        }
+      ],
+      "sections": [
+        {
+          "id": "lead",
+          "level": 0,
+          "heading": "",
+          "start": 0,
+          "end": 0
+        },
+        {
+          "id": "überblick-über-größen",
+          "level": 2,
+          "heading": "Überblick über Größen",
+          "start": 0,
+          "end": 4
+        },
+        {
+          "id": "日本語の見出し",
+          "level": 2,
+          "heading": "日本語の見出し",
+          "start": 4,
+          "end": 7
+        }
+      ],
+      "references": [],
+      "links": []
+    },
+    {
+      "name": "post zero is not a post",
+      "text": "[[docs-space/0]] [[docs-space/01]] [[docs-space/99999999999999999999]]",
+      "blocks": [
+        {
+          "t": "paragraph",
+          "inline": [
+            {
+              "t": "text",
+              "v": "[[docs-space/0]] [[docs-space/01]] [[docs-space/99999999999999999999]]"
+            }
+          ]
+        }
+      ],
+      "sections": [
+        {
+          "id": "lead",
+          "level": 0,
+          "heading": "",
+          "start": 0,
+          "end": 1
+        }
+      ],
+      "references": [],
+      "links": []
+    }
+  ],
+  "edits": [
+    {
+      "name": "replace a middle section",
+      "text": "Lead.\n\n## A\n\nold a\n\n## B\n\nb",
+      "section": "a",
+      "with": "## A\n\nnew a",
+      "result": "Lead.\n\n## A\n\nnew a\n\n## B\n\nb",
+      "section_text": "## A\n\nold a"
+    },
+    {
+      "name": "remove a section",
+      "text": "Lead.\n\n## A\n\na\n\n## B\n\nb",
+      "section": "a",
+      "with": "",
+      "result": "Lead.\n\n## B\n\nb",
+      "section_text": "## A\n\na"
+    },
+    {
+      "name": "append a section",
+      "text": "Lead.\n\n## A\n\na\n\n",
+      "section": "new",
+      "with": "## C\n\nc",
+      "result": "Lead.\n\n## A\n\na\n\n## C\n\nc",
+      "section_text": null
+    },
+    {
+      "name": "replace the lead",
+      "text": "Old lead.\n\n## A\n\na",
+      "section": "lead",
+      "with": "New lead.",
+      "result": "New lead.\n\n## A\n\na",
+      "section_text": "Old lead."
+    },
+    {
+      "name": "no such section",
+      "text": "Lead.",
+      "section": "nowhere",
+      "with": "x",
+      "result": null,
+      "section_text": null
+    }
+  ]
+}

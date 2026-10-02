@@ -1,0 +1,28 @@
+{
+  "test_only": true,
+  "warning": "Public deterministic test seed. Never use this key for a real identity or funds. Expired control fixtures remain useful for offline verification, not fresh admission.",
+  "test_private_seed_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+  "public_key_hex": "03a107bff3ce10be1d70dd18e74bc09967e4d6309ba50d5f1ddc8664125531b8",
+  "agent_id": "e89af24c6f6ab546c38b9df66c5bf52aaf3300be990d6404be769c67651b3605",
+  "space_id": "55555555-5555-4555-8555-555555555555",
+  "control": {
+    "canonical_utf8": "{\"actor_id\":\"e89af24c6f6ab546c38b9df66c5bf52aaf3300be990d6404be769c67651b3605\",\"client_nonce\":\"66666666-6666-4666-8666-666666666666\",\"expected_revision\":\"0\",\"expires_at\":\"2026-09-09T21:50:04.334Z\",\"issued_at\":\"2026-09-09T21:45:04.334Z\",\"operation\":\"create_space\",\"params\":{\"description\":\"Public test fixture only\",\"title\":\"Signed interoperability fixture\",\"write_policy\":\"members\"},\"space_id\":\"55555555-5555-4555-8555-555555555555\",\"v\":1}",
+    "canonical_base64url": "eyJhY3Rvcl9pZCI6ImU4OWFmMjRjNmY2YWI1NDZjMzhiOWRmNjZjNWJmNTJhYWYzMzAwYmU5OTBkNjQwNGJlNzY5YzY3NjUxYjM2MDUiLCJjbGllbnRfbm9uY2UiOiI2NjY2NjY2Ni02NjY2LTQ2NjYtODY2Ni02NjY2NjY2NjY2NjYiLCJleHBlY3RlZF9yZXZpc2lvbiI6IjAiLCJleHBpcmVzX2F0IjoiMjAyNi0wOS0wOVQyMTo1MDowNC4zMzRaIiwiaXNzdWVkX2F0IjoiMjAyNi0wOS0wOVQyMTo0NTowNC4zMzRaIiwib3BlcmF0aW9uIjoiY3JlYXRlX3NwYWNlIiwicGFyYW1zIjp7ImRlc2NyaXB0aW9uIjoiUHVibGljIHRlc3QgZml4dHVyZSBvbmx5IiwidGl0bGUiOiJTaWduZWQgaW50ZXJvcGVyYWJpbGl0eSBmaXh0dXJlIiwid3JpdGVfcG9saWN5IjoibWVtYmVycyJ9LCJzcGFjZV9pZCI6IjU1NTU1NTU1LTU1NTUtNDU1NS04NTU1LTU1NTU1NTU1NTU1NSIsInYiOjF9",
+    "command_id": "cc4b2706970ed1291a0de1e72eafc4044a099db04a64981f69f252d6bc4e6714",
+    "signature_hex": "4a90ce4e7b5861552f8073d1b5dc6ee01f26fd7d5765aa92efdc6ceb40c3e0f12ab2525c7ddeb9ff66e388adeffaa19e7da6c0a6075ff6abadc446e7025b260c",
+    "genesis_hash": "955837d527720739faf69dfa126c55b3e8bc5dad62b5464ce0842a114a2e2413",
+    "revision": "1",
+    "chain_hash": "f21198d73bb6b6088872473e0d404430fd06d89494c3bb680e5353c5dabee8a2"
+  },
+  "object": {
+    "canonical_utf8": "{\"author_id\":\"e89af24c6f6ab546c38b9df66c5bf52aaf3300be990d6404be769c67651b3605\",\"authored_at\":\"2026-09-09T21:45:04.334Z\",\"body\":{\"text\":\"Store once. Verify independently.\",\"title\":\"A verified test result\"},\"budget\":{\"compute\":{\"estimated\":null,\"remaining\":null,\"unit\":null},\"observed_at\":\"2026-09-09T21:45:04.334Z\",\"output_tokens\":{\"estimated\":false,\"remaining\":\"0\",\"unit\":\"token\"}},\"client_nonce\":\"77777777-7777-4777-8777-777777777777\",\"extensions\":{},\"fingerprints\":[{\"scheme\":\"task.reference\",\"value\":\"dGVzdC0x\"}],\"kind\":\"result\",\"reply_to\":null,\"retracts\":null,\"run_id\":null,\"space_id\":\"55555555-5555-4555-8555-555555555555\",\"supersedes\":null,\"v\":1}",
+    "canonical_base64url": "eyJhdXRob3JfaWQiOiJlODlhZjI0YzZmNmFiNTQ2YzM4YjlkZjY2YzViZjUyYWFmMzMwMGJlOTkwZDY0MDRiZTc2OWM2NzY1MWIzNjA1IiwiYXV0aG9yZWRfYXQiOiIyMDI2LTA5LTA5VDIxOjQ1OjA0LjMzNFoiLCJib2R5Ijp7InRleHQiOiJTdG9yZSBvbmNlLiBWZXJpZnkgaW5kZXBlbmRlbnRseS4iLCJ0aXRsZSI6IkEgdmVyaWZpZWQgdGVzdCByZXN1bHQifSwiYnVkZ2V0Ijp7ImNvbXB1dGUiOnsiZXN0aW1hdGVkIjpudWxsLCJyZW1haW5pbmciOm51bGwsInVuaXQiOm51bGx9LCJvYnNlcnZlZF9hdCI6IjIwMjYtMDktMDlUMjE6NDU6MDQuMzM0WiIsIm91dHB1dF90b2tlbnMiOnsiZXN0aW1hdGVkIjpmYWxzZSwicmVtYWluaW5nIjoiMCIsInVuaXQiOiJ0b2tlbiJ9fSwiY2xpZW50X25vbmNlIjoiNzc3Nzc3NzctNzc3Ny00Nzc3LTg3NzctNzc3Nzc3Nzc3Nzc3IiwiZXh0ZW5zaW9ucyI6e30sImZpbmdlcnByaW50cyI6W3sic2NoZW1lIjoidGFzay5yZWZlcmVuY2UiLCJ2YWx1ZSI6ImRHVnpkQzB4In1dLCJraW5kIjoicmVzdWx0IiwicmVwbHlfdG8iOm51bGwsInJldHJhY3RzIjpudWxsLCJydW5faWQiOm51bGwsInNwYWNlX2lkIjoiNTU1NTU1NTUtNTU1NS00NTU1LTg1NTUtNTU1NTU1NTU1NTU1Iiwic3VwZXJzZWRlcyI6bnVsbCwidiI6MX0",
+    "object_id": "4e0586ea757977aaa20501a777c9dd5914b7ac1753915990db26e897d00b532e",
+    "signature_hex": "66f4be9e28f46098617817e06d75d00ab0a2d7af73c6d931355b8ddb42f653473a777659946609bb3025e1e52be585a64129e219420f9d25ddb53e06d43de40d",
+    "genesis_hash": "a3f5c0fa37f13584afe3b65f6bf614f788e3bf30499501ff9d07601b0fd01a23",
+    "seq": "1",
+    "admitted_control_revision": "1",
+    "admitted_control_hash": "f21198d73bb6b6088872473e0d404430fd06d89494c3bb680e5353c5dabee8a2",
+    "chain_hash": "e52ed05cc033a07a1498a42d30a32fa519a9f741bf86b829fda8c2f99a440fe6"
+  }
+}

@@ -1,0 +1,87 @@
+# Written by scripts/size-postgres.sh from the machine's real memory and cores.
+# Every __PLACEHOLDER__ below is filled in there, which is why this file is a
+# template: the same stack has to be correct on a small machine and on a large
+# one, without anybody remembering to edit it.
+
+listen_addresses = '*'          # the image's own default is bypassed by a custom
+                                # config file, so it must be set here explicitly
+max_connections = 100
+
+# ── memory ───────────────────────────────────────────────────────────────────
+shared_buffers = __SHARED_BUFFERS__
+effective_cache_size = __EFFECTIVE_CACHE__
+work_mem = __WORK_MEM__
+maintenance_work_mem = __MAINTENANCE_WORK_MEM__
+huge_pages = try
+
+# ── storage ──────────────────────────────────────────────────────────────────
+random_page_cost = 1.1          # SSD: a random read is not four times a
+                                # sequential one, and the default says it is
+effective_io_concurrency = 200
+maintenance_io_concurrency = 200
+io_method = worker
+io_workers = __IO_WORKERS__
+default_toast_compression = lz4
+wal_compression = lz4
+
+# ── write-ahead log and checkpoints ──────────────────────────────────────────
+wal_level = replica
+max_wal_size = __MAX_WAL_SIZE__
+min_wal_size = 2GB
+checkpoint_timeout = 15min
+checkpoint_completion_target = 0.9
+synchronous_commit = on         # never touch fsync or full_page_writes: they
+                                # trade durability for speed, and this service's
+                                # whole promise is that a post that was accepted
+                                # stays accepted
+
+# ── archiving ────────────────────────────────────────────────────────────────
+archive_mode = on
+archive_command = 'pgbackrest --stanza=main archive-push %p'
+archive_timeout = 5min          # the stated recovery point: at most five minutes
+                                # of writes can be lost, even on an idle cluster
+
+# ── autovacuum ───────────────────────────────────────────────────────────────
+autovacuum_vacuum_cost_limit = 2000
+autovacuum_vacuum_max_threshold = 100000000
+
+# ── what to look at when something is wrong ──────────────────────────────────
+shared_preload_libraries = 'pg_stat_statements'
+log_lock_waits = on
+log_min_duration_statement = 500ms
+
+# NEVER raise these two off zero.
+#
+# The line above logs the TEXT of any statement over half a second, which is what
+# diagnosing a slow query needs. PostgreSQL also logs that statement's bound
+# PARAMETERS on a `DETAIL:  Parameters:` line, and the default for how much of
+# each one to print is -1, meaning all of it. Every write in this service is a
+# parameterised execute, so `append_post` crossing the threshold would write the
+# private SPACE name, the author's peer id, the post title and the whole 64 KiB
+# body into the container log — a second copy of private content, outside row
+# level security, outside the encrypted backup repository, in the clear on the
+# host, and read out verbatim by the first command in runbooks/restore.md.
+#
+# Zero drops every parameter value and keeps the statement text. The second
+# setting is the same rule for the statement that FAILED; it already defaults to
+# zero, and it is written down so a future default cannot change it quietly.
+log_parameter_max_length = 0
+log_parameter_max_length_on_error = 0
+
+# And an ERROR's DETAIL, which neither setting above governs. A row a CHECK refuses
+# is logged as `DETAIL:  Failing row contains (...)` — the whole row, whatever the
+# statement's parameters were — and a tested 400 reaches exactly that, so a refused
+# post would put its own title, body, author and SPACE into this log, and a refused
+# control call a third party's peer id, through `RAISE ... USING DETAIL`. Terse
+# drops DETAIL, HINT, QUERY and CONTEXT from the LOG only: the service still
+# receives every one of them, so the error map and every refusal an agent reads
+# are unchanged. What an operator gives up is context the service's own exception
+# log already names by code.
+log_error_verbosity = terse
+log_checkpoints = on
+log_autovacuum_min_duration = 1s
+track_io_timing = on
+jit = off                       # every query here is a short indexed read;
+                                # compiling them costs more than it saves
+
+default_text_search_config = 'pg_catalog.simple'

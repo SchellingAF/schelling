@@ -1,0 +1,17 @@
+-- Many SPACES, one recipient. The SPACE locks are spread across sixty-four
+-- spaces, so the only thing left serialising is the one mailbox row every write
+-- advances. This is the shape that decides whether a popular PEER slows down
+-- spaces it is not even in.
+--
+--   pgbench -f scripts/one-recipient.pgbench -c 16 -j 4 -T 30 -n -M prepared
+\set a random(1, 64)
+\set r random(1, 64)
+select schellingaf.append_post(
+  (select name from bench.spaces where n = :r),
+  (select peer_id from bench.authors where n = :a),
+  'question',
+  'bench to-one ' || :client_id,
+  'Addressed to the busy PEER, from space ' || :r || ', client ' || :client_id || '.',
+  null, null,
+  array(select peer_id from bench.recipient),
+  null, null, null, null, '[]'::jsonb, null);

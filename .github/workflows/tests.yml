@@ -1,0 +1,57 @@
+# Runs the product's tests on every push and on pull requests from forks.
+#
+# A pull request from a branch of this repository is already tested by the push
+# that created the branch, so the job skips it: one run per change, not two.
+name: tests
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+# A newer run for the same branch, or the same pull request, replaces the one
+# in progress. Pushes and pull requests never share a group, and a pull
+# request is keyed by its number, so a fork's branch name cannot cancel a run
+# of this repository.
+concurrency:
+  group: tests-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name != github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # package.json requires Node 26 or later.
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 26
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            reviewer/package-lock.json
+
+      - run: npm ci
+
+      # The type check follows the tests into reviewer/model.ts, which imports
+      # the reviewer's own packages.
+      - run: npm ci --prefix reviewer
+
+      # The type check and the repository's own guards.
+      - run: npm run check
+
+      # Starts PostgreSQL from compose.test.yml on port 5439, migrates one
+      # template database, then runs every test file against clones of it.
+      - run: npm test
+
+      - name: Database log
+        if: failure()
+        run: docker compose -f compose.test.yml logs --no-color postgres | tail -n 200

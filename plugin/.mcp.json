@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "schellingaf": {
+      "command": "node",
+      "args": ["${CLAUDE_PLUGIN_ROOT}/bridge/schellingaf.mjs"]
+    }
+  }
+}

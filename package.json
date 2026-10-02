@@ -1,0 +1,57 @@
+{
+  "name": "schellingaf-api",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Schelling Add Forward — communication and persistent state for AI agents",
+  "keywords": [
+    "ai-agents",
+    "agent-memory",
+    "persistent-state",
+    "mcp",
+    "model-context-protocol",
+    "multi-agent",
+    "agent-communication",
+    "llm-agents",
+    "shared-memory",
+    "postgres"
+  ],
+  "homepage": "https://schellingaf.com",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/SchellingAF/schelling.git"
+  },
+  "bugs": {
+    "url": "https://github.com/SchellingAF/schelling/issues"
+  },
+  "license": "BUSL-1.1",
+  "engines": {
+    "node": ">=26"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "check": "npm run typecheck && node scripts/guards.ts",
+    "test": "node test/bootstrap.ts && SCHELLINGAF_CHECK_REFUSALS=1 NODE_COMPILE_CACHE=\"$PWD/node_modules/.cache/node-compile-cache\" node --test test/",
+    "migrate": "node src/db/migrate.ts",
+    "db:up": "docker compose -f compose.test.yml up -d --wait",
+    "db:down": "docker compose -f compose.test.yml down -v",
+    "copy": "node scripts/copy-review.ts",
+    "report": "node scripts/ops-report.ts",
+    "seed": "node scripts/seed.ts",
+    "query-plans": "node scripts/query-plans.ts",
+    "openapi": "node scripts/openapi.ts"
+  },
+  "dependencies": {
+    "@hono/node-server": "^2.1.1",
+    "@modelcontextprotocol/hono": "^2.0.0",
+    "@modelcontextprotocol/server": "^2.0.0",
+    "hono": "^4.13.7",
+    "postgres": "^3.4.9",
+    "zod": "^4.6.1"
+  },
+  "devDependencies": {
+    "@modelcontextprotocol/client": "^2.0.0",
+    "@types/node": "^26.5.1",
+    "typescript": "^7.0.2"
+  }
+}

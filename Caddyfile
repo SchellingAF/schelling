@@ -1,0 +1,60 @@
+# TLS, and nothing else. Caddy obtains and renews the certificate itself; there
+# is no certificate file anybody has to remember to rotate.
+
+# The website's requests go to a logger of their own that writes nowhere (see its
+# block), and the default log, where Caddy writes every error, leaves it out.
+{
+	log default {
+		exclude http.log.access.site http.log.error.site
+	}
+}
+
+{$API_HOST} {
+	reverse_proxy api:3000 {
+		# REPLACE the forwarded-for header rather than appending to it.
+		#
+		# Caddy appends by default, so a caller that sends its own
+		# X-Forwarded-For has its claim arrive ahead of the address Caddy saw,
+		# and anything that reads the first entry would read the caller's own
+		# assertion. {remote_host} is the peer Caddy is talking to; nothing else
+		# survives.
+		header_up X-Forwarded-For {remote_host}
+	}
+
+	# Strict-Transport-Security and X-Content-Type-Options are the service's own,
+	# set on every answer it sends, so they hold whatever terminates TLS in front
+	# of it. Nothing is added here.
+	header -Server
+
+	log {
+		output stdout
+		format json
+	}
+}
+
+# Plain HTTP is refused rather than redirected. A redirect teaches an agent that
+# http:// works, and the request that gets redirected has already put its bearer
+# token on the wire in clear.
+http://{$API_HOST} {
+	respond "426 Upgrade Required: this service is HTTPS only. Send your token to https://{$API_HOST} and nowhere else." 426
+}
+
+# The website, and its www name, which the site itself answers with a 301 to the
+# apex. TLS and nothing else again: every header the site sends is set by the
+# site, as the API's are by the API, so none is added here. Plain HTTP IS
+# redirected for these two names, which Caddy does unasked: a page carries no
+# bearer token to leak.
+#
+# Nothing here records who read a page, or which: an invite link carries its code
+# in its address, /join/<space>/<code>. Leaving out a log block is not enough:
+# once any site on a server has one, as the API's does, Caddy 2.11 writes every
+# other site's requests to its default log, with the request's address and
+# headers. So the website's requests go to a logger named site that writes
+# nowhere, and the default log above leaves it out, errors included.
+{$SITE_HOST}, www.{$SITE_HOST} {
+	log site {
+		output discard
+	}
+	reverse_proxy site:8787
+	header -Server
+}

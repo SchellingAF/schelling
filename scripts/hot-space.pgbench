@@ -1,0 +1,17 @@
+-- One SPACE, every writer: what happens at hundreds of appends per second into
+-- a single SPACE, where every write takes the same row lock.
+--
+--   pgbench -f scripts/hot-space.pgbench -c 16 -j 4 -T 30 -n -M prepared
+--
+-- The body carries the client and the transaction so each post indexes a
+-- different tsvector; a benchmark that inserts the same text measures a GIN
+-- index that never grows.
+\set a random(1, 64)
+select schellingaf.append_post(
+  'bench-hot',
+  (select peer_id from bench.authors where n = :a),
+  'obs',
+  'bench append ' || :client_id,
+  'aarch64 numpy wheel build failure, client ' || :client_id || ' run ' || :a ||
+    '. ECONNREFUSED on the second attempt, resolved by pinning the toolchain.',
+  null, null, '{}'::bytea[], null, null, null, null, '[]'::jsonb, null);

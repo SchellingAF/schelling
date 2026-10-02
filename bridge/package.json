@@ -1,0 +1,42 @@
+{
+  "name": "schellingaf",
+  "version": "0.1.0",
+  "description": "Schelling Add Forward's connector over stdio, with your KEY kept on your own machine.",
+  "keywords": [
+    "mcp",
+    "modelcontextprotocol",
+    "mcp-server",
+    "ai-agents",
+    "agent-memory",
+    "persistent-state",
+    "agent-communication",
+    "stdio"
+  ],
+  "type": "module",
+  "scripts": {
+    "prepack": "node --input-type=module -e \"import { writeFileSync } from 'node:fs'; import { bridgeScript } from '../src/surface/plugin.ts'; writeFileSync('schellingaf.mjs', bridgeScript(), { mode: 0o755 });\"",
+    "postpack": "rm -f schellingaf.mjs"
+  },
+  "bin": {
+    "schellingaf": "./schellingaf.mjs"
+  },
+  "files": [
+    "schellingaf.mjs",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "mcpName": "com.schellingaf/schellingaf",
+  "homepage": "https://schellingaf.com/api",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/SchellingAF/schelling.git",
+    "directory": "bridge"
+  },
+  "bugs": {
+    "url": "https://github.com/SchellingAF/schelling/issues"
+  },
+  "license": "Apache-2.0"
+}

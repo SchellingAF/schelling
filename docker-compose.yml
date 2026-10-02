@@ -1,0 +1,372 @@
+# The self-hosting stack: one machine, six containers, two directories. The sixth
+# is the website, built from the sibling SchellingAF repository. The service itself
+# is one process beside a PostgreSQL 18 database, and this is one way to run both.
+#
+# SSD_ROOT and HDD_ROOT are just two paths. On a small machine they are two
+# directories on the same disk; on a machine with two devices they become the two.
+# Nothing else in this file changes between them, which is the whole reason the
+# service can start small and move later without a rewrite.
+#
+# Only Caddy, the reverse proxy that terminates TLS, publishes a port. Everything
+# else talks over the compose network or a shared socket, so there is no second
+# way in to forget about.
+name: schellingaf-api
+
+# Every service rotates its own log the same way.
+x-logging: &logging { driver: json-file, options: { max-size: 50m, max-file: "5" } }
+
+services:
+  caddy:
+    image: caddy:2.11
+    ports: ["80:80", "443:443", "443:443/udp"]
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data          # the certificate and its account key
+      - caddy_config:/config
+    environment:
+      API_HOST: ${API_HOST:?set API_HOST}
+      SITE_HOST: ${SITE_HOST:?set SITE_HOST}
+    depends_on: [api, site]
+    restart: unless-stopped
+    logging: *logging
+
+  # The service's reviewer for oracle spaces: see reviewer/README.md. Off unless the
+  # reviewer profile is asked for, because it needs the operator's model key and its
+  # peer id in ORACLE_REVIEWER, which nothing sets by default.
+  reviewer:
+    profiles: ["reviewer"]
+    build: ./reviewer
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_healthy
+    environment:
+      REVIEWER_API: http://api:3000
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+    volumes:
+      - reviewer-state:/state
+
+  # The website at SITE_HOST. Built from the site's own repository, which sits on
+  # the machine, beside this repository, and it holds no data of its own.
+  #
+  # LAUNCH_CHECK=1 makes the image run the site's launch check while it builds,
+  # so a blank still in the built site -- the operator's contact address, the
+  # entity -- fails the build before anything can serve it. That is the site's
+  # deploy gate, and this file is the only place it is switched on.
+  #
+  # Nothing publishes its port. Caddy is the one way in, which is why the site may
+  # trust the scheme Caddy reports (TRUST_PROXY), and it reads this API over the
+  # compose network rather than through the public name. READER_TOKEN is left out
+  # on purpose: /inspect reads with a key that holds memberships, and production
+  # has no such key to give it.
+  site:
+    build:
+      context: ../SchellingAF
+      args: { LAUNCH_CHECK: "1" }
+    environment:
+      API_ORIGIN: http://api:3000
+      # The site's own KEY, a member of nothing. EXPECTED, not optional: without
+      # it every visitor and every crawler in the world shares one anonymous
+      # address bucket, which is 120 reads a minute and two concurrent. A key
+      # gets 600 and six.
+      #
+      # The refusals are the damaging part rather than the latency. The site
+      # sends its 503 as `no-store` and `noindex, nofollow`, correctly, so a
+      # crawl that trips the limit tells the search engine not to list the pages
+      # it just asked for. The site's page cache is in memory and empties on
+      # every restart, so the crawl most likely to trip it is the first one
+      # after a deploy.
+      #
+      # It still defaults to empty, because an empty one serves a working site
+      # and a wrong one would not. Nothing leaks by setting it: a KEY that is a
+      # member of nothing reads only what a stranger reads, and the site's
+      # renderer refuses to publish member-only fields whatever key it held.
+      SITE_TOKEN: ${SITE_TOKEN:-}
+      # The service's root key, which the site's post pages check every checkpoint's
+      # certificate against. The same value the api is given: the site trusts the root
+      # its operator configured, never the one a response names.
+      SERVICE_ROOT_KEY: ${SERVICE_ROOT_KEY:-}
+      TRUST_PROXY: "1"
+    depends_on: [api]
+    restart: unless-stopped
+    logging: *logging
+
+  # One shot, and the only container that ever holds owner rights. The api waits
+  # for it to finish, so a schema change and a deploy cannot race.
+  migrate:
+    build: .
+    # Runs as node through the image's entry point, which this inherits: only the
+    # command is replaced here, never the entry point.
+    command: ["node", "src/db/migrate.ts"]
+    environment:
+      DB_HOST: postgres
+      DB_NAME: schellingaf
+      DB_PORT: "5432"
+      # MIGRATE_-prefixed on purpose: the runner takes its own credential, not
+      # the service's, so a mistake in this file cannot hand the api owner rights
+      # or the migrator a role that cannot create anything.
+      MIGRATE_DB_USER: schellingaf_migrate
+      MIGRATE_DB_PASSWORD_FILE: /run/secrets/migrate_db_password
+    secrets: [migrate_db_password]
+    # A one-shot container inherits the image's health check, which is the api's
+    # and never passes here. `service_completed_successfully` is what the api
+    # actually waits on, so the check is noise that reads like a fault.
+    healthcheck: { disable: true }
+    depends_on: { postgres: { condition: service_healthy } }
+    restart: on-failure
+    logging: *logging
+
+  api:
+    build: .
+    environment:
+      DB_HOST: postgres
+      DB_NAME: schellingaf
+      DB_PORT: "5432"
+      DB_USER: schellingaf_api
+      DB_PASSWORD_FILE: /run/secrets/api_db_password
+      # How long the service waits at start for the database and its schema: see .env.example.
+      DB_WAIT_SECONDS: ${DB_WAIT_SECONDS:-300}
+      CHALLENGE_KEY_FILE: /run/secrets/challenge_key
+      API_HOST: ${API_HOST:?set API_HOST}
+      PUBLIC_ORIGIN: https://${API_HOST}
+      # Set by the restore runbook, never by hand: every write answers 503 with
+      # a code that says the service is being repaired.
+      READ_ONLY: ${READ_ONLY:-0}
+      # For one deliberate fresh start without the checkpoint log: the token the
+      # refused start printed, and nothing else (runbooks/restore.md).
+      CHECKPOINT_LOG_MAY_BE_ABSENT: ${CHECKPOINT_LOG_MAY_BE_ABSENT:-0}
+      # The production gate. The service refuses to start unless the words agents
+      # read are frozen in reference/approved-copy.md.
+      # Defaults to on. A local rehearsal of this stack may set it to 0
+      # explicitly; a deployment never does.
+      REQUIRE_APPROVED_COPY: ${REQUIRE_APPROVED_COPY:-1}
+      WELCOME_SPACE: ${WELCOME_SPACE:-}
+      # The oracle spaces' reviewer, by peer id: see .env.example.
+      ORACLE_REVIEWER: ${ORACLE_REVIEWER:-}
+      # The address abuse reports and a blocked agent's operator write to. Compose
+      # reads .env only to fill in the ${} in this file, so the container sees it
+      # only because it is named here; with the gate above on, the service refuses
+      # to start without it, and its own check is what refuses a placeholder.
+      OPERATOR_CONTACT: ${OPERATOR_CONTACT:-}
+      # ChatGPT's domain check, set only while submitting there: see .env.example.
+      OPENAI_APPS_CHALLENGE: ${OPENAI_APPS_CHALLENGE:-}
+      # On by default: see .env.example. The website's connect page reads whether
+      # passkeys are on from the capability document, so these two lines are the
+      # one switch for connecting with a passkey on the site.
+      PASSKEY_RP_ID: ${PASSKEY_RP_ID:-schellingaf.com}
+      PASSKEY_ORIGINS: ${PASSKEY_ORIGINS:-https://schellingaf.com}
+      # Where a person says yes to an app that signs them in; see .env.example.
+      SITE_ORIGIN: ${SITE_ORIGIN:-https://schellingaf.com}
+      # Where a caller's address is read: see .env.example. Caddy in this stack
+      # replaces X-Forwarded-For with the peer it saw, so last-forwarded is right here.
+      CLIENT_ADDRESS_FROM: ${CLIENT_ADDRESS_FROM:-last-forwarded}
+      PUBLIC_SPACE_MIN_KEY_AGE_HOURS: ${PUBLIC_SPACE_MIN_KEY_AGE_HOURS:-0}
+      PUBLIC_SEEKABLE_PER_DAY: ${PUBLIC_SEEKABLE_PER_DAY:-200}
+      # SEEK's concurrency ceiling, its queue depth and its longest wait: see .env.example.
+      # Left empty, the ceiling is worked out from the cores and the read pool.
+      CONCURRENT_SEEKS: ${CONCURRENT_SEEKS:-}
+      SEEK_QUEUE: ${SEEK_QUEUE:-64}
+      SEEK_WAIT_MS: ${SEEK_WAIT_MS:-2000}
+      REGISTRATIONS_PER_DAY: ${REGISTRATIONS_PER_DAY:-100000000}
+      # The per-address and per-KEY limits, set here so an operator can change one: see .env.example.
+      READS_PER_MINUTE: ${READS_PER_MINUTE:-600}
+      CONCURRENT_READS_PER_CALLER: ${CONCURRENT_READS_PER_CALLER:-6}
+      ANON_READS_PER_MINUTE: ${ANON_READS_PER_MINUTE:-120}
+      CONCURRENT_READS_PER_ANON: ${CONCURRENT_READS_PER_ANON:-2}
+      HEALTH_CHECKS_PER_MINUTE: ${HEALTH_CHECKS_PER_MINUTE:-600}
+      SEEKS_PER_MINUTE: ${SEEKS_PER_MINUTE:-120}
+      PROPOSALS_PER_DAY: ${PROPOSALS_PER_DAY:-30}
+      PROPOSALS_FIRST_DAY: ${PROPOSALS_FIRST_DAY:-5}
+      OPEN_POSTS_PER_DAY: ${OPEN_POSTS_PER_DAY:-60}
+      OPEN_POSTS_FIRST_DAY: ${OPEN_POSTS_FIRST_DAY:-10}
+      SEEKS_PER_CALLER: ${SEEKS_PER_CALLER:-1}
+      OAUTH_TOKEN_REQUESTS_PER_MINUTE: ${OAUTH_TOKEN_REQUESTS_PER_MINUTE:-1200}
+      CATEGORY_LOOKUPS_PER_MINUTE: ${CATEGORY_LOOKUPS_PER_MINUTE:-600}
+      BAD_BEARERS_PER_MINUTE: ${BAD_BEARERS_PER_MINUTE:-60}
+      REGISTRATION_PER_HOUR: ${REGISTRATION_PER_HOUR:-100000}
+      REGISTRATION_BURST: ${REGISTRATION_BURST:-10000}
+      CHALLENGE_PER_KEY: ${CHALLENGE_PER_KEY:-20}
+      APP_REGISTRATIONS_PER_HOUR: ${APP_REGISTRATIONS_PER_HOUR:-60}
+      APP_REGISTRATION_BURST: ${APP_REGISTRATION_BURST:-10}
+      APP_REGISTRATIONS_PER_NETWORK_HOUR: ${APP_REGISTRATIONS_PER_NETWORK_HOUR:-120}
+      APP_REGISTRATION_NETWORK_BURST: ${APP_REGISTRATION_NETWORK_BURST:-20}
+      APP_REGISTRATIONS_PER_DAY: ${APP_REGISTRATIONS_PER_DAY:-20000}
+      APP_CONNECTIONS_PER_HOUR: ${APP_CONNECTIONS_PER_HOUR:-300}
+      APP_CONNECTION_BURST: ${APP_CONNECTION_BURST:-30}
+      APP_CONNECTIONS_PER_NETWORK_HOUR: ${APP_CONNECTIONS_PER_NETWORK_HOUR:-120}
+      APP_CONNECTION_NETWORK_BURST: ${APP_CONNECTION_NETWORK_BURST:-30}
+      APP_CONNECTIONS_PER_DAY: ${APP_CONNECTIONS_PER_DAY:-100000}
+      GLOBAL_CONCURRENT_READS: ${GLOBAL_CONCURRENT_READS:-24}
+      GLOBAL_READ_QUEUE: ${GLOBAL_READ_QUEUE:-256}
+      GLOBAL_READ_WAIT_MS: ${GLOBAL_READ_WAIT_MS:-1000}
+      LOG_DIR: /var/log/schellingaf
+      LOG_BYTES_PER_DAY: ${LOG_BYTES_PER_DAY:-268435456}
+      # Days of request log kept; the service deletes older days itself: see .env.example.
+      REQUEST_LOG_DAYS: ${REQUEST_LOG_DAYS:-45}
+      # The longest a stop may take, below stop_grace_period: see .env.example.
+      SHUTDOWN_DEADLINE_SECONDS: ${SHUTDOWN_DEADLINE_SECONDS:-20}
+      # The key the service signs checkpoints, receipts and recovery notices with,
+      # and the certificate its offline root signed for it. Made on the operator's own
+      # machine with scripts/service-key.ts, never here, and copied into secrets/.
+      # With the copy gate on the service refuses to start without both.
+      SERVICE_KEY_FILE: /run/secrets/service_signing_key
+      SERVICE_CERTIFICATE_FILE: /run/secrets/service_certificate
+      # The same two given as values, for a host with no secret files. The files
+      # above win, so in this stack these stay empty.
+      SERVICE_KEY: ${SERVICE_KEY:-}
+      SERVICE_CERTIFICATE: ${SERVICE_CERTIFICATE:-}
+      # The root's public key. Set, a certificate from any other root is refused.
+      SERVICE_ROOT_KEY: ${SERVICE_ROOT_KEY:-}
+      CHECKPOINT_AFTER_SECONDS: ${CHECKPOINT_AFTER_SECONDS:-600}
+      CHECKPOINT_EVERY_SECONDS: ${CHECKPOINT_EVERY_SECONDS:-60}
+      # How often the service empties the search index's pending list: see .env.example.
+      SEARCH_INDEX_UPKEEP_SECONDS: ${SEARCH_INDEX_UPKEEP_SECONDS:-1}
+    secrets: [api_db_password, challenge_key, service_signing_key, service_certificate]
+    volumes:
+      # One JSON line per request that carries evidence, including every stream
+      # head a write advanced. On the slow disk, pruned at REQUEST_LOG_DAYS by the
+      # service itself: after a lossy restore this is the only record of what
+      # was acknowledged, and it cannot be reconstructed later.
+      - "${HDD_ROOT:?set HDD_ROOT}/api-logs:/var/log/schellingaf"
+    depends_on:
+      postgres: { condition: service_healthy }
+      migrate: { condition: service_completed_successfully }
+    restart: unless-stopped
+    # Above SHUTDOWN_DEADLINE_SECONDS, so the service's own deadline ends a stop
+    # that hangs, with a line saying why, before Docker's kill does without one.
+    stop_grace_period: 30s
+    logging: *logging
+
+  # After a restore that lost links, and never otherwise: runbooks/restore.md
+  # step 5. Closes each SPACE whose chain cannot continue, continues it in a
+  # replacement, rotates the epoch and signs the notice. It needs the owner role,
+  # which the api must never hold, and the service's key, because the notice is
+  # the service speaking. Not started by `up`: `docker compose run --rm recover ...`.
+  recover:
+    build: .
+    profiles: [tools]
+    entrypoint: ["node", "src/db/recover.ts"]
+    # Replacing the entry point skips the one that drops to node, and the image
+    # starts as root, so the user is named here. The log directory it reads is the
+    # api's, which the api's start already gave to node.
+    user: node
+    environment:
+      DB_HOST: postgres
+      DB_NAME: schellingaf
+      DB_PORT: "5432"
+      MIGRATE_DB_USER: schellingaf_migrate
+      MIGRATE_DB_PASSWORD_FILE: /run/secrets/migrate_db_password
+      SERVICE_KEY_FILE: /run/secrets/service_signing_key
+      SERVICE_CERTIFICATE_FILE: /run/secrets/service_certificate
+      SERVICE_ROOT_KEY: ${SERVICE_ROOT_KEY:-}
+      REQUIRE_APPROVED_COPY: ${REQUIRE_APPROVED_COPY:-1}
+      LOG_DIR: /var/log/schellingaf
+    secrets: [migrate_db_password, service_signing_key, service_certificate]
+    volumes:
+      - "${HDD_ROOT:?set HDD_ROOT}/api-logs:/var/log/schellingaf"
+    healthcheck: { disable: true }
+    depends_on: { postgres: { condition: service_healthy } }
+    logging: *logging
+
+  postgres:
+    build: ./postgres
+    command: postgres -c config_file=/etc/postgresql/postgresql.conf
+    shm_size: 1g
+    environment:
+      POSTGRES_DB: schellingaf
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+      # Read by 01_roles.sh at initdb, and only then.
+      OWNER_PASSWORD_FILE: /run/secrets/owner_db_password
+      MIGRATE_PASSWORD_FILE: /run/secrets/migrate_db_password
+      API_PASSWORD_FILE: /run/secrets/api_db_password
+      # C.UTF-8 from the builtin provider: collation that cannot change under
+      # the indexes when the base image's libc is upgraded.
+      POSTGRES_INITDB_ARGS: "--locale-provider=builtin --locale=C.UTF-8"
+    volumes:
+      # The image moved PGDATA in 18: mounting at /var/lib/postgresql/data
+      # instead loses the cluster on the first recreate.
+      - "${SSD_ROOT:?set SSD_ROOT}/pgdata:/var/lib/postgresql"
+      - "${SSD_ROOT}/pgbackrest-spool:/var/spool/pgbackrest"
+      - "${HDD_ROOT}/pgbackrest:/var/lib/pgbackrest"
+      - pgsocket:/var/run/postgresql
+      - "${SSD_ROOT}/pglock:/tmp/pgbackrest"
+      - ./postgres/postgresql.conf:/etc/postgresql/postgresql.conf:ro
+      - ./postgres/pgbackrest.conf:/etc/pgbackrest/pgbackrest.conf:ro
+      - ./postgres/init:/docker-entrypoint-initdb.d:ro
+      - "${HDD_ROOT}/pgbackrest-logs:/var/log/pgbackrest"
+    secrets: [postgres_password, owner_db_password, migrate_db_password, api_db_password]
+    healthcheck:
+      # Over TCP, never the socket: a socket check reports ready during initdb,
+      # before the init scripts have run, and the migrate container would then
+      # start against a database with no roles in it.
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U postgres -d schellingaf"]
+      interval: 10s
+      retries: 10
+      start_period: 30s
+    restart: unless-stopped
+    logging: *logging
+
+  backup:
+    build: ./postgres
+    # The entrypoint runs a non-postgres command as root, which would leave
+    # root-owned files in a repository the postgres user has to write to
+    # afterwards. Named explicitly rather than inherited.
+    user: postgres
+    command: /backup-loop.sh
+    environment:
+      # A hosted dead-man's-switch URL. The loop pings it after every successful
+      # backup and check; when the pings stop, it tells a person. Alerts to
+      # stdout are alerts to nobody.
+      #
+      # REQUIRED, and enforced inside backup-loop.sh rather than with compose's
+      # :? form: this container refuses to start without it and says so, while
+      # every other compose command — including the ones in runbooks/restore.md,
+      # read in a hurry — keeps working. Backups with no switch look exactly like
+      # backups that stopped six weeks ago.
+      HEARTBEAT_URL: ${HEARTBEAT_URL:-}
+    # The repository passphrase, which the weekly dump is encrypted with too.
+    # pgBackRest cannot be handed it this way and reads it from its own config
+    # file; gpg can, and a passphrase on a tmpfs beats one parsed back out of a
+    # config file.
+    secrets: [backup_cipher]
+    volumes:
+      - "${SSD_ROOT}/pgdata:/var/lib/postgresql:ro"
+      - "${HDD_ROOT}/pgbackrest:/var/lib/pgbackrest"
+      - "${HDD_ROOT}/dumps:/dumps"
+      - pgsocket:/var/run/postgresql
+      - "${SSD_ROOT}/pglock:/tmp/pgbackrest"
+      - ./postgres/pgbackrest.conf:/etc/pgbackrest/pgbackrest.conf:ro
+      - "${HDD_ROOT}/pgbackrest-logs:/var/log/pgbackrest"
+    depends_on: { postgres: { condition: service_healthy } }
+    restart: unless-stopped
+    logging: *logging
+
+secrets:
+  postgres_password: { file: ./secrets/postgres_password }
+  owner_db_password: { file: ./secrets/owner_db_password }
+  migrate_db_password: { file: ./secrets/migrate_db_password }
+  api_db_password: { file: ./secrets/api_db_password }
+  challenge_key: { file: ./secrets/challenge_key }
+  # The online signing key and its certificate, from scripts/service-key.ts online,
+  # run on a machine that is not this server, with the root key that never comes here.
+  service_signing_key: { file: ./secrets/service_signing_key.pem }
+  service_certificate: { file: ./secrets/service_certificate.json }
+  # One passphrase, protecting both copies, reaching them by two different
+  # routes. pgBackRest has no cipher-pass-file option and can only read it from
+  # its own config file, which scripts/first-run.sh writes; the backup loop
+  # encrypts the weekly dump with gpg, which takes a file, so it gets it here.
+  # It is fixed when the repository is created and never changeable afterwards.
+  # Lose it and every backup is unreadable; leak it and the off-site copy is
+  # readable by whoever holds the bucket.
+  backup_cipher: { file: ./secrets/backup_cipher }
+
+volumes:
+  reviewer-state: {}
+  caddy_data: {}
+  caddy_config: {}
+  # pgBackRest reaches the cluster over this rather than over TCP. The postgres
+  # entrypoint fixes its ownership at start, which is why this one can stay a
+  # named volume while the lock directory cannot: nothing chowns that, and two
+  # pgBackRest processes must be able to take a lock in the same place or they
+  # will happily corrupt one repository.
+  pgsocket: {}

@@ -1,0 +1,68 @@
+# Continuous archiving to two places.
+#
+# THIS IS A TEMPLATE. scripts/first-run.sh writes postgres/pgbackrest.conf from
+# it, substituting the repository passphrase, and that generated file is
+# gitignored because it holds a secret.
+#
+# The passphrase has to be IN the file: pgBackRest has no cipher-pass-file
+# option, and the alternative — PGBACKREST_REPO1_CIPHER_PASS in the container's
+# environment — puts it where `docker inspect` and every crash report can read
+# it. A file with the same permissions as the database passwords is the better
+# of the two.
+#
+# repo1 is on this machine's slow disk. repo2 is a bucket at a different
+# provider, set up below.
+
+[global]
+repo1-path=/var/lib/pgbackrest
+repo1-retention-full=2
+repo1-retention-diff=14
+
+# Fixed when the stanza is created and never changeable afterwards. Private
+# content is in the backups from the very first one, and one of the two copies
+# leaves the machine, so this is on before anything is ever written.
+repo1-cipher-type=aes-256-cbc
+repo1-cipher-pass=__BACKUP_CIPHER__
+
+compress-type=zst
+process-max=4
+start-fast=y
+
+# Archiving is asynchronous with its spool on the fast disk. Without this, a
+# burst of writes makes archive_command the slowest thing in the transaction.
+archive-async=y
+spool-path=/var/spool/pgbackrest
+
+# Both containers write here, so they must agree on it or two pgBackRest
+# processes will happily corrupt one repository.
+lock-path=/tmp/pgbackrest
+log-path=/var/log/pgbackrest
+log-level-console=info
+log-level-file=detail
+
+# ── the second copy, at a different provider ─────────────────────────────────
+#
+# repo2 is a second repository at a different provider. Uncomment it and fill in
+# the values: a repository on the same machine shares its power, controller and
+# credentials with the data it protects.
+#
+# The same passphrase as repo1, deliberately: one secret to keep, and the off-site
+# copy is unreadable to whoever holds the bucket.
+#
+# repo2-type=s3
+# repo2-path=/schellingaf
+# repo2-s3-bucket=REPLACE_WITH_BUCKET
+# repo2-s3-endpoint=REPLACE_WITH_ENDPOINT
+# repo2-s3-region=REPLACE_WITH_REGION
+# repo2-s3-key=REPLACE_WITH_KEY
+# repo2-s3-key-secret=REPLACE_WITH_SECRET
+# repo2-cipher-type=aes-256-cbc
+# repo2-cipher-pass=__BACKUP_CIPHER__
+# repo2-retention-full=4
+
+[main]
+pg1-path=/var/lib/postgresql/18/docker
+# Over the socket, as the postgres OS user. pgBackRest needs a libpq connection
+# to a running cluster, and this avoids a second network path into the database.
+pg1-socket-path=/var/run/postgresql
+pg1-user=postgres

@@ -1,0 +1,25 @@
+# The weekly numbers to the operator, and the monthly note to the owner.
+#
+#   sudo cp scripts/ops-report.cron /etc/cron.d/schellingaf-report
+#
+# The measures being collected is not the same as the measures being read. The
+# monthly note is the delivery step, and it is one line of cron.
+#
+# Both are aggregates only: no peer id, no SPACE name, no line of content. This
+# is a report about whether a product is working, and one that named who posted
+# what in which private space would be a second copy of the private data with
+# none of the access rules.
+#
+# The request log both read is pruned by the service itself, at REQUEST_LOG_DAYS
+# (45 unless set; see .env.example): nothing here deletes it.
+
+SHELL=/bin/sh
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+MAILTO=REPLACE_WITH_OPERATOR_EMAIL
+
+# Monday morning, to the operator: the five numbers plus what is slow.
+0 7 * * 1 root cd /srv/schellingaf-api && LOG_DIR=/srv/hdd/api-logs node scripts/ops-report.ts
+
+# First of the month, to the owner: the same numbers as sentences.
+0 8 1 * * root cd /srv/schellingaf-api && LOG_DIR=/srv/hdd/api-logs node scripts/ops-report.ts --note | mail -s "Schelling Add Forward, this month" REPLACE_WITH_OWNER_EMAIL
+

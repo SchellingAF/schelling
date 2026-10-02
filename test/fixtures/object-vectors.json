@@ -1,0 +1,32 @@
+{
+  "about": "A signed post object and its first link, from the published test seed in protocol-v1-vectors.json. Written by scripts/object-vectors.ts; checked by test/objects.test.ts and, with OpenSSL and Python, by scripts/second-signer.sh.",
+  "test_only": true,
+  "public_key_hex": "03a107bff3ce10be1d70dd18e74bc09967e4d6309ba50d5f1ddc8664125531b8",
+  "author_id": "e89af24c6f6ab546c38b9df66c5bf52aaf3300be990d6404be769c67651b3605",
+  "space_id": "0199aaaa-bbbb-7ccc-8ddd-eeeeeeeeeeee",
+  "object": {
+    "canonical_utf8": "{\"author_id\":\"e89af24c6f6ab546c38b9df66c5bf52aaf3300be990d6404be769c67651b3605\",\"body\":\"Reproduced on linux, twice.\\nCommand and output follow.\",\"fingerprints\":[{\"scheme\":\"git.commit\",\"value\":\"b75e527ac4f1e0c2d8a3\"},{\"scheme\":\"task.reference\",\"value\":\"vector\"}],\"idempotency_key\":\"vector-1\",\"kind\":\"result\",\"private_digest\":\"5914ec923f9a2d147ef25669e16f60c1e4e4b9d2d4dc4255ca232ef3cbb6db3a\",\"space_id\":\"0199aaaa-bbbb-7ccc-8ddd-eeeeeeeeeeee\",\"title\":\"Build passes\",\"v\":1}",
+    "private_utf8": "{\"data\":{\"x_attempts\":2,\"x_platform\":\"linux\"},\"salt\":\"00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff\"}",
+    "private_digest": "5914ec923f9a2d147ef25669e16f60c1e4e4b9d2d4dc4255ca232ef3cbb6db3a",
+    "object_id": "51c21fd093a3da9e9892ec80b673726abd2c4a17bb617c8a5069cd10e3495d95",
+    "signature_preimage_hex": "6167656e742d73746174653a6f626a6563742d7369676e61747572653a76310051c21fd093a3da9e9892ec80b673726abd2c4a17bb617c8a5069cd10e3495d95",
+    "ed25519_signature_hex": "d048268b904ba34fc607775a399bcc358005c40155717bd70d59eadc2d80c6b9bf8684aacb944f3198905716854a0cf3639a56dd8b986a86fb5725b65702f403",
+    "passkey_challenge_hex": "e63fa62d3727d3c0c1cea8dba677d6a5913cbc59009fa40daa8623b970cd2072"
+  },
+  "control": {
+    "canonical_utf8": "{\"actor\":\"e89af24c6f6ab546c38b9df66c5bf52aaf3300be990d6404be769c67651b3605\",\"event\":\"space.created\",\"payload\":{\"description\":\"\",\"join_policy\":\"invite\",\"owner\":\"e89af24c6f6ab546c38b9df66c5bf52aaf3300be990d6404be769c67651b3605\",\"signed_only\":true,\"title\":\"Vectors\",\"visibility\":\"public\"},\"revision\":\"1\",\"space_id\":\"0199aaaa-bbbb-7ccc-8ddd-eeeeeeeeeeee\",\"v\":1}",
+    "command_id": "fbac86c2d6f2e925ecf4d551241692a1264636fca04f8674430749ff8dbc9c55",
+    "genesis_hash": "8980709e4c6236bdb30b594d4027c5c90a66cd589fb150ece313b3f3c6b13b73",
+    "chain_hash": "f3309ec78542ae16cc25ae3dd275d7683813eae3c4bb4316cf1df5ca7fcc21f0"
+  },
+  "chain": {
+    "seq": "1",
+    "admitted_revision": "1",
+    "admission": "3a0e4f14d1d1e4da1cf009b27cc7750cecafd0318cdf3801c5e10a8e14e9ea83",
+    "genesis_hash": "94b69e0bde5b9b09f296b42bd34dd9b952186038f71c96a25a21e89d1960be31",
+    "chain_hash": "a0eb24acee05fda4e70bdee8911952e8736b4c31922d236897baa7a07705a6c4"
+  },
+  "checkpoint_leaf": "73164f5b23c32f4b953f917ee3c5b7fe8de766615c7ff3f8dd1690cb9ff187bb",
+  "merkle_root_one_leaf": "73164f5b23c32f4b953f917ee3c5b7fe8de766615c7ff3f8dd1690cb9ff187bb",
+  "merkle_path_one_leaf": []
+}

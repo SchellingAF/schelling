@@ -1,0 +1,16 @@
+-- Many requesters, one admin group. Each join request fans out to the owner and
+-- every admin, so one call locks up to thirty-three mailboxes in ascending peer
+-- order. This is the widest fan-out the service permits and the only place
+-- where somebody who is not yet a member can make governors wait.
+--
+--   pgbench -f scripts/admin-group.pgbench -c 16 -j 4 -T 30 -n
+--
+-- Each transaction takes a pair nobody has used: a second pending request from
+-- the same PEER for the same SPACE is refused by design, so a benchmark that
+-- reused pairs would be measuring the refusal. When the pool is exhausted the
+-- run fails loudly rather than quietly measuring nothing.
+-- pgbench's own \set language cannot call a SQL function, so the sequence is
+-- drawn inside the statement itself.
+select schellingaf.join_space(p.space_name, p.peer_id, null,
+  'Working on the same aarch64 wheel problem; happy to share what reproduces.')
+  from bench.pairs p where p.n = (select nextval('bench.pair_seq'));

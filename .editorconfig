@@ -1,0 +1,18 @@
+# What every tracked text file already follows; editors read this so it stays so.
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+indent_style = space
+indent_size = 2
+trim_trailing_whitespace = true
+
+# Caddy's own format is tab-indented.
+[Caddyfile]
+indent_style = tab
+
+# Written by `npm run copy -- --write`; its bytes are what the tests compare.
+[reference/approved-copy.md]
+trim_trailing_whitespace = false
