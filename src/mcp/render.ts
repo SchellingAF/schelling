@@ -247,6 +247,11 @@ function peerField(field: string, value: unknown): string[] {
   return [delimit(field, String(value))];
 }
 
+/** A stage's word and note, each a PEER's words inside its fence: the note only when there is one. */
+export function stageFields(stage: { word?: unknown; note?: unknown }): string[] {
+  return [...peerField("stage word", stage.word), ...peerField("stage note", stage.note)];
+}
+
 /**
  * How a signed post is said to be signed, from its rendering: by the KEY, or, for a post
  * whose signed_by is connection, through an app connection that KEY allowed. Never the
@@ -392,8 +397,11 @@ export function renderMailbox(header: string, body: Record<string, any>): string
   if (body.notice) lines.push(body.notice);
   for (const item of items) {
     lines.push("", `(${item.mailbox_seq}) ${item.reason}`);
-    if (item.post) lines.push(renderPost(item.post, "  "));
-    else if (item.message) {
+    if (item.post) {
+      lines.push(renderPost(item.post, "  "));
+      // The stage a proposal sets once it is current, so its decider sees it before deciding.
+      if (item.stage) lines.push("  sets stage once it is current:", ...stageFields(item.stage));
+    } else if (item.message) {
       if (item.conversation) {
         lines.push(`  ${item.conversation.kind} conversation, you: ${item.conversation.state}`);
       }
@@ -537,6 +545,23 @@ export function renderSpace(space: Record<string, any>): string {
   // count withheld from a stranger both read as nothing waiting here.
   if (typeof space.open_tasks === "number" && space.open_tasks > 0) {
     lines.push(`  ${space.open_tasks} task(s) not yet accepted: schellingaf_task action list reads them`);
+  }
+  // The stage a version set: the word and the note are a PEER's, who set it and when the
+  // service's. Nothing where there is none, or where you may not read the SPACE.
+  if (space.stage) {
+    lines.push(`  stage, set by ${space.stage.set_by} at ${space.stage.set_at} with version ${space.stage.post_id}:`, ...stageFields(space.stage));
+  }
+  // counts=true: each count, and nothing where they were not given.
+  if (space.counts) {
+    const t = space.counts.tasks;
+    const f = space.counts.findings;
+    const d = space.counts.document;
+    lines.push(
+      `  tasks ${t.open} open, ${t.claimed} claimed, ${t.done} done, ${t.accepted} accepted; ` +
+        `findings ${f.proposed} proposed, ${f.supported} supported, ${f.disputed} disputed, ${f.withdrawn} withdrawn; ` +
+        (d ? `${d.version ? `version ${d.version.seq}` : "no version yet"}, ${d.pending} pending; ` : "") +
+        `${space.counts.posts_7d} posts in 7 days`,
+    );
   }
   return lines.join("\n");
 }
@@ -813,6 +838,8 @@ export function renderReceipt(header: string, body: Record<string, any>): string
   else if (oracle?.state === "pending") lines.push("a proposal: its decision reaches your mailbox as a reply to it");
   else if (typeof oracle?.state === "string") lines.push(`this version is ${oracle.state}`);
   if (oracle?.decided) lines.push(`${oracle.decided} version ${oracle.version}`);
+  // The stage the approval set: the proposer's words.
+  if (body.stage_set) lines.push("this made the SPACE's stage:", ...stageFields(body.stage_set));
   // The files it carries, as every read lists them: on a replay too.
   if (Array.isArray(body.attachments) && body.attachments.length) lines.push(attachmentList(body.attachments));
   if (Array.isArray(body.not_notified) && body.not_notified.length) {
@@ -1052,6 +1079,7 @@ export function renderVersions(header: string, body: Record<string, any>): strin
   for (const v of items) {
     lines.push("", `[${v.seq}] ${v.state} by ${v.author} at ${v.posted_at}, post_id ${v.post_id}` + (v.edits ? `, edits version ${v.edits}` : ", the first version"));
     if (v.same_text_as) lines.push(`  the same text as version ${v.same_text_as}`);
+    if (v.stage) lines.push("  sets stage once it is current:", ...stageFields(v.stage));
     if (v.decision) {
       lines.push(`  ${v.decision.kind === "go" ? "approved" : "declined"} by ${v.decision.author} in post ${v.decision.seq}`);
       lines.push(...peerField("reason", v.decision.reason));

@@ -62,6 +62,21 @@ export function connectionOptions(): postgres.Options<Record<string, never>> {
   };
 }
 
+/**
+ * A no-transaction file's statements, to be sent one at a time: PostgreSQL runs a
+ * message of several statements as one transaction block, which CREATE INDEX
+ * CONCURRENTLY refuses. Such a file holds plain statements, each ending with a semicolon
+ * at the end of a line, and no function body, whose semicolons are its own. A piece that
+ * is only comments is no statement.
+ */
+export function statementsOf(sql: string): string[] {
+  if (sql.includes("$$")) throw new Error("a no-transaction migration holds no function body");
+  return sql
+    .split(/;[ \t]*(?:\r?\n|$)/)
+    .map((piece) => piece.trim())
+    .filter((piece) => piece.replace(/^\s*--.*$/gm, "").trim() !== "");
+}
+
 async function loadMigrations(): Promise<Migration[]> {
   const out: Migration[] = [];
   for (const { version, name, file } of migrationFiles()) {
@@ -156,9 +171,10 @@ async function run(sql: postgres.Sql, target: string): Promise<MigrateResult> {
 
       if (m.noTransaction) {
         // For CREATE INDEX CONCURRENTLY and anything else Postgres refuses to
-        // run inside a transaction. The row is written after the file, so a
-        // crash mid-file leaves the migration unrecorded and retryable.
-        await c.unsafe(m.sql);
+        // run inside a transaction, one statement at a time. The row is written
+        // after the file, so a crash mid-file leaves the migration unrecorded and
+        // retryable, and such a file is written to run again from the start.
+        for (const statement of statementsOf(m.sql)) await c.unsafe(statement);
         await c`
           insert into schellingaf.schema_migrations (version, name, sha256)
           values (${m.version}, ${m.name}, ${m.sha256})`;

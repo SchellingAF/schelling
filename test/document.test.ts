@@ -12,6 +12,10 @@ import { readFileSync } from "node:fs";
 import { inline, parseDocument, replaceSection, sectionText, slug } from "../src/domain/document.ts";
 import { useService, app, db, config, fixture, call, agent, connector, type Agent, type App } from "./lib/service.ts";
 import { createApp } from "../src/http/app.ts";
+import { sign, randomUUID } from "node:crypto";
+import { buildPostObject, signaturePreimageOf } from "../src/domain/objects.ts";
+import { STAGE_HINT } from "../src/domain/voice.ts";
+import { STAGE_LIMITS } from "../src/surface/vocabulary.ts";
 
 const vectors = JSON.parse(readFileSync(new URL("./fixtures/document-vectors.json", import.meta.url), "utf8"));
 
@@ -621,5 +625,235 @@ describe("the connector, the renderings and export", () => {
   test("the capability document says a work space may keep one", async () => {
     const caps = (await (await app.request("/v1/capabilities")).json()) as any;
     assert.match(caps.modules.oracle_spaces.work_space, /^A public or private work space may keep one document as well/);
+  });
+});
+
+// ── a SPACE's stage, set by a version (migrations/0123_space_stages.sql) ────────
+
+describe("a SPACE's stage, set by a version", () => {
+  /** A version that carries data.stage. */
+  function staged(who: Agent, name: string, text: string, stage: unknown, supersedes?: string | null, via: App = app) {
+    return post(who, name, { kind: "version", body: text, data: { stage }, ...(supersedes ? { supersedes } : {}) }, via);
+  }
+  async function stageOf(name: string, who?: Agent) {
+    const out = await call("GET", `/v1/spaces/${name}`, who?.token);
+    assert.equal(out.status, 200, JSON.stringify(out.body));
+    return out.body.stage;
+  }
+  const SHAPE = /^data\.stage is word and note: word is one lowercase word of up to 32 of a-z, 0-9, _, \. and -, starting with a letter or digit; note is optional, one line of up to 200 characters$/;
+
+  test("a malformed data.stage is refused, signed or not, and a well-made one at its limits is not", async () => {
+    const owner = await agent();
+    const name = await workSpace(owner);
+    const malformed: unknown[] = [
+      { note: "no word" },
+      { word: "Merged" },
+      { word: "x".repeat(STAGE_LIMITS.wordCharacters + 1) },
+      { word: "merged", note: "x".repeat(STAGE_LIMITS.noteCharacters + 1) },
+      { word: "merged", note: "two\nlines" },
+      { word: "merged", note: "a separator inside" },
+      { word: "merged", note: "" },
+      { word: "merged", by: "the owner" },
+      { word: "-merged" },
+      { word: "" },
+      "merged",
+      ["merged"],
+      null,
+    ];
+    for (const stage of malformed) {
+      const out = await staged(owner, name, "v1", stage);
+      assert.equal(out.status, 400, `${JSON.stringify(stage)}: ${JSON.stringify(out.body)}`);
+      assert.equal(out.body.error.code, "INVALID_REQUEST");
+      assert.match(out.body.error.detail, SHAPE, `${JSON.stringify(stage)}: ${JSON.stringify(out.body)}`);
+    }
+    // Signed, the same refusal, before anything is spent or written.
+    const space = (await call("GET", `/v1/spaces/${name}`, owner.token)).body;
+    const built = buildPostObject({
+      spaceId: space.space_id, author: owner.peerId, idempotencyKey: `k-${randomUUID()}`, kind: "version",
+      title: null, body: "v1 signed", to: [], replyTo: null, supersedes: null, retracts: null,
+      fingerprints: [], data: { stage: { word: "Merged" } }, budget: null, runId: null,
+    });
+    const signed = await call("POST", `/v1/spaces/${name}/posts`, owner.token, {
+      alg: "ed25519",
+      canonical: built.canonical.toString("base64url"),
+      private: built.private!.toString("base64url"),
+      signature: sign(null, signaturePreimageOf(built.objectId), owner.privateKey).toString("hex"),
+    });
+    assert.equal(signed.status, 400, JSON.stringify(signed.body));
+    assert.match(signed.body.error.detail, SHAPE);
+    assert.equal(await current(name, owner), undefined, "nothing was written");
+
+    const word = "a".repeat(STAGE_LIMITS.wordCharacters);
+    const note = "é".repeat(STAGE_LIMITS.noteCharacters);
+    const ok = await staged(owner, name, "v1", { word, note });
+    assert.equal(ok.status, 201, JSON.stringify(ok.body));
+    assert.deepEqual([(await stageOf(name, owner)).word, (await stageOf(name, owner)).note], [word, note]);
+    const noNote = await staged(owner, name, "v2", { word: "in-progress", note: null }, ok.body.post_id);
+    assert.equal(noNote.status, 201, JSON.stringify(noNote.body));
+    assert.equal((await stageOf(name, owner)).note, null);
+  });
+
+  test("a decider's version sets it at once; a writer's waits, and the go that makes it current sets it in the decider's name", async () => {
+    const owner = await agent();
+    const writer = await agent();
+    const coordinator = await agent();
+    const name = await workSpace(owner, { visibility: "public" });
+    await grant(owner, name, writer, "writer");
+    await grant(owner, name, coordinator, "coordinator");
+    assert.equal(await stageOf(name), null, "no stage before a version sets one");
+
+    const first = await staged(owner, name, "v1", { word: "proposed", note: "First draft." });
+    assert.deepEqual(first.body.oracle, { state: "current" });
+    assert.equal(first.body.stage_set, undefined, "a version is not a go");
+    const set = await stageOf(name);
+    assert.deepEqual({ ...set, set_at: undefined }, {
+      word: "proposed", note: "First draft.", post_id: first.body.post_id, set_by: owner.peerId, set_at: undefined,
+    });
+    assert.ok(!Number.isNaN(Date.parse(set.set_at)));
+
+    const proposal = await staged(writer, name, "v2", { word: "accepted" }, first.body.post_id);
+    assert.deepEqual(proposal.body.oracle, { state: "pending" });
+    assert.equal((await stageOf(name)).word, "proposed", "a pending version sets nothing");
+
+    const go = await post(coordinator, name, { kind: "go", body: "Sourced.", reply_to: proposal.body.post_id });
+    assert.equal(go.status, 201, JSON.stringify(go.body));
+    assert.deepEqual(go.body.stage_set, { word: "accepted", note: null });
+    const now = await stageOf(name);
+    assert.equal(now.word, "accepted");
+    assert.equal(now.post_id, proposal.body.post_id, "post_id leads to the proposer's version");
+    assert.equal(now.set_by, coordinator.peerId, "set_by is the decider, never the proposer");
+    // The list item says the same, with no token.
+    const listed = await call("GET", `/v1/spaces?prefix=${name}`);
+    assert.deepEqual(listed.body.items.map((i: { stage: unknown }) => i.stage), [now]);
+  });
+
+  test("a current version without one leaves the stage, and on any other kind data.stage sets nothing and says so", async () => {
+    const owner = await agent();
+    const writer = await agent();
+    const name = await workSpace(owner);
+    await grant(owner, name, writer, "writer");
+    const first = await staged(owner, name, "v1", { word: "proposed" });
+    const second = await version(owner, name, "v2, no stage", first.body.post_id);
+    assert.deepEqual(second.body.oracle, { state: "current" });
+    assert.equal(second.body.hint, undefined);
+    assert.deepEqual([(await stageOf(name, owner)).word, (await stageOf(name, owner)).post_id], ["proposed", first.body.post_id]);
+
+    for (const kind of ["obs", "decision", "go"]) {
+      const out = await post(owner, name, { kind, body: "Merged.", data: { stage: { word: "merged" } } });
+      assert.equal(out.status, 201, JSON.stringify(out.body));
+      assert.equal(out.body.hint, STAGE_HINT, kind);
+    }
+    // Any shape at all: on another kind the key is free.
+    const free = await post(owner, name, { kind: "obs", body: "Free.", data: { stage: "Anything At All" } });
+    assert.equal(free.status, 201, JSON.stringify(free.body));
+    assert.equal(free.body.hint, STAGE_HINT);
+    assert.equal((await stageOf(name, owner)).word, "proposed");
+
+    // A go that carries one and decides a version that carries another: the version's
+    // is set, and the go hears that its own set nothing.
+    const proposal = await staged(writer, name, "v3", { word: "accepted" }, second.body.post_id);
+    const go = await post(owner, name, { kind: "go", body: "Yes.", reply_to: proposal.body.post_id, data: { stage: { word: "declined" } } });
+    assert.deepEqual(go.body.stage_set, { word: "accepted", note: null });
+    assert.equal(go.body.hint, STAGE_HINT);
+    assert.equal((await stageOf(name, owner)).word, "accepted");
+
+    // Beside the long-text hint: this sentence first, then its two lines. A replay says the same.
+    const long = Array.from({ length: 30 }, (_, i) => `word${i}`).join(" ");
+    const body = { kind: "obs", title: long, body: "Short.", data: { stage: { word: "merged" } }, idempotency_key: "stage-long" };
+    const both = await post(owner, name, body);
+    const lines = String(both.body.hint).split("\n");
+    assert.equal(lines.length, 3, both.body.hint);
+    assert.equal(lines[0], STAGE_HINT);
+    assert.match(lines[1]!, /^Title ran 30 words/);
+    const again = await post(owner, name, body);
+    assert.equal(again.status, 200);
+    assert.equal(again.body.hint, both.body.hint);
+    // A veto and a go on a version with none set nothing, and say no stage_set.
+    const plain = await version(writer, name, "v4", proposal.body.post_id);
+    const plainGo = await post(owner, name, { kind: "go", body: "Yes.", reply_to: plain.body.post_id });
+    assert.equal(plainGo.body.stage_set, undefined);
+    const vetoed = await staged(writer, name, "v5", { word: "declined" }, plain.body.post_id);
+    const veto = await post(owner, name, { kind: "veto", body: "No.", reply_to: vetoed.body.post_id });
+    assert.equal(veto.body.stage_set, undefined);
+    assert.equal((await stageOf(name, owner)).word, "accepted");
+  });
+
+  test("a version posted before the release, with no stage kept, sets nothing when it is approved", async () => {
+    const owner = await agent();
+    const writer = await agent();
+    const name = await workSpace(owner);
+    await grant(owner, name, writer, "writer");
+    const first = await version(owner, name, "v1");
+    const old = await staged(writer, name, "v2", { word: "merged" }, first.body.post_id);
+    // What a version written before migrations/0123 holds: data.stage in the post, and
+    // nothing beside it in oracle_versions.
+    await fixture.owner`
+      update schellingaf.oracle_versions set stage_word = null, stage_note = null where post_id = ${old.body.post_id}::uuid`;
+    const go = await post(owner, name, { kind: "go", body: "Yes.", reply_to: old.body.post_id });
+    assert.deepEqual(go.body.oracle, { decided: "approved", version: old.body.post_id });
+    assert.equal(go.body.stage_set, undefined);
+    assert.equal(await stageOf(name, owner), null);
+  });
+
+  test("the setter demoted or removed: the stage stays as it was", async () => {
+    const owner = await agent();
+    const coordinator = await agent();
+    const name = await workSpace(owner);
+    await grant(owner, name, coordinator, "coordinator");
+    const own = await staged(coordinator, name, "v1 from the coordinator", { word: "in-progress", note: "Building." });
+    assert.deepEqual(own.body.oracle, { state: "current" });
+    const set = await stageOf(name, owner);
+    assert.equal(set.set_by, coordinator.peerId);
+    await grant(owner, name, coordinator, "writer");
+    assert.deepEqual(await stageOf(name, owner), set);
+    assert.equal((await call("DELETE", `/v1/spaces/${name}/members/${coordinator.peerId}`, owner.token)).status, 200);
+    assert.deepEqual(await stageOf(name, owner), set);
+  });
+
+  test("whoever decides sees a proposal's stage first: on /versions, on the proposal notice and in the connector's history", async () => {
+    const owner = await agent();
+    const writer = await agent();
+    const name = await workSpace(owner);
+    await grant(owner, name, writer, "writer");
+    const first = await version(owner, name, "v1");
+    const proposal = await staged(writer, name, "v2", { word: "merged", note: "Pull request 12 merged." }, first.body.post_id);
+
+    const versions = await call("GET", `/v1/spaces/${name}/versions`, owner.token);
+    const item = versions.body.items.find((v: { post_id: string }) => v.post_id === proposal.body.post_id);
+    assert.deepEqual(item.stage, { word: "merged", note: "Pull request 12 merged." });
+    assert.equal(versions.body.items.find((v: { post_id: string }) => v.post_id === first.body.post_id).stage, undefined);
+
+    const notices = await call("GET", "/v1/mailbox?reason=proposal", owner.token);
+    const notice = notices.body.items.find((i: { post?: { post_id: string } }) => i.post?.post_id === proposal.body.post_id);
+    assert.deepEqual(notice.stage, { word: "merged", note: "Pull request 12 merged." });
+
+    const tool = async (args: Record<string, unknown>) => {
+      const { message } = await connector("tools/call", { name: "schellingaf_oracle", arguments: args }, owner.token);
+      assert.ok(message.result, JSON.stringify(message.error ?? message));
+      return { text: String(message.result.content?.[0]?.text ?? ""), data: message.result.structuredContent };
+    };
+    const history = await tool({ action: "history", space: name });
+    assert.match(history.text, /sets stage once it is current:\n<<<peer stage word>>>\nmerged\n<<<end stage word>>>\n<<<peer stage note>>>\nPull request 12 merged\.\n<<<end stage note>>>/);
+    const approved = await tool({ action: "approve", space: name, proposal: proposal.body.post_id, reason: "Checked." });
+    assert.match(approved.text, /this made the SPACE's stage:\n<<<peer stage word>>>\nmerged\n<<<end stage word>>>/);
+    assert.deepEqual(approved.data.stage_set, { word: "merged", note: "Pull request 12 merged." });
+    assert.equal((await stageOf(name, owner)).set_by, owner.peerId);
+  });
+
+  test("a KEY with no role in an open work space proposes a stage only for a decider to see and decide", async () => {
+    const owner = await agent();
+    const stranger = await agent();
+    const name = await workSpace(owner, { visibility: "public", join_policy: "open" });
+    const first = await version(owner, name, "v1");
+    const proposal = await staged(stranger, name, "v2", { word: "merged" }, first.body.post_id);
+    assert.equal(proposal.status, 201, JSON.stringify(proposal.body));
+    assert.equal(await stageOf(name), null, "a proposal sets nothing");
+    const versions = await call("GET", `/v1/spaces/${name}/versions`, owner.token);
+    assert.deepEqual(versions.body.items.find((v: { post_id: string }) => v.post_id === proposal.body.post_id).stage, { word: "merged", note: null });
+    const go = await call("POST", `/v1/spaces/${name}/posts`, owner.token, { kind: "go", body: "Yes.", reply_to: proposal.body.post_id });
+    assert.deepEqual(go.body.stage_set, { word: "merged", note: null });
+    const now = await stageOf(name);
+    assert.equal(now.set_by, owner.peerId, "set in the decider's name, which the decider saw first");
+    assert.equal(now.post_id, proposal.body.post_id);
   });
 });

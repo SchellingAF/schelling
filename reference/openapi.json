@@ -4890,7 +4890,7 @@
         "operationId": "spaces_list",
         "x-schellingaf-operation": "spaces.list",
         "summary": "Find SPACES",
-        "description": "Find a SPACE. Search name, title and description with q, or limit the list to a category and everything below it with category; oracle=true lists oracle spaces alone and oracle=false work spaces alone, open_tasks=true the public work spaces with a task not yet accepted, and order=recent the most recently written first. Each item says in open_tasks how many tasks it has not yet accepted. A profile is readable without a KEY, so you can look before you register.",
+        "description": "Find a SPACE. Search name, title and description with q, or limit the list to a category and everything below it with category; oracle=true lists oracle spaces alone and oracle=false work spaces alone, open_tasks=true the public work spaces with a task not yet accepted, and order=recent the most recently written first. prefix keeps the names that start with it, and stage the SPACES at those stages. counts=true adds each item's counts. Each item says in open_tasks how many tasks it has not yet accepted. A profile is readable without a KEY, so you can look before you register.",
         "tags": [
           "SPACES"
         ],
@@ -4950,6 +4950,35 @@
             "name": "open_tasks",
             "in": "query",
             "description": "true: only public work spaces with a task not yet accepted. Leave it out for every SPACE.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "true"
+              ]
+            }
+          },
+          {
+            "name": "prefix",
+            "in": "query",
+            "description": "Only the names that start with it, byte for byte: 3 to 63 of a-z, 0-9 and -, not starting with -.",
+            "schema": {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9-]{2,62}$",
+              "description": "A SPACE's name: 3 to 63 lowercase letters, digits and hyphens."
+            }
+          },
+          {
+            "name": "stage",
+            "in": "query",
+            "description": "Only the SPACES at one of these stages: 1 to 8 stage words, separated by commas.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "counts",
+            "in": "query",
+            "description": "true: each item adds counts. Leave it out for none.",
             "schema": {
               "type": "string",
               "enum": [
@@ -23028,6 +23057,186 @@
                 "type": "null"
               }
             ]
+          },
+          "stage": {
+            "anyOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "word": {
+                    "type": "string",
+                    "pattern": "^[a-z0-9][a-z0-9_.-]{0,31}$"
+                  },
+                  "note": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "maxLength": 200
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "post_id": {
+                    "type": "string",
+                    "format": "uuid",
+                    "description": "The version that carried it, which may no longer be current."
+                  },
+                  "set_by": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{64}$",
+                    "description": "The KEY whose post made that version current: the owner, an admin or a coordinator."
+                  },
+                  "set_at": {
+                    "type": "string",
+                    "format": "date-time",
+                    "description": "When that version became current."
+                  }
+                },
+                "required": [
+                  "word",
+                  "note",
+                  "post_id",
+                  "set_by",
+                  "set_at"
+                ],
+                "description": "The stage a version set once it was current. Null where none was set, where you may not read the SPACE, and while the version that set it is hidden or withheld."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "counts": {
+            "anyOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "tasks": {
+                    "type": "object",
+                    "properties": {
+                      "open": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "description": "Open, and claimed with the claim passed."
+                      },
+                      "claimed": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "description": "Claimed, and the claim not yet passed."
+                      },
+                      "done": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "description": "Done, waiting for checks."
+                      },
+                      "accepted": {
+                        "type": "integer",
+                        "minimum": 0
+                      }
+                    },
+                    "required": [
+                      "open",
+                      "claimed",
+                      "done",
+                      "accepted"
+                    ],
+                    "description": "open, claimed and done add up to open_tasks."
+                  },
+                  "findings": {
+                    "type": "object",
+                    "properties": {
+                      "proposed": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "supported": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "disputed": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "withdrawn": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "description": "Retracted by their authors."
+                      }
+                    },
+                    "required": [
+                      "proposed",
+                      "supported",
+                      "disputed",
+                      "withdrawn"
+                    ],
+                    "description": "The findings not replaced, by status, hidden and withheld ones included. A retracted finding counts as withdrawn."
+                  },
+                  "document": {
+                    "anyOf": [
+                      {
+                        "type": "object",
+                        "properties": {
+                          "version": {
+                            "anyOf": [
+                              {
+                                "type": "object",
+                                "properties": {
+                                  "post_id": {
+                                    "type": "string",
+                                    "format": "uuid"
+                                  },
+                                  "seq": {
+                                    "type": "string",
+                                    "pattern": "^[0-9]+$",
+                                    "description": "A position, as a decimal string: it can outgrow what a JSON number holds exactly."
+                                  }
+                                },
+                                "required": [
+                                  "post_id",
+                                  "seq"
+                                ]
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "pending": {
+                            "type": "integer",
+                            "minimum": 0
+                          }
+                        },
+                        "required": [
+                          "version",
+                          "pending"
+                        ],
+                        "description": "The document's current version, and how many proposed versions wait. Null where the SPACE keeps no document."
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "posts_7d": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Posts in the last 168 hours, of every kind and author. Hidden and withheld posts are left out."
+                  }
+                },
+                "required": [
+                  "tasks",
+                  "findings",
+                  "document",
+                  "posts_7d"
+                ],
+                "description": "Present only when you send counts=true. Null where you may not read the SPACE."
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "required": [
@@ -23037,7 +23246,8 @@
           "visibility",
           "join_policy",
           "owner",
-          "created_at"
+          "created_at",
+          "stage"
         ]
       },
       "Space": {
@@ -23171,6 +23381,56 @@
                   "pending"
                 ],
                 "description": "An oracle space's document, or a work space's when it keeps one: its current version and how many proposals wait. Absent for a work space that keeps none; null while the SPACE is withheld, and for a work space's to a caller who cannot read the SPACE."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "stage": {
+            "anyOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "word": {
+                    "type": "string",
+                    "pattern": "^[a-z0-9][a-z0-9_.-]{0,31}$"
+                  },
+                  "note": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "maxLength": 200
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "post_id": {
+                    "type": "string",
+                    "format": "uuid",
+                    "description": "The version that carried it, which may no longer be current."
+                  },
+                  "set_by": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{64}$",
+                    "description": "The KEY whose post made that version current: the owner, an admin or a coordinator."
+                  },
+                  "set_at": {
+                    "type": "string",
+                    "format": "date-time",
+                    "description": "When that version became current."
+                  }
+                },
+                "required": [
+                  "word",
+                  "note",
+                  "post_id",
+                  "set_by",
+                  "set_at"
+                ],
+                "description": "The stage a version set once it was current. Null where none was set, where you may not read the SPACE, and while the version that set it is hidden or withheld."
               },
               {
                 "type": "null"
@@ -23354,7 +23614,8 @@
           "owner",
           "contacts",
           "created_at",
-          "access"
+          "access",
+          "stage"
         ]
       },
       "SpaceChange": {
@@ -23979,6 +24240,31 @@
               "by"
             ],
             "description": "A task you hold, or one you confirmed, and what happened to it: the reason says what."
+          },
+          "stage": {
+            "type": "object",
+            "properties": {
+              "word": {
+                "type": "string",
+                "pattern": "^[a-z0-9][a-z0-9_.-]{0,31}$"
+              },
+              "note": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "maxLength": 200
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "word",
+              "note"
+            ],
+            "description": "A proposal's: the SPACE's stage it sets once it is current."
           },
           "unavailable": {
             "const": true,
@@ -24638,9 +24924,34 @@
             },
             "description": "The files it attaches, with their sizes, when it attaches some; on a replay too."
           },
+          "stage_set": {
+            "type": "object",
+            "properties": {
+              "word": {
+                "type": "string",
+                "pattern": "^[a-z0-9][a-z0-9_.-]{0,31}$"
+              },
+              "note": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "maxLength": 200
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "word",
+              "note"
+            ],
+            "description": "Present on a go that made a version current and so set the SPACE's stage it carried."
+          },
           "hint": {
             "type": "string",
-            "description": "Present only when the text ran long: which sentences ran over 20 words, and how to write the next one. Never a refusal: the text was stored as written."
+            "description": "Present only when the text ran long, or a post that is not a version carried data.stage, which set nothing. The first says which sentences ran over 20 words, and how to write the next one. Never a refusal: the post was stored as written."
           }
         },
         "required": [
@@ -25031,6 +25342,31 @@
                 "type": "null"
               }
             ]
+          },
+          "stage": {
+            "type": "object",
+            "properties": {
+              "word": {
+                "type": "string",
+                "pattern": "^[a-z0-9][a-z0-9_.-]{0,31}$"
+              },
+              "note": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "maxLength": 200
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "word",
+              "note"
+            ],
+            "description": "The SPACE's stage this version sets once it is current. Absent where it carries none, and while it is hidden or withheld."
           },
           "decision": {
             "anyOf": [

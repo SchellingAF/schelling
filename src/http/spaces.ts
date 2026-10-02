@@ -47,6 +47,8 @@ import {
   RESERVED_SPACE_NAMES,
   ROLES,
   SPACE_NAME,
+  STAGE_LIMITS,
+  STAGE_WORD,
 } from "../surface/vocabulary.ts";
 import { LIMITS, OWN, SHARED, charge, emptyOf, refuseIfEmpty, spend, publicKeyAgeHours } from "./ratelimit.ts";
 import { underOf } from "../surface/categories.ts";
@@ -100,6 +102,104 @@ export function openTaskCount(sql: Sql, spaceId: ReturnType<Sql>) {
                 where w.space_id = ${spaceId} and w.state in ('open', 'claimed'))
             + (select count(*) from schellingaf.tasks d
                 where d.space_id = ${spaceId} and d.state = 'done'))::int`;
+}
+
+/**
+ * Whether a post is shown: neither hidden nor withheld now. A SPACE's stage reads null,
+ * and stage= passes it by, while the version that set it is not shown. Two key probes.
+ */
+function shownPost(sql: Sql, postId: ReturnType<Sql>) {
+  return sql`not exists (select 1 from schellingaf.space_hidden sh where sh.post_id = ${postId})
+         and not exists (select 1 from schellingaf.withheld sw where sw.post_id = ${postId} and sw.released_at is null)`;
+}
+
+/**
+ * A SPACE's stage, by space_heads()'s rule: only where its counters are given, so a
+ * stranger to a private SPACE, and everybody while it is withheld, read null. One probe
+ * of space_stages' primary key, read as the caller under its row security.
+ */
+function stageJoin(sql: Sql, spaceId: ReturnType<Sql>, headSeq: ReturnType<Sql>) {
+  return sql`left join lateral (
+      select st.word as stage_word, st.note as stage_note, st.post_id::text as stage_post_id,
+             st.set_by as stage_set_by, st.set_at as stage_set_at
+        from schellingaf.space_stages st
+       where st.space_id = ${spaceId} and ${headSeq} is not null
+         and ${shownPost(sql, sql`st.post_id`)}) stg on true`;
+}
+/** What stageJoin() reads. */
+function stageColumns(sql: Sql) {
+  return sql`stg.stage_word, stg.stage_note, stg.stage_post_id, stg.stage_set_by, stg.stage_set_at`;
+}
+
+/** The columns a stage is read into. */
+type StageRow = {
+  stage_word: string | null;
+  stage_note: string | null;
+  stage_post_id: string | null;
+  stage_set_by: Buffer | null;
+  stage_set_at: Date | null;
+};
+
+/** A SPACE's stage as every answer gives it: the word, its note, the version that carried
+ *  it, the KEY whose post made that version current, and when; or null. */
+function stageOf(row: StageRow) {
+  return row.stage_word === null
+    ? null
+    : {
+        word: row.stage_word,
+        note: row.stage_note,
+        post_id: row.stage_post_id,
+        set_by: toHex(row.stage_set_by!),
+        set_at: row.stage_set_at!.toISOString(),
+      };
+}
+
+/** The columns counts=true reads from space_counts(), beside a list item's open_tasks. */
+type CountsRow = {
+  head_seq: string | null;
+  open_tasks: number | null;
+  tasks_all?: number | null;
+  tasks_claimed?: number | null;
+  tasks_done?: number | null;
+  findings_proposed?: number | null;
+  findings_supported?: number | null;
+  findings_disputed?: number | null;
+  findings_withdrawn?: number | null;
+  document_kept?: boolean | null;
+  version_post_id?: string | null;
+  version_seq?: string | null;
+  pending?: number | null;
+  posts_7d?: number | null;
+};
+
+/**
+ * A list item's counts, or null where you may not read the SPACE. Its tasks are open_tasks
+ * from openTaskCount(), split: claimed with the claim not yet passed, done waiting for
+ * checks, and open, the rest, so a passed claim reads open as the task list shows it.
+ * accepted is every task it has had less open_tasks. Both from one statement, so
+ * open + claimed + done is always open_tasks.
+ */
+function countsOf(row: CountsRow) {
+  if (row.head_seq === null || row.tasks_all === null || row.tasks_all === undefined) return null;
+  const notAccepted = row.open_tasks ?? 0;
+  const claimed = row.tasks_claimed ?? 0;
+  const done = row.tasks_done ?? 0;
+  return {
+    tasks: { open: notAccepted - claimed - done, claimed, done, accepted: row.tasks_all - notAccepted },
+    findings: {
+      proposed: row.findings_proposed ?? 0,
+      supported: row.findings_supported ?? 0,
+      disputed: row.findings_disputed ?? 0,
+      withdrawn: row.findings_withdrawn ?? 0,
+    },
+    document: row.document_kept
+      ? {
+          version: row.version_post_id ? { post_id: row.version_post_id, seq: row.version_seq } : null,
+          pending: row.pending ?? 0,
+        }
+      : null,
+    posts_7d: row.posts_7d ?? 0,
+  };
 }
 
 /** Whether a SPACE has a task not yet accepted, on the same two partial indexes. */
@@ -437,6 +537,31 @@ export function mountSpaces(app: Hono<Env>, config: Config, db: Db): void {
       throw new ApiError("INVALID_REQUEST", { detail: "open_tasks is true, or left out" });
     }
     const openTasksOnly = openTasksRaw === "true";
+    // The SPACES at a stage, or at one of up to 8, by the stage a version set. Each entry
+    // is counted as sent, before a repeat goes; empty is left out, as join_policy is.
+    const stageRaw = c.req.query("stage") || null;
+    let stageWords: string[] | null = null;
+    if (stageRaw !== null) {
+      const entries = stageRaw.split(",");
+      if (entries.length > STAGE_LIMITS.filterWords || entries.some((w) => !STAGE_WORD.test(w))) {
+        throw new ApiError("INVALID_REQUEST", { detail: `stage is one to ${STAGE_LIMITS.filterWords} stage words, separated by commas` });
+      }
+      stageWords = [...new Set(entries)];
+    }
+    // The names that start with it, byte for byte: a range on the name, up to the prefix
+    // with its last character's successor, compared in byte order whatever the database's
+    // collation, on an index in that order (0126). At least 3 characters, as a name has.
+    const prefix = c.req.query("prefix") || null;
+    if (prefix !== null && !SPACE_NAME.test(prefix)) {
+      throw new ApiError("INVALID_REQUEST", { detail: "prefix is the start of a SPACE name: 3 to 63 of a-z, 0-9 and -, not starting with -" });
+    }
+    const prefixEnd = prefix === null ? null : prefix.slice(0, -1) + String.fromCharCode(prefix.charCodeAt(prefix.length - 1) + 1);
+    // Each item's counts, only when asked: no other answer changes.
+    const countsRaw = c.req.query("counts");
+    if (countsRaw !== undefined && countsRaw !== "true") {
+      throw new ApiError("INVALID_REQUEST", { detail: "counts is true, or left out" });
+    }
+    const withCounts = countsRaw === "true";
     // Name order, or the newest first: a public SPACE by when it was last written, a
     // private one by when it was made, because how busy a private SPACE is belongs to
     // its members. An oracle space is written when a new version becomes current.
@@ -496,13 +621,22 @@ export function mountSpaces(app: Hono<Env>, config: Config, db: Db): void {
          -- would turn both the keyset on the unique name and the search index
          -- into a sequential scan of every SPACE.
          ${after ? sql`and ${byName} > ${after}` : sql``}
+         ${prefix ? sql`and ${byName} collate "C" >= ${prefix} and ${byName} collate "C" < ${prefixEnd}` : sql``}
          ${policy ? sql`and s.join_policy = ${policy}` : sql``}
+         -- Read as the caller: space_stages' row security never shows a stranger a
+         -- private SPACE's stage.
+         ${stageWords
+           ? sql`and exists (select 1 from schellingaf.space_stages sst
+                              where sst.space_id = s.space_id and sst.word = any(${stageWords}::text[])
+                                and ${shownPost(sql, sql`sst.post_id`)})`
+           : sql``}
          ${oracleOnly === true ? sql`and s.oracle` : oracleOnly === false ? sql`and not s.oracle` : sql``}
          ${openTasksOnly ? sql`and s.visibility = 'public' and not s.oracle and ${hasOpenTasks(sql, sql`s.space_id`)}` : sql``}
          -- The expression of spaces_search_gin (migrations/0120), so the index serves it.
          ${q ? sql`and to_tsvector('pg_catalog.simple', s.name || ' ' || s.title || ' ' || s.description)
                       @@ schellingaf.parse_query(${q})` : sql``}`;
-      type Row = {
+      type Row = StageRow & CountsRow & {
+        space_id: string;
         name: string;
         title: string;
         description: string;
@@ -526,16 +660,17 @@ export function mountSpaces(app: Hono<Env>, config: Config, db: Db): void {
              case when s.visibility = 'public' then s.written_at end as last_written_at`;
       // In name order the walk stops at the limit, so space_heads is asked for the
       // page alone.
-      if (!recent) {
-        return sql<Row[]>`
+      const page = !recent
+        ? sql<Row[]>`
           select ${columns}, h.head_seq::text, h.member_count, null as at,
-                 case when h.head_seq is not null then ${openTaskCount(sql, sql`s.space_id`)} end as open_tasks
+                 case when h.head_seq is not null then ${openTaskCount(sql, sql`s.space_id`)} end as open_tasks,
+                 ${stageColumns(sql)}
             ${from}
             left join lateral schellingaf.space_heads(s.space_id) h on true
+            ${stageJoin(sql, sql`s.space_id`, sql`h.head_seq`)}
            ${where}
            order by ${byName}
-           limit ${limit}`;
-      }
+           limit ${limit}`
       // Newest first sorts every listed SPACE by when it was written, and only then asks
       // space_heads for the page: a sort key that moves on every post has no index worth
       // its cost on every post, so this is a sort of the listed SPACES; SEEK's category
@@ -544,11 +679,12 @@ export function mountSpaces(app: Hono<Env>, config: Config, db: Db): void {
       // a private SPACE was written is its members' to know. The page carries every
       // column it answers with, because a join back to spaces by id is hashed against a
       // scan of every SPACE.
-      return sql<Row[]>`
-        select p.name, p.title, p.description, p.join_policy, p.visibility, p.owner, p.created_at,
+        : sql<Row[]>`
+        select p.space_id, p.name, p.title, p.description, p.join_policy, p.visibility, p.owner, p.created_at,
                p.categories, h.head_seq::text, h.member_count, p.oracle, p.at::text as at,
                p.last_written_at,
-               case when h.head_seq is not null then ${openTaskCount(sql, sql`p.space_id`)} end as open_tasks
+               case when h.head_seq is not null then ${openTaskCount(sql, sql`p.space_id`)} end as open_tasks,
+               ${stageColumns(sql)}
           from (select w.*
                   from (select ${columns}, (extract(epoch from s.written_at) * 1000000)::bigint as at
                           ${from} ${where}) w
@@ -558,7 +694,21 @@ export function mountSpaces(app: Hono<Env>, config: Config, db: Db): void {
                  order by w.at desc, w.name
                  limit ${limit}) p
           left join lateral schellingaf.space_heads(p.space_id) h on true
+          ${stageJoin(sql, sql`p.space_id`, sql`h.head_seq`)}
          order by p.at desc, p.name`;
+      if (!withCounts) return page;
+      // The counts of the page, in the same statement and the same snapshot as its
+      // open_tasks: space_counts() decides inside whom it answers, and is asked once for
+      // the page, never once a SPACE.
+      return sql<Row[]>`
+        with page as materialized (${page})
+        select page.*, c.tasks_all, c.tasks_claimed, c.tasks_done,
+               c.findings_proposed, c.findings_supported, c.findings_disputed, c.findings_withdrawn,
+               c.document_kept, c.version_post_id::text, c.version_seq::text, c.pending, c.posts_7d
+          from page
+          left join schellingaf.space_counts(array(select pc.space_id from page pc where pc.head_seq is not null)) c
+            on c.space_id = page.space_id
+         order by ${recent ? sql`page.at::bigint desc, page.name` : sql`page.name`}`;
     });
 
     // A cursor only while there may be more, as every list that pages hands one back.
@@ -588,6 +738,9 @@ export function mountSpaces(app: Hono<Env>, config: Config, db: Db): void {
         // How many of its tasks are not yet accepted (open, claimed, or done and waiting
         // for checks): 0 where it keeps none, null where you may not read the SPACE.
         open_tasks: s.open_tasks,
+        // The stage a version set, where you may read the SPACE and that version is shown.
+        stage: stageOf(s),
+        ...(withCounts ? { counts: countsOf(s) } : {}),
       })),
       ...(recent
         ? { next_before: more ? `${items.at(-1)!.at}~${items.at(-1)!.name}` : null }
@@ -607,7 +760,7 @@ export function mountSpaces(app: Hono<Env>, config: Config, db: Db): void {
 
     const found = await db.readTx(caller, async (sql) => {
       const [space] = await sql<
-        {
+        (StageRow & {
           space_id: string;
           name: string;
           title: string;
@@ -641,7 +794,7 @@ export function mountSpaces(app: Hono<Env>, config: Config, db: Db): void {
           revision: string | null;
           heads_updated_at: Date | null;
           member_count: number | null;
-        }[]
+        })[]
       >`
         select s.space_id::text, s.name, s.title, s.description, s.join_policy, s.visibility, s.status,
                s.signed_only, s.owner_id as owner, s.created_at, s.categories,
@@ -679,7 +832,8 @@ export function mountSpaces(app: Hono<Env>, config: Config, db: Db): void {
                -- The counters: no row for a caller who may not read the SPACE, and
                -- no member count for one who is not in it.
                h.head_seq::text as head_seq, h.revision::text as revision,
-               h.updated_at as heads_updated_at, h.member_count
+               h.updated_at as heads_updated_at, h.member_count,
+               ${stageColumns(sql)}
           from schellingaf.spaces s
           left join schellingaf.withheld_spaces w
             on w.space_id = s.space_id and w.released_at is null
@@ -691,6 +845,7 @@ export function mountSpaces(app: Hono<Env>, config: Config, db: Db): void {
             on pr.space_id = s.space_id and pr.peer_id = ${callerKey}
            and pr.state = 'pending' and pr.expires_at > now()
           left join lateral schellingaf.space_heads(s.space_id) h on true
+          ${stageJoin(sql, sql`s.space_id`, sql`h.head_seq`)}
          where s.name = ${name}`;
       if (!space) return null;
       // Contacts come through a definer, because the memberships policy hides
@@ -755,6 +910,9 @@ export function mountSpaces(app: Hono<Env>, config: Config, db: Db): void {
                 },
           }
         : {}),
+      // The stage a version set, to whoever reads the SPACE, while that version is shown;
+      // null for everybody while the SPACE is withheld.
+      stage: stageOf(space),
       // How many oracle spaces' documents link to this SPACE: GET .../links names them.
       linked_from: space.linked_from,
       // Set when a restore lost links in this SPACE's chains and it was closed and

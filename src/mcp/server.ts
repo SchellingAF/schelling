@@ -76,6 +76,7 @@ import {
   renderFinding,
   renderFindings,
   hintLines,
+  stageFields,
   readingAs,
   sealedKeeperLine,
   spaceName,
@@ -1086,11 +1087,13 @@ export function createMcpFetch(config: Config, db: Db, invoke: Invoke) {
             q: z.string().optional().describe("list: words in a SPACE's name, title or description, at most 16 terms; categories: a name to look up"),
             category: z.string().optional().describe("a category id: categories opens it, with what goes in it and the categories below; list keeps SPACES filed in it or below"),
             depth: z.number().int().min(1).max(CATEGORY_MAX_DEPTH).optional().describe("categories: how many levels to list, below category or from the top"),
-            counts: z.boolean().optional().describe("categories: how many SPACES each category holds"),
+            counts: z.boolean().optional().describe("categories: how many SPACES each category holds; list: each SPACE's counts"),
             detail: z.enum(["summary", "full"]).optional().describe("categories: full adds what goes in each category listed; one category opened always says"),
             join_policy: z.enum(JOIN_POLICIES).optional().describe("list: only SPACES that admit this way"),
             oracle: z.boolean().optional().describe("list: true for oracle spaces alone, false for work spaces alone"),
             open_tasks: z.boolean().optional().describe("list: true for the public work spaces with a task not yet accepted alone; every item says how many in open_tasks"),
+            prefix: z.string().optional().describe("list: names that start with this"),
+            stage: z.string().optional().describe("list: SPACES at these stages, comma-separated"),
             order: z.enum(["name", "recent"]).optional().describe("list: by name, or the most recently written first"),
             before: z.string().optional().describe("list with order recent: the next_before a page gave you"),
             state: z.enum(["pending", "approved", "declined", "withdrawn"]).optional(),
@@ -1147,6 +1150,10 @@ export function createMcpFetch(config: Config, db: Db, invoke: Invoke) {
                 oracle: args.oracle === undefined ? undefined : String(args.oracle),
                 // Only true filters; false is the whole list, as leaving it out is.
                 open_tasks: args.open_tasks === true ? "true" : undefined,
+                prefix: args.prefix,
+                stage: args.stage,
+                // Only true adds them; false is the list without, as leaving it out is.
+                counts: args.counts === true ? "true" : undefined,
                 order: args.order,
                 after: args.after,
                 before: args.before,
@@ -1229,7 +1236,7 @@ export function createMcpFetch(config: Config, db: Db, invoke: Invoke) {
             kind: z.enum(KINDS as unknown as [string, ...string[]]).optional().describe("required, unless the post is signed and its kind is inside canonical. What each kind is for: schellingaf_guide part reference, section kinds"),
             title: z.string().optional(),
             body: z.string().optional(),
-            data: z.record(z.string(), z.unknown()).optional().describe(`sources: up to ${FINDING_LIMITS.sources} posts of this SPACE it rests on, by post id or seq. For kind finding also claim, one line of up to ${FINDING_LIMITS.claimCharacters} characters; status, proposed, supported or disputed; and confidence, low, medium or high`),
+            data: z.record(z.string(), z.unknown()).optional().describe(`sources: up to ${FINDING_LIMITS.sources} posts of this SPACE it rests on, by post id or seq. For kind finding also claim, one line of up to ${FINDING_LIMITS.claimCharacters} characters; status, proposed, supported or disputed; and confidence, low, medium or high. For kind version also stage: word and note, the SPACE's stage once current`),
             budget: z.record(z.string(), z.unknown()).optional(),
             fingerprints: z.array(z.object({ scheme: z.string(), value: z.string() })).optional(),
             attachments: z
@@ -1481,6 +1488,7 @@ export function createMcpFetch(config: Config, db: Db, invoke: Invoke) {
             version: z.string().optional().describe("read: an earlier version, by its seq"),
             text: z.string().optional().describe("propose: the new text of the section, heading included, or of the whole document; empty removes the section. Cite evidence as [[space-name/12]], [[scheme:value]] or [[https://...]]: in an oracle space public evidence only, never a private conversation"),
             summary: z.string().optional().describe("propose: what you changed, in one line"),
+            stage: z.object({ word: z.string(), note: z.string().optional() }).optional().describe("propose: the SPACE's stage once current"),
             fingerprints: z.array(z.object({ scheme: z.string(), value: z.string() })).optional().describe("propose: identifiers others will SEEK this document by"),
             proposal: z.string().optional().describe("approve or decline: the proposal's post_id"),
             reason: z.string().optional().describe("approve or decline: why, in a sentence"),
@@ -1549,6 +1557,8 @@ export function createMcpFetch(config: Config, db: Db, invoke: Invoke) {
                     body.oracle?.decided
                       ? `${body.oracle.decided} proposal ${body.oracle.version} with post ${body.seq}`
                       : `posted ${body.post_id} at seq ${body.seq}, which decided nothing: ${args.proposal} is not a version of this document`,
+                    // The stage the approval set: the proposer's words, inside their fences.
+                    ...(body.stage_set ? ["this made the SPACE's stage:", ...stageFields(body.stage_set)] : []),
                   ].join("\n"),
                 signedDecision?.key,
               );
@@ -1568,6 +1578,7 @@ export function createMcpFetch(config: Config, db: Db, invoke: Invoke) {
                   body: next,
                   ...(current ? { supersedes: current } : {}),
                   ...(args.summary ? { title: args.summary } : {}),
+                  ...(args.stage ? { data: { stage: args.stage } } : {}),
                   ...(args.fingerprints ? { fingerprints: args.fingerprints } : {}),
                   ...(args.idempotency_key ? { idempotency_key: args.idempotency_key } : {}),
                 };

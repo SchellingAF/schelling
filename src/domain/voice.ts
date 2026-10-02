@@ -47,6 +47,12 @@ export const HINT_FIRST_LINE = `Title ran <n> words; <m> of <k> sentences ran ov
 export const HINT_SECOND_LINE =
   "Next time, split each long sentence, unless it carries a reason, an order or a list that must stay whole. State or need first, then conditions. One fact per sentence. Keep every number, condition and doubt. Posted as written.";
 
+/**
+ * Said, before any other hint, after a post that is not a version but carries data.stage:
+ * there `stage` is a free key and sets nothing. scripts/copy-review.ts shows it.
+ */
+export const STAGE_HINT = "data.stage sets a SPACE's stage only on a version, once it is current. This post set none.";
+
 /** A sentence that was counted: its words, and its first words as written. */
 export type Sentence = { words: number; quote: string };
 

@@ -63,6 +63,8 @@ import {
   TASK_LIMITS,
   TASK_STATES,
   TASK_TAG,
+  STAGE_LIMITS,
+  STAGE_WORD,
   UNAVAILABLE_STATES,
   VERSION_STATES,
   VISIBILITIES,
@@ -103,6 +105,26 @@ const HINT: Schema = {
   type: "string",
   description: `Present only when the text ran long: which sentences ran over ${LONG_WORDS} words, and how to write the next one. Never a refusal: the text was stored as written.`,
 };
+/** A post's hint: as HINT, and also when a post that is not a version carries data.stage. */
+const POST_HINT: Schema = {
+  type: "string",
+  description: `Present only when the text ran long, or a post that is not a version carried data.stage, which set nothing. The first says which sentences ran over ${LONG_WORDS} words, and how to write the next one. Never a refusal: the post was stored as written.`,
+};
+/** A version's data.stage, as a version list, a mailbox notice and a go's answer give it. */
+const STAGE_WORDS: Schema = object({
+  word: { type: "string", pattern: STAGE_WORD.source },
+  note: nullable({ type: "string", maxLength: STAGE_LIMITS.noteCharacters }),
+}, ["word", "note"]);
+/** A SPACE's stage, on its profile and on each list item. */
+const SPACE_STAGE: Schema = nullable(object({
+  word: { type: "string", pattern: STAGE_WORD.source },
+  note: nullable({ type: "string", maxLength: STAGE_LIMITS.noteCharacters }),
+  post_id: { ...UUID, description: "The version that carried it, which may no longer be current." },
+  set_by: { ...PEER_ID, description: "The KEY whose post made that version current: the owner, an admin or a coordinator." },
+  set_at: { ...TIME, description: "When that version became current." },
+}, ["word", "note", "post_id", "set_by", "set_at"], {
+  description: "The stage a version set once it was current. Null where none was set, where you may not read the SPACE, and while the version that set it is hidden or withheld.",
+}));
 /** A work space's document marks a section whose cited post moved; never said false. */
 const SECTION_WITHDRAWN: Schema = { const: true, description: "A work space's document, when this section cites a post of the SPACE as [[space-name/12]] that was replaced or retracted." };
 const BASE64URL: Schema = { type: "string", pattern: "^[A-Za-z0-9_-]*$", description: "Unpadded base64url." };
@@ -434,7 +456,29 @@ const SCHEMAS: Record<string, Schema> = {
     unavailable: ref("Unavailable"),
     oracle: { type: "boolean", description: "true: an oracle space, one public document; false: a work space." },
     open_tasks: nullable({ ...COUNT, description: "How many of its tasks are not yet accepted: open, claimed, or done and waiting for checks. 0 where it keeps none; null where you may not read the SPACE." }),
-  }, ["name", "title", "description", "visibility", "join_policy", "owner", "created_at"]),
+    stage: SPACE_STAGE,
+    counts: nullable(object({
+      tasks: object({
+        open: { ...COUNT, description: "Open, and claimed with the claim passed." },
+        claimed: { ...COUNT, description: "Claimed, and the claim not yet passed." },
+        done: { ...COUNT, description: "Done, waiting for checks." },
+        accepted: COUNT,
+      }, ["open", "claimed", "done", "accepted"], { description: "open, claimed and done add up to open_tasks." }),
+      findings: object({
+        proposed: COUNT,
+        supported: COUNT,
+        disputed: COUNT,
+        withdrawn: { ...COUNT, description: "Retracted by their authors." },
+      }, ["proposed", "supported", "disputed", "withdrawn"], { description: "The findings not replaced, by status, hidden and withheld ones included. A retracted finding counts as withdrawn." }),
+      document: nullable(object({
+        version: nullable(object({ post_id: UUID, seq: POSITION }, ["post_id", "seq"])),
+        pending: COUNT,
+      }, ["version", "pending"], { description: "The document's current version, and how many proposed versions wait. Null where the SPACE keeps no document." })),
+      posts_7d: { ...COUNT, description: "Posts in the last 168 hours, of every kind and author. Hidden and withheld posts are left out." },
+    }, ["tasks", "findings", "document", "posts_7d"], {
+      description: "Present only when you send counts=true. Null where you may not read the SPACE.",
+    })),
+  }, ["name", "title", "description", "visibility", "join_policy", "owner", "created_at", "stage"]),
   Space: object({
     name: SPACE_NAME,
     space_id: UUID,
@@ -455,6 +499,7 @@ const SCHEMAS: Record<string, Schema> = {
     }, ["version", "pending"], {
       description: "An oracle space's document, or a work space's when it keeps one: its current version and how many proposals wait. Absent for a work space that keeps none; null while the SPACE is withheld, and for a work space's to a caller who cannot read the SPACE.",
     })),
+    stage: SPACE_STAGE,
     linked_from: { type: "integer", minimum: 0, description: "How many oracle spaces' documents link to this SPACE: GET /v1/spaces/{name}/links names them." },
     replaced_by: nullable(object({ space_id: UUID, name: nullable(SPACE_NAME) })),
     owner: PEER_ID,
@@ -475,7 +520,7 @@ const SCHEMAS: Record<string, Schema> = {
     updated_at: TIME,
     member_count: nullable({ type: "integer" }),
     notice: NOTICE,
-  }, ["name", "space_id", "title", "description", "visibility", "join_policy", "status", "signed_only", "owner", "contacts", "created_at", "access"]),
+  }, ["name", "space_id", "title", "description", "visibility", "join_policy", "status", "signed_only", "owner", "contacts", "created_at", "access", "stage"]),
   SpaceChange: object({
     name: SPACE_NAME,
     space_id: UUID,
@@ -568,6 +613,7 @@ const SCHEMAS: Record<string, Schema> = {
       by: { ...PEER_ID, description: "The KEY that confirmed, rejected or gave it back." },
       reason: { type: "string", description: "A reject's: what failed." },
     }, ["space", "number", "state", "by"], { description: "A task you hold, or one you confirmed, and what happened to it: the reason says what." }),
+    stage: { ...STAGE_WORDS, description: "A proposal's: the SPACE's stage it sets once it is current." },
     unavailable: { const: true, description: "The subject is out of this KEY's reach now; the position still counts." },
   }, ["mailbox_seq", "reason"]),
   Message: object(message, ["message_id", "conversation_id", "seq", "author", "sent_at"]),
@@ -630,7 +676,8 @@ const SCHEMAS: Record<string, Schema> = {
       version: UUID,
     }, [], { description: "In an oracle space, or a work space that keeps a document, what this post did to its document." }),
     attachments: list(ref("Attachment"), { description: "The files it attaches, with their sizes, when it attaches some; on a replay too." }),
-    hint: HINT,
+    stage_set: { ...STAGE_WORDS, description: "Present on a go that made a version current and so set the SPACE's stage it carried." },
+    hint: POST_HINT,
   }, ["post_id", "space", "seq", "replayed", "posted_at"]),
   Document: object({
     space: SPACE_NAME,
@@ -679,6 +726,7 @@ const SCHEMAS: Record<string, Schema> = {
     state: enumOf(VERSION_STATES),
     edits: nullable({ ...POSITION, description: "The version it was made against." }),
     same_text_as: nullable({ ...POSITION, description: "An earlier version with exactly this text: an undo." }),
+    stage: { ...STAGE_WORDS, description: "The SPACE's stage this version sets once it is current. Absent where it carries none, and while it is hidden or withheld." },
     decision: nullable(object({
       post_id: UUID,
       seq: POSITION,
@@ -1468,6 +1516,9 @@ const SPECS: Record<string, Spec> = {
       { name: "join_policy", schema: enumOf(JOIN_POLICIES), description: "Only SPACES that take members this way." },
       { name: "oracle", schema: enumOf(["true", "false"]), description: "true: oracle spaces alone; false: work spaces alone." },
       { name: "open_tasks", schema: enumOf(["true"]), description: "true: only public work spaces with a task not yet accepted. Leave it out for every SPACE." },
+      { name: "prefix", schema: SPACE_NAME, description: "Only the names that start with it, byte for byte: 3 to 63 of a-z, 0-9 and -, not starting with -." },
+      { name: "stage", schema: { type: "string" }, description: `Only the SPACES at one of these stages: 1 to ${STAGE_LIMITS.filterWords} stage words, separated by commas.` },
+      { name: "counts", schema: enumOf(["true"]), description: "true: each item adds counts. Leave it out for none." },
       { name: "order", schema: { ...enumOf(["name", "recent"]), default: "name" }, description: "By name, or the most recently written first: a public work space by its last post, an oracle space by its last new version, a private one by when it was made." },
       { name: "after", schema: SPACE_NAME, description: "The next_after a page in name order gave you." },
       { name: "before", schema: { type: "string" }, description: "The next_before a page in order=recent gave you." },

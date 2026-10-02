@@ -6,7 +6,7 @@ import { test, before, after, describe } from "node:test";
 import assert from "node:assert/strict";
 import { cloneDatabase, setUp, peerIdOf, publicKey, type Fixture } from "./helpers.ts";
 import { MIGRATE_PASSWORD, PORT } from "./bootstrap.ts";
-import { migrate } from "../src/db/migrate.ts";
+import { migrate, statementsOf } from "../src/db/migrate.ts";
 import { publicSeekablePerDay } from "../src/http/postview.ts";
 import { ORACLE_LIMITS } from "../src/surface/vocabulary.ts";
 import { WAITING_REQUESTS_PER_KEY } from "../src/http/messages.ts";
@@ -668,6 +668,38 @@ describe("the migration runner", () => {
     } finally {
       await fixture.owner`delete from schellingaf.schema_migrations where version = 1`;
     }
+  });
+
+  test("runs a no-transaction file one statement at a time, and again from the start after it stopped", async () => {
+    assert.deepEqual(
+      statementsOf("-- migrate: no-transaction\n-- A comment; and one more.\nDROP INDEX CONCURRENTLY IF EXISTS a;\nCREATE INDEX CONCURRENTLY a\n  ON t (x);\n\n-- the end\n"),
+      ["-- migrate: no-transaction\n-- A comment; and one more.\nDROP INDEX CONCURRENTLY IF EXISTS a", "CREATE INDEX CONCURRENTLY a\n  ON t (x)"],
+    );
+    assert.throws(() => statementsOf("-- migrate: no-transaction\nCREATE FUNCTION f() RETURNS int AS $$ SELECT 1; $$;\n"), /no function body/);
+    // 0126 builds its indexes concurrently. Unrecorded, as a run that stopped part way
+    // leaves it, it runs again and leaves every index valid.
+    const built = async () => [...await fixture.owner<{ name: string; valid: boolean }[]>`
+      select c.relname as name, i.indisvalid as valid from pg_index i join pg_class c on c.oid = i.indexrelid
+       where c.relname in ('posts_space_posted_idx', 'space_hidden_space_post_idx', 'withheld_space_post_idx',
+                           'spaces_name_c_idx', 'space_categories_name_c_idx') order by 1`];
+    const all = [
+      { name: "posts_space_posted_idx", valid: true }, { name: "space_categories_name_c_idx", valid: true },
+      { name: "space_hidden_space_post_idx", valid: true }, { name: "spaces_name_c_idx", valid: true },
+      { name: "withheld_space_post_idx", valid: true },
+    ];
+    assert.deepEqual(await built(), all);
+    const [row] = await fixture.owner<{ name: string; sha256: string }[]>`
+      select name, sha256 from schellingaf.schema_migrations where version = 126`;
+    await fixture.owner`delete from schellingaf.schema_migrations where version = 126`;
+    try {
+      const result = await runMigrations();
+      assert.deepEqual(result.applied.map((m) => m.file), ["0126_space_stages_indexes.sql"]);
+    } finally {
+      await fixture.owner`
+        insert into schellingaf.schema_migrations (version, name, sha256) values (126, ${row!.name}, ${row!.sha256})
+        on conflict (version) do nothing`;
+    }
+    assert.deepEqual(await built(), all);
   });
 
   test("starts on a database a later release migrated, as a rolled-back release must", async () => {

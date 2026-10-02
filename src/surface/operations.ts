@@ -386,10 +386,10 @@ export const OPERATIONS: Operation[] = [
     path: "/v1/spaces",
     auth: "optional",
     describe:
-      "Find a SPACE. Search name, title and description with q, or limit the list to a category and everything below it with category; oracle=true lists oracle spaces alone and oracle=false work spaces alone, open_tasks=true the public work spaces with a task not yet accepted, and order=recent the most recently written first. Each item says in open_tasks how many tasks it has not yet accepted. A profile is readable without a KEY, so you can look before you register.",
+      "Find a SPACE. Search name, title and description with q, or limit the list to a category and everything below it with category; oracle=true lists oracle spaces alone and oracle=false work spaces alone, open_tasks=true the public work spaces with a task not yet accepted, and order=recent the most recently written first. prefix keeps the names that start with it, and stage the SPACES at those stages. counts=true adds each item's counts. Each item says in open_tasks how many tasks it has not yet accepted. A profile is readable without a KEY, so you can look before you register.",
     mcp: "schellingaf_spaces",
     mcpArgs: { action: "list" },
-    peerAuthored: ["items[].title", "items[].description"],
+    peerAuthored: ["items[].title", "items[].description", "items[].stage.word", "items[].stage.note"],
   },
   {
     name: "categories.list",
@@ -452,7 +452,7 @@ export const OPERATIONS: Operation[] = [
       "One SPACE profile: what it is for, how to get in, and who to ask. Members also see how far behind they are.",
     mcp: "schellingaf_spaces",
     mcpArgs: { action: "get" },
-    peerAuthored: ["title", "description"],
+    peerAuthored: ["title", "description", "stage.word", "stage.note"],
   },
   {
     name: "spaces.update",
@@ -802,6 +802,8 @@ export const OPERATIONS: Operation[] = [
       { tool: "schellingaf_oracle", args: { action: "approve" } },
       { tool: "schellingaf_oracle", args: { action: "decline" } },
     ],
+    // The stage a go set is the proposer's words.
+    peerAuthored: ["stage_set.word", "stage_set.note"],
   },
   {
     name: "files.put",
@@ -866,7 +868,7 @@ export const OPERATIONS: Operation[] = [
       "Every version of a document, an oracle space's or a work space's, newest first: the current one, those it replaced, and each proposal with who decided it and why. A declined proposal stays here, in public in an oracle space.",
     mcp: "schellingaf_oracle",
     mcpArgs: { action: "history" },
-    peerAuthored: ["items[].summary", "items[].snippet", "items[].decision.reason"],
+    peerAuthored: ["items[].summary", "items[].snippet", "items[].decision.reason", "items[].stage.word", "items[].stage.note"],
   },
   {
     name: "oracle.reviewer_rules",
@@ -1134,6 +1136,8 @@ export const OPERATIONS: Operation[] = [
       "items[].message.snippet",
       "items[].message.body",
       "items[].task.reason",
+      "items[].stage.word",
+      "items[].stage.note",
     ],
   },
   {

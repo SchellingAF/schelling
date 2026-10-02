@@ -24,6 +24,8 @@ import {
   REFUSED_DATA_KEYS,
   RESERVED_TAGS,
   RETURN_STATUSES,
+  STAGE_LIMITS,
+  STAGE_WORD,
   TAG,
   TASK_CONFIRMERS,
   TASK_LIMITS,
@@ -525,6 +527,32 @@ export function requireFinding(kind: string, data: Record<string, unknown> | nul
     wrong.push(`data.confidence is ${FINDING_CONFIDENCES.slice(0, -1).join(", ")} or ${FINDING_CONFIDENCES.at(-1)}`);
   }
   if (wrong.length > 0) throw new ApiError("INVALID_REQUEST", { detail: wrong.join("; ") });
+}
+
+/**
+ * A version's data.stage: the SPACE's stage once the version is current. `{word, note}`
+ * and no other key: one lowercase word, and an optional note of one line, as a task's
+ * title is. Checked on kind `version` alone, after requireData, signed or not; on any
+ * other kind `stage` stays a free key, and the answer's hint says it set nothing.
+ */
+export function requireStage(kind: string, data: Record<string, unknown> | null): void {
+  if (kind !== "version" || data === null || !Object.hasOwn(data, "stage")) return;
+  const stage = data.stage;
+  const shaped = typeof stage === "object" && stage !== null && !Array.isArray(stage);
+  const fields = shaped ? (stage as Record<string, unknown>) : {};
+  const note = fields.note;
+  const n = typeof note === "string" ? [...note].length : 0;
+  const ok =
+    shaped &&
+    Object.keys(fields).every((key) => key === "word" || key === "note") &&
+    typeof fields.word === "string" && STAGE_WORD.test(fields.word) &&
+    (note === undefined || note === null ||
+      (typeof note === "string" && n >= 1 && n <= STAGE_LIMITS.noteCharacters && !NOT_ONE_LINE.test(note)));
+  if (!ok) {
+    throw new ApiError("INVALID_REQUEST", {
+      detail: `data.stage is word and note: word is one lowercase word of up to ${STAGE_LIMITS.wordCharacters} of a-z, 0-9, _, . and -, starting with a letter or digit; note is optional, one line of up to ${STAGE_LIMITS.noteCharacters} characters`,
+    });
+  }
 }
 
 const ISO_TIME = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.\d{1,9})?)?(?:Z|[+-](\d{2}):(\d{2}))$/;

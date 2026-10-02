@@ -827,3 +827,144 @@ describe("npm run query-plans reads what the service sends, and nothing it wrote
     assert.doesNotMatch(script, /from schellingaf\.post_search s\b/, "the report paraphrases the text seek");
   });
 });
+
+// ── prefix= on the SPACE list (migrations/0126_space_stages_indexes.sql) ──────
+
+describe("prefix= reads a range of names in byte order", () => {
+  test("by name, and within a category, the range is an index condition on a name index in byte order", async () => {
+    // The index's own line, then its condition: the range on the name, both ends.
+    const range = (index: string) => new RegExp(`(?:Index|Index Only|Bitmap Index) Scan (?:Backward )?(?:using|on) ${index}[^\\n]*\\n\\s+Index Cond: [^\\n]*\\(name\\)::text >= \\$\\d+\\) AND \\(\\(name\\)::text < \\$\\d+`);
+    const plain = await planOf("/v1/spaces?prefix=listed-space-7&limit=50", 'collate "C"');
+    assert.match(plain, range("spaces_name_c_idx"), plain);
+    const filed = await planOf("/v1/spaces?category=coding-agents&prefix=listed-space-7&limit=50", 'collate "C"');
+    assert.match(filed, range("space_categories_name_c_idx"), filed);
+  });
+});
+
+// ── counts=true on the SPACE list (migrations/0123_space_stages.sql) ──────────
+
+describe("the SPACE list with counts=true", () => {
+  test("adds no statement: limit=10 and limit=200 run as many as the list without counts", async () => {
+    const counted = (path: string) => sent(path, owner).then((seen) => seen.filter((s) => !/set_config/.test(s.sql)));
+    const without = await counted("/v1/spaces?prefix=listed-space-&limit=200");
+    const ten = await counted("/v1/spaces?prefix=listed-space-&counts=true&limit=10");
+    const all = await counted("/v1/spaces?prefix=listed-space-&counts=true&limit=200");
+    assert.equal(ten.length, without.length, ten.map((s) => s.sql).join("\n--\n"));
+    assert.equal(all.length, ten.length);
+    assert.deepEqual(all.map((s) => s.sql), ten.map((s) => s.sql), "the same statements, whatever the page");
+    const stmt = statementFor(all, "space_counts");
+    assert.equal((stmt.sql.match(/space_counts\(/g) ?? []).length, 1, "space_counts() is asked once for the page");
+  });
+
+  test("200 SPACES with 5,000 posts each in the window take the statements 200 quiet ones take, and none walks the window or the findings", async () => {
+    // Written straight in, as the fixture above writes its posts: 200 busy public SPACES
+    // with 5,000 posts each in the last six days, and 200 quiet ones with none. Last in
+    // this file, so the million posts plan no other test's read.
+    await fixture.owner`
+      insert into schellingaf.spaces (name, owner_id, title, visibility, categories)
+      select kind || '-' || lpad(g::text, 4, '0'), decode(${owner.peerId}, 'hex'), 'Counted', 'public', array['coding-agents']
+        from generate_series(1, 200) g, unnest(array['busy', 'quiet']) kind`;
+    await fixture.owner`
+      insert into schellingaf.posts (space_id, seq, admitted_revision, author_id, kind, body, content_hash, posted_at)
+      select s.space_id, g, 1, s.owner_id, 'obs', 'busy', sha256((s.name || g)::bytea),
+             now() - interval '6 days' + g * interval '100 ms'
+        from schellingaf.spaces s, generate_series(1, 5000) g where s.name like 'busy-%'`;
+    // Then 20 findings in each, which the counts read from one row a SPACE, written as
+    // posts so the projection writes them; and in five of them 200 hidden and 50 withheld
+    // posts of the window, which posts_7d reads by range from the window's first post.
+    await fixture.owner`
+      insert into schellingaf.posts (space_id, seq, admitted_revision, author_id, kind, title, body, data, content_hash)
+      select s.space_id, 5000 + g, 1, s.owner_id, 'finding', 'finding ' || g, 'evidence',
+             jsonb_build_object('claim', 'claim ' || g, 'status', 'proposed', 'confidence', 'medium'),
+             sha256((s.name || 'finding' || g)::bytea)
+        from schellingaf.spaces s, generate_series(1, 20) g where s.name like 'busy-%'
+       order by s.name, g`;
+    await fixture.owner`update schellingaf.spaces set last_seq = 5020 where name like 'busy-%'`;
+    const marked = ["busy-0001", "busy-0002", "busy-0003", "busy-0004", "busy-0005"];
+    await fixture.owner`
+      insert into schellingaf.space_hidden (post_id, space_id, hidden_by, revision)
+      select p.post_id, p.space_id, s.owner_id, 1
+        from schellingaf.posts p join schellingaf.spaces s on s.space_id = p.space_id
+       where s.name = any(${marked}::text[]) and p.seq <= 5000 and p.seq % 25 = 0`;
+    await fixture.owner`
+      insert into schellingaf.withheld (post_id, space_id, reason, note)
+      select p.post_id, p.space_id, 'legal_order', 'plan'
+        from schellingaf.posts p join schellingaf.spaces s on s.space_id = p.space_id
+       where s.name = any(${marked}::text[]) and p.seq <= 5000 and p.seq % 100 = 1`;
+    // And every post of the fixture's other SPACES hidden and withheld, so a range on the
+    // two is planned against tables that mostly hold other SPACES' posts.
+    await fixture.owner`
+      insert into schellingaf.space_hidden (post_id, space_id, hidden_by, revision)
+      select p.post_id, p.space_id, s.owner_id, 1
+        from schellingaf.posts p join schellingaf.spaces s on s.space_id = p.space_id
+       where s.name in ('planned-space', 'planned-work', 'planned-oracle', 'other-oracle')
+      on conflict do nothing`;
+    await fixture.owner`
+      insert into schellingaf.withheld (post_id, space_id, reason, note)
+      select p.post_id, p.space_id, 'legal_order', 'plan'
+        from schellingaf.posts p join schellingaf.spaces s on s.space_id = p.space_id
+       where s.name in ('planned-space', 'planned-work', 'planned-oracle', 'other-oracle')
+      on conflict do nothing`;
+    await refileAll(fixture.owner);
+    for (const table of ["posts", "spaces", "space_hidden", "withheld", "findings", "space_finding_counts"]) {
+      await fixture.owner.unsafe(`analyze schellingaf.${table}`);
+    }
+
+    const busy = await sent("/v1/spaces?prefix=busy-&counts=true&limit=200", null);
+    const quiet = await sent("/v1/spaces?prefix=quiet-&counts=true&limit=200", null);
+    assert.deepEqual(busy.map((s) => s.sql), quiet.map((s) => s.sql));
+    const page = await call("GET", "/v1/spaces?prefix=busy-&counts=true&limit=200", owner);
+    assert.equal(page.body.items.length, 200);
+    for (const i of page.body.items as { name: string; counts: { posts_7d: number; findings: { proposed: number } } }[]) {
+      assert.equal(i.counts.posts_7d, marked.includes(i.name) ? 5020 - 200 - 50 : 5020, i.name);
+      assert.equal(i.counts.findings.proposed, 20, i.name);
+    }
+
+    // Inside space_counts(), as the route calls it, under a generic plan and analysed.
+    type PlanNode = { [field: string]: any; Plans?: PlanNode[] };
+    const nodesOf = (plan: PlanNode): PlanNode[] => [plan, ...(plan.Plans ?? []).flatMap(nodesOf)];
+    const logged: string[] = [];
+    const su = postgres({ ...SUPERUSER, database: fixture.name, onnotice: (n) => logged.push(n.message ?? "") });
+    try {
+      await su`load 'auto_explain'`;
+      for (const setting of ["log_min_duration = 0", "log_nested_statements = on", "log_format = json", "log_level = notice", "log_analyze = on", "log_timing = off"]) {
+        await su.unsafe(`set auto_explain.${setting}`);
+      }
+      await su.begin(async (tx) => {
+        await tx.unsafe("set local role schellingaf_api");
+        await tx.unsafe("set local plan_cache_mode = force_generic_plan");
+        await tx`select set_config('schellingaf.peer_id', '', true)`;
+        await tx`select count(*) from schellingaf.space_counts(array(
+                   select s.space_id from schellingaf.spaces s where s.name like 'busy-%'))`;
+      });
+    } finally {
+      await su.end({ timeout: 5 });
+    }
+    const inner = logged
+      .filter((m) => m.includes("{"))
+      .map((m) => JSON.parse(m.slice(m.indexOf("{"))) as { "Query Text": string; Plan: PlanNode })
+      .filter((p) => p["Query Text"].includes("168 hours"));
+    assert.equal(inner.length, 1, `space_counts() was not planned: ${logged.join("\n").slice(0, 2000)}`);
+    const nodes = nodesOf(inner[0]!.Plan);
+    const onPosts = nodes.filter((n) => n["Relation Name"] === "posts");
+    assert.ok(onPosts.length > 0, JSON.stringify(inner[0]!.Plan));
+    for (const n of onPosts) {
+      assert.match(n["Node Type"], /Index Only Scan|Index Scan/, `posts read by ${n["Node Type"]}`);
+      assert.equal(n["Index Name"], "posts_space_posted_idx");
+      assert.ok(n["Actual Rows"] <= 1, `the window was walked: ${n["Actual Rows"]} rows a SPACE`);
+    }
+    assert.ok(!nodes.some((n) => n["Node Type"] === "Seq Scan" && n["Relation Name"] === "posts"), "posts scanned");
+    // The window's hidden and withheld posts, by range from its first post.
+    for (const [table, index] of [["space_hidden", "space_hidden_space_post_idx"], ["withheld", "withheld_space_post_idx"]] as const) {
+      const on = nodes.filter((n) => n["Relation Name"] === table);
+      assert.ok(on.length > 0, `${table} was not read: ${JSON.stringify(inner[0]!.Plan)}`);
+      assert.deepEqual(on.filter((n) => n["Node Type"] === "Seq Scan").map((n) => n["Node Type"]), [], `${table} scanned`);
+      assert.ok(
+        nodes.some((n) => n["Index Name"] === index && /post_id >= /.test(n["Index Cond"] ?? "")),
+        `${table} not read by ${index} from the window's first post: ${JSON.stringify(on)}`,
+      );
+    }
+    // The findings come from their count, never from the findings themselves.
+    assert.deepEqual(nodes.filter((n) => n["Relation Name"] === "findings").map((n) => n["Node Type"]), [], "the findings were walked");
+  });
+});

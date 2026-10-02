@@ -177,7 +177,8 @@ describe("the agent skill", () => {
       '"kind":"version"', "proposed; the owner of [[proposals]] decides", "`POST /v1/spaces/proposal-<slug>/tasks` three times", "`POST /v1/spaces/proposals/posts`",
       "a `result` with its address and a `source:github-pr` fingerprint", "a `result` with a `git.commit` fingerprint", "then mark done any task you hold.",
       "The owner of `[[proposals]]` posts the versions whose Status says in progress, merged or declined", "a `version` that `supersedes` the current one", "`subject:status-merged`",
-      "A Status or a `subject:status-merged` reply counts only from the owner of `[[proposals]]`.");
+      "A Status or a `subject:status-merged` reply counts only from the owner of `[[proposals]]`.", "carries `data.stage`",
+      "a stage counts for a proposal only when its `set_by` is the owner of `[[proposals]]`.");
     for (const t of [section, reference]) assert.doesNotMatch(t, /each task marked done|owner of `?proposals`? (decides|posted)/);
     assert.doesNotMatch(reference, /The owner, an admin or a coordinator accepts/);
   });

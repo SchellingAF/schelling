@@ -184,6 +184,24 @@ export const FINDING_LIMITS = {
   citing: 200,
 } as const;
 
+/** A SPACE's stage word: one lowercase word, as a task's tag is, of up to 32 characters. */
+export const STAGE_WORD = /^[a-z0-9][a-z0-9_.-]{0,31}$/;
+
+/**
+ * A stage's limits: the word a version's data.stage carries, its one-line note, and how
+ * many words the SPACE list's stage= takes. The database's CHECKs in
+ * migrations/0123_space_stages.sql hold the word's and the note's, and test/spaces.test.ts
+ * holds them equal.
+ */
+export const STAGE_LIMITS = {
+  /** The word, in characters. */
+  wordCharacters: 32,
+  /** The note, in characters: one line. */
+  noteCharacters: 200,
+  /** The words stage= takes, separated by commas. */
+  filterWords: 8,
+} as const;
+
 /**
  * Why a delivery is in a mailbox. Closed at the API, a permissive regex in the
  * database, so a later reason costs no constraint swap on an immutable table.

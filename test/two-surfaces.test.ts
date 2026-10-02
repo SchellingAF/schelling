@@ -345,3 +345,59 @@ for (const surface of [overHttp, overConnector]) {
     });
   });
 }
+
+// ── the SPACE list's prefix, stage and counts (migrations/0123_space_stages.sql) ─
+
+describe("the SPACE list's prefix, stage and counts, over both surfaces", () => {
+  let owner: Key;
+
+  before(async () => {
+    owner = await agent();
+    for (const name of ["surf-stage-a", "surf-stage-b", "surf-stagez"]) {
+      const made = await http("POST", "/v1/spaces", owner, { name, title: "Staged", visibility: "public", join_policy: "open", document: true });
+      assert.ok(made.ok, made.text);
+    }
+  });
+
+  test("the connector proposes a version with a stage, and its list answers what HTTPS does", async () => {
+    // The owner decides here, so its version is current at once and sets the stage.
+    const proposed = await tool(
+      "schellingaf_oracle",
+      { action: "propose", space: "surf-stage-a", text: "The plan, as merged.", stage: { word: "merged", note: "Shipped in version 2." }, wait: 0 },
+      owner,
+    );
+    assert.ok(proposed.ok, proposed.text);
+    const profile = await http("GET", "/v1/spaces/surf-stage-a");
+    assert.equal(profile.data.stage.word, "merged");
+    assert.equal(profile.data.stage.note, "Shipped in version 2.");
+    assert.equal(profile.data.stage.set_by, owner.peerId);
+
+    const counted = await http("GET", "/v1/spaces?prefix=surf-stage-&stage=merged,declined&counts=true", owner);
+    assert.ok(counted.ok, counted.text);
+    assert.deepEqual(counted.data.items.map((i: any) => i.name), ["surf-stage-a"]);
+    assert.equal(counted.data.items[0].counts.document.version.post_id, profile.data.stage.post_id);
+    const viaConnector = await tool("schellingaf_spaces", { action: "list", prefix: "surf-stage-", stage: "merged,declined", counts: true }, owner);
+    assert.ok(viaConnector.ok, viaConnector.text);
+    assert.deepEqual(viaConnector.data, counted.data);
+    assert.match(viaConnector.text, /<<<peer stage word>>>\nmerged\n<<<end stage word>>>/);
+    assert.match(viaConnector.text, /version 1, 0 pending; 1 posts in 7 days/);
+
+    // Without counts neither carries them, and a prefix keeps the names that start with it.
+    const plain = await http("GET", "/v1/spaces?prefix=surf-stage-", owner);
+    assert.deepEqual(plain.data.items.map((i: any) => i.name), ["surf-stage-a", "surf-stage-b"]);
+    assert.ok(plain.data.items.every((i: any) => !("counts" in i)));
+    assert.deepEqual((await tool("schellingaf_spaces", { action: "list", prefix: "surf-stage-" }, owner)).data, plain.data);
+
+    // A refusal is the same refusal.
+    for (const [path, args] of [
+      ["/v1/spaces?stage=Merged", { stage: "Merged" }],
+      ["/v1/spaces?prefix=pr", { prefix: "pr" }],
+    ] as const) {
+      const overHttp = await http("GET", path, owner);
+      const overTool = await tool("schellingaf_spaces", { action: "list", ...args }, owner);
+      assert.equal(overHttp.code, "INVALID_REQUEST", overHttp.text);
+      assert.equal(overTool.code, "INVALID_REQUEST", overTool.text);
+      assert.ok(overTool.text.includes(overHttp.data.error.detail), overTool.text);
+    }
+  });
+});

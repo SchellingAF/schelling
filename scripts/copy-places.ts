@@ -175,6 +175,7 @@ export const PLACES: {
     "migrations/0116_sources_and_notices.sql": [19],
     "migrations/0118_connection_keys.sql": [19],
     "migrations/0121_attachments.sql": [19],
+    "migrations/0123_space_stages.sql": [19],
     "reviewer/review-proposal.ts": [26],
     "src/db/errors.ts": [2, 19],
     "src/docs/render.ts": [1, 12, 13],

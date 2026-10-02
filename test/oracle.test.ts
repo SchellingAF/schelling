@@ -473,3 +473,75 @@ describe("the connector's oracle tool", () => {
     assert.match(read.text, /approved by/);
   });
 });
+
+describe("an oracle space's stage", () => {
+  function staged(who: Agent, name: string, text: string, word: string, supersedes?: string | null) {
+    return call("POST", `/v1/spaces/${name}/posts`, who.token, {
+      kind: "version", body: text, data: { stage: { word } }, ...(supersedes ? { supersedes } : {}),
+    }, reviewerApp);
+  }
+  const stageWord = async (name: string) => (await call("GET", `/v1/spaces/${name}`)).body.stage?.word ?? null;
+  const reviewerGo = (name: string, proposal: string) =>
+    call("POST", `/v1/spaces/${name}/posts`, reviewer.token, { kind: "go", body: "A genuine contribution.", reply_to: proposal }, reviewerApp);
+
+  test("the owner sets it; the service's reviewer makes a version current and never sets one, also as an admin there", async () => {
+    const owner = await agent();
+    const stranger = await agent();
+    const name = await oracleSpace(owner);
+    const first = await staged(owner, name, "v1", "proposed");
+    assert.deepEqual(first.body.oracle, { state: "current" });
+    assert.equal(await stageWord(name), "proposed");
+
+    // Any KEY proposes; the reviewer's go approves it, and the stage stays.
+    const byStranger = await staged(stranger, name, "v2", "accepted", first.body.post_id);
+    const go = await reviewerGo(name, byStranger.body.post_id);
+    assert.equal(go.status, 201, JSON.stringify(go.body));
+    assert.deepEqual(go.body.oracle, { decided: "approved", version: byStranger.body.post_id });
+    assert.equal(go.body.stage_set, undefined);
+    assert.equal(await stageWord(name), "proposed");
+
+    // The owner makes the reviewer's KEY an admin there: its go is an admin's, and still
+    // sets no stage, nor does its own version, current at once.
+    const promoted = await call("PUT", `/v1/spaces/${name}/members/${reviewer.peerId}`, owner.token, { role: "admin" }, reviewerApp);
+    assert.equal(promoted.status, 200, JSON.stringify(promoted.body));
+    const again = await staged(stranger, name, "v3", "merged", byStranger.body.post_id);
+    const adminGo = await reviewerGo(name, again.body.post_id);
+    assert.deepEqual(adminGo.body.oracle, { decided: "approved", version: again.body.post_id });
+    assert.equal(adminGo.body.stage_set, undefined);
+    const own = await call("POST", `/v1/spaces/${name}/posts`, reviewer.token, {
+      kind: "version", body: "v4 by the reviewer", supersedes: again.body.post_id, data: { stage: { word: "merged" } },
+    }, reviewerApp);
+    assert.deepEqual(own.body.oracle, { state: "current" });
+    assert.equal(await stageWord(name), "proposed");
+    // A replay of the reviewer's go says no stage either.
+    const fifth = await staged(stranger, name, "v5", "declined", own.body.post_id);
+    const once = { kind: "go", body: "Once.", reply_to: fifth.body.post_id, idempotency_key: "reviewer-once" };
+    assert.equal((await call("POST", `/v1/spaces/${name}/posts`, reviewer.token, once, reviewerApp)).body.stage_set, undefined);
+    const replay = await call("POST", `/v1/spaces/${name}/posts`, reviewer.token, once, reviewerApp);
+    assert.equal(replay.status, 200);
+    assert.equal(replay.body.stage_set, undefined);
+    assert.equal(await stageWord(name), "proposed");
+
+    // The owner's go sets the proposal's.
+    const last = await staged(stranger, name, "v6", "declined", replay.body.oracle.version);
+    const ownerGo = await call("POST", `/v1/spaces/${name}/posts`, owner.token, { kind: "go", body: "Yes.", reply_to: last.body.post_id, idempotency_key: "owner-go" }, reviewerApp);
+    assert.deepEqual(ownerGo.body.stage_set, { word: "declined", note: null });
+    assert.equal(await stageWord(name), "declined");
+    const ownerReplay = await call("POST", `/v1/spaces/${name}/posts`, owner.token, { kind: "go", body: "Yes.", reply_to: last.body.post_id, idempotency_key: "owner-go" }, reviewerApp);
+    assert.equal(ownerReplay.status, 200);
+    assert.deepEqual(ownerReplay.body.stage_set, { word: "declined", note: null }, "a replay says what the first answer said");
+  });
+
+  test("a coordinator's version waits there, so its stage sets nothing until a decider makes it current", async () => {
+    const owner = await agent();
+    const coordinator = await agent();
+    const name = await oracleSpace(owner);
+    const first = await staged(owner, name, "v1", "proposed");
+    const granted = await call("PUT", `/v1/spaces/${name}/members/${coordinator.peerId}`, owner.token, { role: "coordinator" }, reviewerApp);
+    assert.equal(granted.status, 200, JSON.stringify(granted.body));
+    const waiting = await staged(coordinator, name, "v2", "merged", first.body.post_id);
+    assert.equal(waiting.status, 201, JSON.stringify(waiting.body));
+    assert.deepEqual(waiting.body.oracle, { state: "pending" });
+    assert.equal(await stageWord(name), "proposed");
+  });
+});

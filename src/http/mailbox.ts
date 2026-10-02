@@ -156,6 +156,15 @@ export function mountMailbox(app: Hono<Env>, db: Db): void {
              where p.post_id = any(${postIds}::uuid[])`
         : [];
 
+      // The stage a proposal sets once it is current, so its decider sees it on the notice.
+      // Asked only when the page holds a proposal, by the versions' primary key.
+      const proposed = deliveries.filter((d) => d.reason === "proposal" && d.post_id !== null).map((d) => d.post_id!);
+      const stages = proposed.length
+        ? await sql<{ post_id: string; stage_word: string; stage_note: string | null }[]>`
+            select v.post_id::text, v.stage_word, v.stage_note from schellingaf.oracle_versions v
+             where v.post_id = any(${proposed}::uuid[]) and v.stage_word is not null`
+        : [];
+
       const requestIds = idsOf("request_id");
       const requests = requestIds.length
         ? await sql<RequestRow[]>`
@@ -213,7 +222,7 @@ export function mountMailbox(app: Hono<Env>, db: Db): void {
                 on c.task_id = w.task_id and c.cycle = w.cycle and c.peer_id = decode(w.actor, 'hex')`
         : [];
 
-      return { head: head?.head_seq ?? "0", deliveries, posts, requests, messages, conversations, offers, tasks, checks };
+      return { head: head?.head_seq ?? "0", deliveries, posts, stages, requests, messages, conversations, offers, tasks, checks };
     });
 
     const result = waitFor > 0
@@ -230,6 +239,7 @@ export function mountMailbox(app: Hono<Env>, db: Db): void {
       : await readOnce();
 
     const postById = new Map(result.posts.map((p) => [p.post_id, p]));
+    const stageById = new Map(result.stages.map((v) => [v.post_id, { word: v.stage_word, note: v.stage_note }]));
     const requestById = new Map(result.requests.map((r) => [r.request_id, r]));
     const messageById = new Map(result.messages.map((m) => [m.message_id, m]));
     const conversationById = new Map(result.conversations.map((c) => [c.conversation_id, c]));
@@ -249,8 +259,10 @@ export function mountMailbox(app: Hono<Env>, db: Db): void {
       // A reject's reason, the one PEER text a task's notice carries.
       const check = task ? checkOf.get(`${d.task_id}/${d.task_cycle}/${d.actor}`) : undefined;
       const reason = check?.verdict === "reject" ? check.reason : null;
+      // A proposal's stage counts by the bytes it adds.
+      const stage = post && d.reason === "proposal" ? stageById.get(post.post_id) : undefined;
       const price = post
-        ? cost(post, detail)
+        ? cost(post, detail) + (stage ? Math.ceil(Buffer.byteLength(JSON.stringify(stage), "utf8") / 3) : 0)
         : request || offer
           ? REQUEST_COST
           : message
@@ -261,8 +273,11 @@ export function mountMailbox(app: Hono<Env>, db: Db): void {
       if (items.length > 0 && spent + price > budgetTokens) break;
 
       const envelope: Record<string, unknown> = { mailbox_seq: d.mailbox_seq, reason: d.reason };
-      if (post) envelope.post = render(post, detail);
-      else if (message) {
+      if (post) {
+        envelope.post = render(post, detail);
+        // A proposal's stage, beside the post, while the post is shown.
+        if (stage && !(envelope.post as { unavailable?: unknown }).unavailable) envelope.stage = stage;
+      } else if (message) {
         envelope.message = renderMessage(message, detail);
         const conversation = conversationById.get(message.conversation_id);
         // Your own state in it, so a request already answered is not answered twice.

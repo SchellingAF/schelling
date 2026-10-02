@@ -299,9 +299,11 @@ export function mountOracle(app: Hono<Env>, db: Db): void {
           decision_reason: string | null;
           decided_at: Date | null;
           same_as: string | null;
+          stage_word: string | null;
+          stage_note: string | null;
         })[]
       >`
-        select pr.*, v.state,
+        select pr.*, v.state, v.stage_word, v.stage_note,
                b.seq::text as base_seq,
                v.decision::text as decision_id, d.seq::text as decision_seq, d.kind as decision_kind,
                d.author_id as decision_author, left(d.body, 280) as decision_reason, v.decided_at,
@@ -338,6 +340,9 @@ export function mountOracle(app: Hono<Env>, db: Db): void {
         edits: r.base_seq,
         // The text of an earlier version again: the way an undo shows.
         same_text_as: r.same_as,
+        // The SPACE's stage this version sets once it is current, so whoever decides sees
+        // it first; absent where it carries none, and while the version is not shown.
+        ...(r.stage_word !== null && !post.unavailable ? { stage: { word: r.stage_word, note: r.stage_note } } : {}),
         decision: r.decision_id
           ? {
               post_id: r.decision_id,

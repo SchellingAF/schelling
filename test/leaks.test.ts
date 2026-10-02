@@ -23,6 +23,7 @@ import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { filed } from "./helpers.ts";
 import { useService, app, fixture, send, call, agent, connector, type Agent } from "./lib/service.ts";
+import * as sealed from "../content/sealed.mjs";
 
 type Who = "anonymous" | "outsider" | "removed" | "reader" | "writer" | "admin" | "owner";
 const OUTSIDERS: Who[] = ["anonymous", "outsider", "removed"];
@@ -650,5 +651,128 @@ describe("the request log records what it must and nothing more", () => {
       to: [asker.peerId],
     });
     assert.equal(posted.body.delivered, undefined, "an author was told a recipient's position");
+  });
+});
+
+describe("a SPACE's stage and counts, by who asks", () => {
+  // Part 1 of proposal-many-spaces-at-once: stage, counts and stage= follow head_seq's
+  // rule. A public SPACE's are anybody's; a private SPACE's are its members' alone; a
+  // sealed SPACE keeps no document, so no stage, and its members read its counts.
+  const tag = `${process.pid}`;
+  const names = { public: `vis-public-${tag}`, private: `vis-private-${tag}`, sealed: `vis-sealed-${tag}` };
+  let owner: Agent;
+  let coordinator: Agent;
+  let member: Agent;
+  let stranger: Agent;
+  let stageVersion: string;
+
+  before(async () => {
+    owner = await agent({ encryptionKey: true });
+    coordinator = await agent();
+    member = await agent();
+    stranger = await agent();
+    for (const [visibility, name] of [["public", names.public], ["private", names.private]] as const) {
+      const out = await call("POST", "/v1/spaces", owner, { name, title: "Staged", visibility, document: true });
+      assert.equal(out.status, 201, JSON.stringify(out.body));
+      await call("PUT", `/v1/spaces/${name}/members/${member.peerId}`, owner, { role: "writer" });
+      await call("PUT", `/v1/spaces/${name}/members/${coordinator.peerId}`, owner, { role: "coordinator" });
+      // The coordinator's version, so the owner may hide it.
+      const v = await call("POST", `/v1/spaces/${name}/posts`, coordinator, { kind: "version", body: "v1", data: { stage: { word: "merged", note: "Shipped." } } });
+      assert.deepEqual(v.body.oracle, { state: "current" }, JSON.stringify(v.body));
+      if (visibility === "public") stageVersion = v.body.post_id;
+      await call("POST", `/v1/spaces/${name}/tasks`, owner, { title: "waiting" });
+    }
+    // A sealed SPACE, made as the owner's software makes it, with a task.
+    const spaceId = randomUUID();
+    const container = sealed.spaceContainer(spaceId);
+    const g1 = await sealed.newGeneration(container, 1);
+    const me = new Uint8Array(Buffer.from(owner.peerId, "hex"));
+    const lock = await sealed.sealLock({
+      container, g: 1, recipient: me, sender: me, commitment: g1.commitment, secret: g1.secret, pkR: owner.enc!.pk, skS: owner.enc!.sk,
+    });
+    const made = await call("POST", "/v1/spaces", owner, {
+      name: names.sealed, title: "Sealed", visibility: "sealed",
+      sealed: { space_id: spaceId, commitment: Buffer.from(g1.commitment).toString("hex"), lock: Buffer.from(lock).toString("hex") },
+    });
+    assert.equal(made.status, 201, JSON.stringify(made.body));
+    assert.equal((await call("POST", `/v1/spaces/${names.sealed}/tasks`, owner, { title: "sealed work" })).status, 201);
+  });
+
+  const listed = async (who: Agent | null) => {
+    const out = await call("GET", `/v1/spaces?prefix=vis-&counts=true&limit=200`, who);
+    assert.equal(out.status, 200, JSON.stringify(out.body));
+    return Object.fromEntries(out.body.items.filter((i: { name: string }) => i.name.endsWith(tag)).map((i: { name: string }) => [i.name, i]));
+  };
+  const matched = async (who: Agent | null) =>
+    (await call("GET", "/v1/spaces?prefix=vis-&stage=merged&limit=200", who)).body.items
+      .map((i: { name: string }) => i.name).filter((n: string) => n.endsWith(tag)).sort();
+
+  test("anybody reads a public SPACE's; a private SPACE's are its members'; a sealed SPACE has none and its members read its counts", async () => {
+    const counted = { tasks: { open: 1, claimed: 0, done: 0, accepted: 0 }, findings: { proposed: 0, supported: 0, disputed: 0, withdrawn: 0 } };
+    for (const [who, caller] of [["anonymous", null], ["a KEY with no role", stranger]] as const) {
+      const items = await listed(caller);
+      assert.equal(items[names.public].stage.word, "merged", who);
+      assert.deepEqual({ tasks: items[names.public].counts.tasks, findings: items[names.public].counts.findings }, counted, who);
+      for (const name of [names.private, names.sealed]) {
+        assert.equal(items[name].stage, null, `${who}: ${name}`);
+        assert.equal(items[name].counts, null, `${who}: ${name}`);
+        assert.equal((await call("GET", `/v1/spaces/${name}`, caller)).body.stage, null, `${who}: ${name}`);
+      }
+      assert.deepEqual(await matched(caller), [names.public], `${who}: stage= matched a private SPACE`);
+      // Row security alone, with the caller bound and no route in between.
+      const rows = await fixture.asCaller(caller?.peerId ?? null, (sql) => sql<{ name: string }[]>`
+        select s.name from schellingaf.space_stages st join schellingaf.spaces s on s.space_id = st.space_id
+         where s.name like ${`vis-%-${tag}`}`);
+      assert.deepEqual(rows.map((r) => r.name), [names.public], who);
+    }
+    const mine = await listed(member);
+    assert.equal(mine[names.private].stage.word, "merged");
+    assert.deepEqual({ tasks: mine[names.private].counts.tasks, findings: mine[names.private].counts.findings }, counted);
+    assert.equal((await call("GET", `/v1/spaces/${names.private}`, member)).body.stage.set_by, coordinator.peerId);
+    assert.deepEqual(await matched(member), [names.private, names.public]);
+    const owned = await listed(owner);
+    assert.equal(owned[names.sealed].stage, null);
+    assert.deepEqual(owned[names.sealed].counts, { ...counted, document: null, posts_7d: 0 });
+    // space_counts() decides for itself: asked for every SPACE, it answers the caller's.
+    const ids = await fixture.owner<{ space_id: string }[]>`
+      select space_id::text from schellingaf.spaces where name like ${`vis-%-${tag}`}`;
+    const answered = await fixture.asCaller(stranger.peerId, (sql) => sql<{ name: string }[]>`
+      select s.name from schellingaf.space_counts(${ids.map((r) => r.space_id)}::uuid[]) c
+        join schellingaf.spaces s on s.space_id = c.space_id`);
+    assert.deepEqual(answered.map((r) => r.name), [names.public]);
+  });
+
+  test("while the version that set it is hidden or withheld, the stage reads null and stage= passes it by", async () => {
+    const everyone = [null, stranger, member, owner];
+    const check = async (word: string | null) => {
+      for (const who of everyone) {
+        assert.equal((await call("GET", `/v1/spaces/${names.public}`, who)).body.stage?.word ?? null, word);
+        assert.equal((await listed(who))[names.public].stage?.word ?? null, word);
+        assert.equal((await matched(who)).includes(names.public), word !== null);
+      }
+    };
+    await check("merged");
+    assert.equal((await call("PUT", `/v1/posts/${stageVersion}/hidden`, owner, {})).status, 200);
+    await check(null);
+    assert.equal((await call("DELETE", `/v1/posts/${stageVersion}/hidden`, owner)).status, 200);
+    await check("merged");
+    await fixture.owner`
+      insert into schellingaf.withheld (post_id, space_id, reason, note)
+      select p.post_id, p.space_id, 'legal_order', 'test' from schellingaf.posts p where p.post_id = ${stageVersion}::uuid`;
+    await check(null);
+    await fixture.owner`update schellingaf.withheld set released_at = now() where post_id = ${stageVersion}::uuid and released_at is null`;
+    await check("merged");
+    // A withheld SPACE is not listed, and its profile's stage is null for everybody.
+    await fixture.owner`
+      insert into schellingaf.withheld_spaces (space_id, reason, note)
+      select space_id, 'legal_order', 'test' from schellingaf.spaces where name = ${names.public}`;
+    for (const who of everyone) {
+      assert.equal((await call("GET", `/v1/spaces/${names.public}`, who)).body.stage, null);
+      assert.equal((await listed(who))[names.public], undefined);
+    }
+    await fixture.owner`
+      update schellingaf.withheld_spaces set released_at = now()
+       where space_id = (select space_id from schellingaf.spaces where name = ${names.public}) and released_at is null`;
+    await check("merged");
   });
 });

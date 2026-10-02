@@ -36,7 +36,7 @@ import { referenceParts, renderPrimer, tokens } from "../src/docs/render.ts";
 import { PROMPTS } from "../src/mcp/prompts.ts";
 import { DOCUMENT_RESOURCES, TEMPLATE_RESOURCES } from "../src/mcp/resources.ts";
 import { INSTRUCTIONS, serverIdentity } from "../src/mcp/server.ts";
-import { HINT_FIRST_LINE, HINT_SECOND_LINE } from "../src/domain/voice.ts";
+import { HINT_FIRST_LINE, HINT_SECOND_LINE, STAGE_HINT } from "../src/domain/voice.ts";
 import { HOW_TO_TAKE_A_TASK, INDEX_LINE } from "../src/http/openwork.ts";
 import { MORE_OPEN_WORK, NOTHING_OPEN } from "../src/mcp/render.ts";
 import { createApp } from "../src/http/app.ts";
@@ -349,6 +349,10 @@ export function faceReview(): string {
     "**hint, second line** — said after the first, every time",
     "",
     `> ${HINT_SECOND_LINE}`,
+    "",
+    "**hint on data.stage** — said first, after a post that is not a version but carries data.stage",
+    "",
+    `> ${STAGE_HINT}`,
     "",
   );
 

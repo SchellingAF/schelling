@@ -8,6 +8,7 @@ import { createHash } from "node:crypto";
 import { test, before, describe } from "node:test";
 import assert from "node:assert/strict";
 import { useService, app, fixture, call, agent, type Agent } from "./lib/service.ts";
+import { STAGE_LIMITS, STAGE_WORD } from "../src/surface/vocabulary.ts";
 
 useService("spaces");
 
@@ -665,6 +666,307 @@ describe("the welcome SPACE's name cannot be taken", () => {
       for (const key of ["API_HOST", "PUBLIC_ORIGIN", "CHALLENGE_KEY", "WELCOME_SPACE"]) {
         if (before[key] === undefined) delete process.env[key];
         else process.env[key] = before[key];
+      }
+    }
+  });
+});
+
+// ── the SPACE list's stage, prefix and counts (migrations/0123_space_stages.sql) ─────
+
+describe("the SPACE list's stage, prefix and counts", () => {
+  let made = 0;
+  /** A SPACE of `owner`'s, public unless `extra` says, named `name` or a new name. */
+  async function space(owner: Agent, extra: Record<string, unknown> = {}, name = `listed-${process.pid}-${made++}`): Promise<string> {
+    const out = await call("POST", "/v1/spaces", owner, { name, title: "Listed", visibility: "public", ...extra });
+    assert.equal(out.status, 201, JSON.stringify(out.body));
+    return name;
+  }
+  async function grant(owner: Agent, name: string, who: Agent, role: string) {
+    const out = await call("PUT", `/v1/spaces/${name}/members/${who.peerId}`, owner, { role });
+    assert.equal(out.status, 200, JSON.stringify(out.body));
+  }
+  async function posted(who: Agent, name: string, body: Record<string, unknown>) {
+    const out = await call("POST", `/v1/spaces/${name}/posts`, who, body);
+    assert.ok(out.status === 201 || out.status === 200, JSON.stringify(out.body));
+    return out.body;
+  }
+  async function item(name: string, query = "", who?: Agent) {
+    const out = await call("GET", `/v1/spaces?prefix=${name}${query}`, who);
+    assert.equal(out.status, 200, JSON.stringify(out.body));
+    return out.body.items.find((i: { name: string }) => i.name === name);
+  }
+  /** Posts written straight in, oldest first, as append_post numbers them: seq on from
+   *  the SPACE's last, and post_id and posted_at rising with it. */
+  async function backdated(name: string, author: Agent, hoursAgo: number[], noRole = false): Promise<string[]> {
+    const ids: string[] = [];
+    for (const hours of hoursAgo) {
+      const [row] = await fixture.owner<{ post_id: string }[]>`
+        with s as (
+          update schellingaf.spaces set last_seq = last_seq + 1 where name = ${name}
+          returning space_id, last_seq)
+        insert into schellingaf.posts (space_id, seq, admitted_revision, author_id, kind, body, content_hash, posted_at, no_role)
+        select s.space_id, s.last_seq, 1, decode(${author.peerId}, 'hex'), 'obs', 'backdated',
+               sha256(gen_random_uuid()::text::bytea), clock_timestamp() - make_interval(secs => ${hours * 3600}), ${noRole}
+          from s
+        returning post_id::text`;
+      ids.push(row!.post_id);
+    }
+    return ids;
+  }
+  const hide = (postId: string) => fixture.owner`
+    insert into schellingaf.space_hidden (post_id, space_id, hidden_by, revision)
+    select p.post_id, p.space_id, s.owner_id, 1 from schellingaf.posts p
+      join schellingaf.spaces s on s.space_id = p.space_id where p.post_id = ${postId}::uuid`;
+  const withhold = (postId: string) => fixture.owner`
+    insert into schellingaf.withheld (post_id, space_id, reason, note)
+    select p.post_id, p.space_id, 'legal_order', 'test' from schellingaf.posts p where p.post_id = ${postId}::uuid`;
+
+  test("counts: a passed claim reads open, open + claimed + done is open_tasks, and findings stand by status", async () => {
+    const owner = await agent();
+    const writers = [await agent(), await agent(), await agent(), await agent()];
+    const name = await space(owner, { join_policy: "open" });
+    for (const w of writers) await grant(owner, name, w, "writer");
+    for (let i = 1; i <= 5; i++) assert.equal((await call("POST", `/v1/spaces/${name}/tasks`, owner, { title: `task ${i}` })).status, 201);
+    const take = async (w: Agent) => (await call("POST", `/v1/spaces/${name}/tasks/next`, w, {})).body.task.number as number;
+    const finish = async (w: Agent, n: number) => {
+      const result = await posted(w, name, { kind: "result", body: `Task ${n} done.` });
+      assert.equal((await call("POST", `/v1/spaces/${name}/tasks/${n}/done`, w, { post_id: result.post_id })).status, 200);
+    };
+    assert.equal(await take(writers[0]!), 1);
+    assert.equal(await take(writers[1]!), 2);
+    assert.equal(await take(writers[2]!), 3);
+    await finish(writers[2]!, 3);
+    assert.equal((await call("PATCH", `/v1/spaces/${name}`, owner, { task_confirmations: 0 })).status, 200);
+    assert.equal(await take(writers[3]!), 4);
+    await finish(writers[3]!, 4);
+    // Task 2's claim passes: it reads open, as the task list shows it.
+    await fixture.owner`
+      update schellingaf.tasks t set claimed_until = now() - interval '1 minute'
+        from schellingaf.spaces s where s.space_id = t.space_id and s.name = ${name} and t.number = 2`;
+
+    const finding = (who: Agent, status: string, extra: Record<string, unknown> = {}) =>
+      posted(who, name, { kind: "finding", body: "Measured.", data: { claim: `a claim ${status}`, status, confidence: "low" }, ...extra });
+    await finding(owner, "proposed");
+    const replaced = await finding(owner, "supported");
+    await finding(owner, "disputed", { supersedes: replaced.post_id });
+    const retracted = await finding(owner, "supported");
+    await posted(owner, name, { kind: "obs", body: "Withdrawn: it did not hold.", retracts: retracted.post_id });
+    const hidden = await finding(writers[0]!, "proposed");
+    assert.equal((await call("PUT", `/v1/posts/${hidden.post_id}/hidden`, owner, {})).status, 200);
+
+    const listed = await item(name, "&counts=true");
+    assert.equal(listed.open_tasks, 4);
+    assert.deepEqual(listed.counts.tasks, { open: 2, claimed: 1, done: 1, accepted: 1 });
+    const t = listed.counts.tasks;
+    assert.equal(t.open + t.claimed + t.done, listed.open_tasks);
+    assert.deepEqual(listed.counts.findings, { proposed: 2, supported: 0, disputed: 1, withdrawn: 1 });
+    // The counts kept as findings change are the findings' own, in every SPACE here.
+    const [differ] = await fixture.owner<{ n: number }[]>`
+      select count(*)::int as n
+        from (select f.space_id,
+                     count(*) filter (where f.retracted_by is null and f.status = 'proposed')::int as proposed,
+                     count(*) filter (where f.retracted_by is null and f.status = 'supported')::int as supported,
+                     count(*) filter (where f.retracted_by is null and f.status = 'disputed')::int as disputed,
+                     count(*) filter (where f.retracted_by is not null)::int as withdrawn
+                from schellingaf.findings f where f.superseded_by is null group by f.space_id) r
+        full join schellingaf.space_finding_counts c on c.space_id = r.space_id
+       where (coalesce(r.proposed, 0), coalesce(r.supported, 0), coalesce(r.disputed, 0), coalesce(r.withdrawn, 0))
+             is distinct from (coalesce(c.proposed, 0), coalesce(c.supported, 0), coalesce(c.disputed, 0), coalesce(c.withdrawn, 0))`;
+    assert.equal(differ!.n, 0, "a SPACE's kept count differs from its findings");
+    assert.equal(listed.counts.document, null, "a work space that keeps none");
+    // The task list agrees about which are open.
+    const open = await call("GET", `/v1/spaces/${name}/tasks?state=open`, owner);
+    assert.deepEqual(open.body.items.map((i: { number: number }) => i.number).sort(), [2, 5]);
+    // Without counts=true, no counts; with it, every other field the same.
+    const plain = await item(name);
+    assert.equal("counts" in plain, false);
+    const { counts: _counts, ...rest } = listed;
+    assert.deepEqual(rest, plain);
+  });
+
+  test("counts: a document's current version and pending versions, as on the profile", async () => {
+    const owner = await agent();
+    const writer = await agent();
+    const name = await space(owner, { document: true });
+    await grant(owner, name, writer, "writer");
+    assert.deepEqual((await item(name, "&counts=true")).counts.document, { version: null, pending: 0 });
+    const v1 = await posted(owner, name, { kind: "version", body: "v1" });
+    await posted(writer, name, { kind: "version", body: "v2", supersedes: v1.post_id });
+    const listed = await item(name, "&counts=true");
+    const profile = await call("GET", `/v1/spaces/${name}`, owner);
+    assert.deepEqual(listed.counts.document, profile.body.document);
+    assert.deepEqual(listed.counts.document, { version: { post_id: v1.post_id, seq: v1.seq }, pending: 1 });
+  });
+
+  test("posts_7d is a row count of the last 168 hours, hidden and withheld posts left out, every author in", async () => {
+    const owner = await agent();
+    const stranger = await agent();
+    const name = await space(owner, { join_policy: "open" });
+    // Written straight in, with the times they were posted: chains are not what this counts.
+    const old = await backdated(name, owner, [400, 200, 168 + 1 / 60, 168 - 1 / 60, 100, 50, 10, 1]);
+    // A hidden post on each side of the edge, a withheld one inside, and one both.
+    await hide(old[1]!);
+    await hide(old[4]!);
+    await withhold(old[5]!);
+    await hide(old[6]!);
+    await withhold(old[6]!);
+    // A KEY with no role in this open SPACE, and a post withheld and then released.
+    await backdated(name, stranger, [0.5], true);
+    const [released] = await backdated(name, owner, [0.1]);
+    await withhold(released!);
+    await fixture.owner`update schellingaf.withheld set released_at = now() where post_id = ${released!}::uuid`;
+
+    const [row] = await fixture.owner<{ n: number }[]>`
+      select count(*)::int as n from schellingaf.posts p join schellingaf.spaces s on s.space_id = p.space_id
+       where s.name = ${name} and p.posted_at >= now() - interval '168 hours'
+         and not exists (select 1 from schellingaf.space_hidden h where h.post_id = p.post_id)
+         and not exists (select 1 from schellingaf.withheld w where w.post_id = p.post_id and w.released_at is null)`;
+    // Inside the window: 167.98, 100 (hidden), 50 (withheld), 10 (both), 1, the KEY with
+    // no role's, and the one released.
+    assert.equal(row!.n, 4);
+    assert.equal((await item(name, "&counts=true")).counts.posts_7d, row!.n);
+    assert.equal((await item(name, "&counts=true", stranger)).counts.posts_7d, row!.n, "the same for every reader");
+    // A SPACE with nothing in the window counts 0.
+    const quiet = await space(owner);
+    await backdated(quiet, owner, [300, 200]);
+    assert.equal((await item(quiet, "&counts=true")).counts.posts_7d, 0);
+  });
+
+  test("within a SPACE, post_id order is seq order, which posts_7d rests on", async () => {
+    const owner = await agent();
+    const writers = [await agent(), await agent(), await agent(), await agent()];
+    const name = await space(owner);
+    for (const w of writers) await grant(owner, name, w, "writer");
+    await Promise.all(writers.flatMap((w) => Array.from({ length: 6 }, (_, i) => posted(w, name, { kind: "obs", body: `at once ${i}` }))));
+    const [row] = await fixture.owner<{ n: number; out: number }[]>`
+      select count(*)::int as n,
+             count(*) filter (where x.prev is not null and (x.post_id < x.prev or x.posted_at < x.prev_at))::int as out
+        from (select p.post_id, p.posted_at, lag(p.post_id) over (order by p.seq) as prev,
+                     lag(p.posted_at) over (order by p.seq) as prev_at
+                from schellingaf.posts p join schellingaf.spaces s on s.space_id = p.space_id
+               where s.name = ${name}) x`;
+    assert.deepEqual(row, { n: 24, out: 0 });
+    // And what posts_7d counts from the sequence is that row count, a hidden post left out.
+    const [middle] = await fixture.owner<{ post_id: string }[]>`
+      select p.post_id::text from schellingaf.posts p join schellingaf.spaces s on s.space_id = p.space_id
+       where s.name = ${name} and p.seq = 12`;
+    await hide(middle!.post_id);
+    assert.equal((await item(name, "&counts=true")).counts.posts_7d, 23);
+  });
+
+  test("counts=true is refused in any other form, and stage is on every item and the profile", async () => {
+    for (const value of ["false", "1", "", "TRUE"]) {
+      const out = await call("GET", `/v1/spaces?counts=${value}`);
+      assert.equal(out.status, 400, value);
+      assert.equal(out.body.error.detail, "counts is true, or left out");
+    }
+    const owner = await agent();
+    const name = await space(owner);
+    const listed = await item(name);
+    assert.deepEqual(Object.keys(listed), [
+      "name", "title", "description", "visibility", "join_policy", "owner", "created_at", "categories",
+      "head_seq", "member_count", "oracle", "last_written_at", "open_tasks", "stage",
+    ]);
+    assert.equal(listed.stage, null);
+    assert.equal((await call("GET", `/v1/spaces/${name}`)).body.stage, null);
+  });
+
+  test("prefix keeps the names that start with it, byte for byte, in code-point order", async () => {
+    const owner = await agent();
+    for (const name of ["pro-a", "proa", "pro-z", "prob", "ab9", "ab9x", "aba", "abz", "abzz", "ac0"]) await space(owner, {}, name);
+    const names = async (prefix: string) =>
+      (await call("GET", `/v1/spaces?prefix=${prefix}`)).body.items.map((i: { name: string }) => i.name);
+    assert.deepEqual(await names("pro-"), ["pro-a", "pro-z"]);
+    // A prefix ending in a digit or in z: in byte order, whatever the database's collation.
+    assert.deepEqual(await names("ab9"), ["ab9", "ab9x"]);
+    assert.deepEqual(await names("abz"), ["abz", "abzz"]);
+    for (const bad of ["pr", "Pro", "-pro", "pro_", "p".repeat(64)]) {
+      const refused = await call("GET", `/v1/spaces?prefix=${bad}`);
+      assert.equal(refused.status, 400, bad);
+      assert.equal(refused.body.error.detail, "prefix is the start of a SPACE name: 3 to 63 of a-z, 0-9 and -, not starting with -");
+    }
+    // A cursor past the prefix: an empty page.
+    const past = await call("GET", "/v1/spaces?prefix=pro-&after=pro-zz");
+    assert.deepEqual([past.body.items, past.body.has_more], [[], false]);
+  });
+
+  test("stage is one to 8 words separated by commas, each counted as sent, and empty is left out", async () => {
+    for (const bad of ["a,,b", "Merged", "a,b,c,d,e,f,g,h,i", "a,a,a,a,a,a,a,a,a", ",a", "a,", "x".repeat(33), "in progress"]) {
+      const out = await call("GET", `/v1/spaces?stage=${encodeURIComponent(bad)}`);
+      assert.equal(out.status, 400, bad);
+      assert.equal(out.body.error.detail, "stage is one to 8 stage words, separated by commas");
+    }
+    assert.equal((await call("GET", "/v1/spaces?stage=a,a,a,a,a,a,a,a")).status, 200);
+    const all = await call("GET", "/v1/spaces?limit=200");
+    const empty = await call("GET", "/v1/spaces?stage=&limit=200");
+    assert.deepEqual(empty.body, all.body);
+  });
+
+  test("every filter together pages with no gap and no repeat, by name and newest first", async () => {
+    const base = `pg${process.pid}x`;
+    const wanted: string[] = [];
+    // Each kept SPACE: public, open, a document whose version set "merged", a task waiting,
+    // and the word to search for.
+    // A KEY's first day allows it five versions, so each SPACE has an owner of its own.
+    for (let i = 0; i < 7; i++) {
+      const owner = await agent();
+      const name = await space(owner, { join_policy: "open", document: true, description: "zebrafish trials" }, `${base}-${i}`);
+      await posted(owner, name, { kind: "version", body: "v1", data: { stage: { word: i % 2 ? "merged" : "accepted" } } });
+      await call("POST", `/v1/spaces/${name}/tasks`, owner, { title: "waiting" });
+      wanted.push(name);
+    }
+    // Each left out by one filter alone.
+    const owner = await agent();
+    const declined = await space(owner, { join_policy: "open", document: true, description: "zebrafish trials" }, `${base}-declined`);
+    await posted(owner, declined, { kind: "version", body: "v1", data: { stage: { word: "declined" } } });
+    await call("POST", `/v1/spaces/${declined}/tasks`, owner, { title: "waiting" });
+    const other = await space(owner, { join_policy: "open", document: true, description: "zebrafish trials" }, `other${process.pid}x-0`);
+    await posted(owner, other, { kind: "version", body: "v1", data: { stage: { word: "merged" } } });
+    await call("POST", `/v1/spaces/${other}/tasks`, owner, { title: "waiting" });
+    const idle = await space(owner, { join_policy: "open", document: true, description: "zebrafish trials" }, `${base}-idle`);
+    await posted(owner, idle, { kind: "version", body: "v1", data: { stage: { word: "merged" } } });
+
+    const filters = `prefix=${base}-&stage=merged,accepted&q=zebrafish&category=general&oracle=false&join_policy=open&open_tasks=true&counts=true&limit=2`;
+    const byName: string[] = [];
+    let after: string | null = null;
+    for (let page = 0; page < 10; page++) {
+      const out = await call("GET", `/v1/spaces?${filters}${after ? `&after=${after}` : ""}`);
+      assert.equal(out.status, 200, JSON.stringify(out.body));
+      byName.push(...out.body.items.map((i: { name: string }) => i.name));
+      if (!out.body.has_more) break;
+      after = out.body.next_after;
+    }
+    assert.deepEqual(byName, [...wanted].sort());
+    const newest: string[] = [];
+    let before: string | null = null;
+    for (let page = 0; page < 10; page++) {
+      const out = await call("GET", `/v1/spaces?${filters}&order=recent${before ? `&before=${before}` : ""}`);
+      assert.equal(out.status, 200, JSON.stringify(out.body));
+      newest.push(...out.body.items.map((i: { name: string }) => i.name));
+      if (!out.body.has_more) break;
+      before = out.body.next_before;
+    }
+    assert.deepEqual([...newest].sort(), [...wanted].sort());
+    assert.equal(new Set(newest).size, newest.length);
+    // stage= alone, and a word nobody set.
+    const merged = await call("GET", `/v1/spaces?prefix=${base}-&stage=merged&limit=200`);
+    assert.deepEqual(merged.body.items.map((i: { name: string }) => i.name), [...wanted.filter((_, i) => i % 2), `${base}-idle`].sort());
+    assert.deepEqual((await call("GET", `/v1/spaces?prefix=${base}-&stage=in-progress`)).body.items, []);
+  });
+
+  test("STAGE_LIMITS holds the database's checks", async () => {
+    const checks = await fixture.owner<{ name: string; def: string }[]>`
+      select c.conname as name, pg_get_constraintdef(c.oid) as def from pg_constraint c
+       where c.conname in ('space_stages_word_shape', 'space_stages_note_line',
+                           'oracle_versions_stage_word_shape', 'oracle_versions_stage_note_line')
+       order by c.conname`;
+    assert.equal(checks.length, 4);
+    for (const { name, def } of checks) {
+      if (name.endsWith("word_shape")) {
+        assert.ok(def.includes(`{0,${STAGE_LIMITS.wordCharacters - 1}}`), `${name}: ${def}`);
+        assert.ok(def.includes(STAGE_WORD.source.slice(1, -1)), `${name}: ${def}`);
+      } else {
+        assert.match(def, new RegExp(`<= ${STAGE_LIMITS.noteCharacters}\\b`), `${name}: ${def}`);
       }
     }
   });

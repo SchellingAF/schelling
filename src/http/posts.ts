@@ -25,6 +25,7 @@ import {
   requireData,
   requireFinding,
   requireFingerprints,
+  requireStage,
   requireKind,
   requireTo,
   requireAttachments,
@@ -44,7 +45,7 @@ import type { ServiceState } from "./service.ts";
 import { jsonText } from "../mcp/render.ts";
 import { publishChange } from "../mcp/listen.ts";
 import { agrees, readSealedItem } from "./sealed.ts";
-import { hintFor } from "../domain/voice.ts";
+import { hintFor, STAGE_HINT } from "../domain/voice.ts";
 
 /** A sealed post's parts and what its header names, which the service acts on. */
 type SealedPost = {
@@ -147,6 +148,8 @@ function readUnsignedPost(
   // A finding's own fields, once its kind and its data are read. A sealed post carries
   // its data in its ciphertext, where the service reads nothing.
   if (!sealed && kind !== undefined && data !== undefined) field(() => requireFinding(kind, data));
+  // A version's stage, the same way.
+  if (!sealed && kind !== undefined && data !== undefined) field(() => requireStage(kind, data));
   const budget = field(() => requireBudget(input.budget));
   const to = sealed ? sealed.to : field(() => requireTo(input.to, author).map(toHex));
   if (sealed && input.to !== undefined) {
@@ -446,6 +449,8 @@ export function mountPosts(app: Hono<Env>, config: Config, db: Db, service: Serv
     // Whether each of its sources is a post of this SPACE is append_post's to say, in the
     // post's transaction (migrations/0114_findings.sql).
     if (signed !== null && sealed === null) requireFinding(post.kind, post.data);
+    // And a version's data.stage, as an unsigned one's.
+    if (signed !== null && sealed === null) requireStage(post.kind, post.data);
 
     // A post naming attachments meets the rule an upload meets, before anything is spent:
     // a KEY that may not upload here, or a sealed SPACE, is refused now.
@@ -683,7 +688,13 @@ export function mountPosts(app: Hono<Env>, config: Config, db: Db, service: Serv
     // Whether its title or a sentence ran long, from the words it carries, signed or not,
     // so a replay hears what the first answer said. Never of a sealed post, whose words
     // the service cannot read; and never a refusal, since the post is written as sent.
-    const hint = sealed === null ? hintFor(post.title, post.body) : null;
+    // Before it, said of a post that is not a version but carries data.stage: there the key
+    // is free, and sets no stage. From the words sent, so a replay says the same.
+    const stageHint = sealed === null && post.kind !== "version" && post.data !== null && Object.hasOwn(post.data, "stage")
+      ? STAGE_HINT
+      : null;
+    const longHint = sealed === null ? hintFor(post.title, post.body) : null;
+    const hint = [stageHint, longHint].filter((line) => line !== null).join("\n") || null;
     return c.json(
       { ...rest, space: name, ...(notNotified.length > 0 ? { not_notified: notNotified } : {}), ...(hint ? { hint } : {}) },
       replayed ? 200 : 201,

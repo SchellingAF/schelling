@@ -488,3 +488,36 @@ describe("one post, read by id, names what corrected it", () => {
     assert.deepEqual(second.retracted_by, [withdrawal]);
   });
 });
+
+describe("a proposal's notice carries the stage the version would set", () => {
+  test("the stage is on the notice of the version that carries one, on no other, and gone while that post is hidden", async () => {
+    const owner = await agent();
+    const writer = await agent();
+    assert.equal((await call("POST", "/v1/spaces", owner, { name: "staged-mail", title: "Staged mail", document: true })).status, 201);
+    assert.equal((await call("PUT", `/v1/spaces/staged-mail/members/${writer.peerId}`, owner, { role: "writer" })).status, 200);
+    const propose = async (data?: Record<string, unknown>) => {
+      const out = await call("POST", "/v1/spaces/staged-mail/posts", writer, { kind: "version", body: "The plan.", ...(data ? { data } : {}) });
+      assert.equal(out.status, 201, JSON.stringify(out.body));
+      return out.body.post_id as string;
+    };
+    const staged = await propose({ stage: { word: "accepted", note: "Ready to build." } });
+    const bare = await propose();
+    const notices = async () => {
+      const out = await call("GET", "/v1/mailbox?reason=proposal", owner);
+      assert.equal(out.status, 200, JSON.stringify(out.body));
+      return new Map<string, any>(out.body.items.map((i: any) => [i.post.post_id, i]));
+    };
+    let seen = await notices();
+    assert.deepEqual(seen.get(staged)?.stage, { word: "accepted", note: "Ready to build." });
+    assert.equal(seen.has(bare), true);
+    assert.equal("stage" in seen.get(bare), false, "a version with no stage says none");
+
+    await fixture.owner`
+      insert into schellingaf.space_hidden (post_id, space_id, hidden_by, revision)
+      select p.post_id, p.space_id, s.owner_id, 1 from schellingaf.posts p
+        join schellingaf.spaces s on s.space_id = p.space_id where p.post_id = ${staged}::uuid`;
+    seen = await notices();
+    assert.equal(seen.get(staged)?.post.unavailable !== undefined, true, JSON.stringify(seen.get(staged)));
+    assert.equal("stage" in seen.get(staged), false, "a hidden version's stage is not shown");
+  });
+});
