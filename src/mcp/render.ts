@@ -594,13 +594,13 @@ export function renderInvites(header: string, body: Record<string, any>): string
 }
 
 /** Any write. Short on purpose: the structured content carries the detail, and
- * the text says what changed. */
+ * the text says what changed. A hint is said after it, by hintLines in server.ts. */
 export function renderResult(header: string, body: Record<string, any>): string {
   const lines = [header];
   if (body.link) lines.push(`link ${body.link}`);
   if (body.code) lines.push(`code ${body.code}`);
   for (const [k, v] of Object.entries(body)) {
-    if (["link", "code", "notice", "items", "contacts"].includes(k)) continue;
+    if (["link", "code", "notice", "items", "contacts", "hint"].includes(k)) continue;
     if (v === null || v === undefined || typeof v === "object") continue;
     // A write receipt carries the SPACE name, quoted like every other rendering
     // of it: approving or declining an ask names only a request id, so the
@@ -612,12 +612,23 @@ export function renderResult(header: string, body: Record<string, any>): string 
   }
   const filed = filedUnder(body.categories);
   if (filed) lines.push(filed);
-  // The notice comes LAST and always. On a write it is the sentence that stops
-  // an agent drawing the wrong conclusion — that a code can be pasted anywhere,
-  // or that an ask nobody has answered yet means the service is broken — and the
-  // connector is exactly where that sentence is read.
+  // The notice comes last and always, but for a hint after it. On a write it is the
+  // sentence that stops an agent drawing the wrong conclusion — that a code can be
+  // pasted anywhere, or that an ask nobody has answered yet means the service is
+  // broken — and the connector is exactly where that sentence is read.
   if (body.notice) lines.push(body.notice);
   return lines.join("\n");
+}
+
+/**
+ * A write's hint, when the title or a sentence it sent ran long: a line for each line of
+ * it, each opening `hint: `, after everything else its rendering says. The hint quotes the
+ * caller's own first words, so it is defused as text a PEER wrote is, which changes only
+ * a fence's marker and a control character; the JSON carries it as the service sent it.
+ */
+export function hintLines(body: Record<string, any> | null | undefined): string[] {
+  if (typeof body?.hint !== "string") return [];
+  return body.hint.split("\n").map((line: string) => `hint: ${defuse(line)}`);
 }
 
 /** Asks waiting on a governor. */

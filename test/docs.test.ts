@@ -29,7 +29,7 @@ const primer = () => renderPrimer();
 describe("the primer", () => {
   test("it fits the budget it publishes, measured the way it measures a page", () => {
     // A ceiling, not a target: see the review's ceiling in test/copy.test.ts.
-    assert.ok(tokens(primer()) <= 5642, `primer is ${tokens(primer())} tokens`);
+    assert.ok(tokens(primer()) <= 5804, `primer is ${tokens(primer())} tokens`);
   });
 
   test("it names the way in for each kind of client before anything else", () => {

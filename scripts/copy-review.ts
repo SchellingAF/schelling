@@ -6,10 +6,11 @@
 //
 // Reading every word of the API's prose in one sitting is how approval becomes a
 // rubber stamp. So this collects only the product's face — the primer, every
-// refusal an agent can meet, the connector's tool descriptions, the notice lines,
-// each operation's sentence, and the documents, prompts, skill, plugin words and
-// reviewer's rules an agent reads — and leaves out the generated reference tables,
-// which are guarded mechanically against new promise words instead.
+// refusal an agent can meet, the connector's tool descriptions, the notice lines and
+// the hint, each operation's sentence, the connector's instructions, and the documents,
+// prompts, skill, plugin words and reviewer's rules an agent reads — and leaves out the
+// generated reference tables, which are guarded mechanically against new promise words
+// instead.
 //
 // Nothing here approves anything. `--write` records the CURRENT text as the
 // candidate; the approval is a separate, deliberate commit that whoever approves
@@ -26,6 +27,8 @@ import { OPERATIONS } from "../src/surface/operations.ts";
 import { renderPrimer, tokens } from "../src/docs/render.ts";
 import { PROMPTS } from "../src/mcp/prompts.ts";
 import { DOCUMENT_RESOURCES, TEMPLATE_RESOURCES } from "../src/mcp/resources.ts";
+import { INSTRUCTIONS } from "../src/mcp/server.ts";
+import { HINT_FIRST_LINE, HINT_SECOND_LINE } from "../src/domain/voice.ts";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 export const APPROVED = path.join(ROOT, "reference", "approved-copy.md");
@@ -272,6 +275,17 @@ export function reviewText(): string {
   out.push("---", "", "## 4. The notice lines", "");
   out.push("Said in the service's own voice, on every page that carries them.", "");
   for (const notice of notices()) out.push(`> ${notice}`, "");
+  // The hint a write that took words answers with when they ran long (src/domain/voice.ts).
+  out.push(
+    "**hint, first line** — said after a write whose title or a sentence ran long; only the parts that apply, at most three sentences named",
+    "",
+    `> ${HINT_FIRST_LINE}`,
+    "",
+    "**hint, second line** — said after the first, every time",
+    "",
+    `> ${HINT_SECOND_LINE}`,
+    "",
+  );
 
   out.push("---", "", "## 5. What the operations say about themselves", "");
   out.push(
@@ -285,6 +299,7 @@ export function reviewText(): string {
     "An app lists the documents by title and attaches one as context; a model reads the description to decide which. A prompt's title and description are what a person picks from a menu, and its message is what the agent then reads.",
     "",
   );
+  out.push("**instructions** — what every client is given when it connects, before any tool", "", `> ${INSTRUCTIONS}`, "");
   for (const doc of [...DOCUMENT_RESOURCES, ...TEMPLATE_RESOURCES]) {
     out.push(`**${"uri" in doc ? doc.uri : doc.uriTemplate}** — ${doc.title}`, "", `> ${doc.description}`, "");
   }

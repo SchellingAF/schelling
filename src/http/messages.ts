@@ -27,6 +27,7 @@ import { LIMITS, OWN, SHARED, charge, refuseIfEmpty, spend } from "./ratelimit.t
 import { requireBearer, type Env } from "./app.ts";
 import { headsOf, recordHeads } from "./log.ts";
 import { agrees, readSealedItem } from "./sealed.ts";
+import { hintFor } from "../domain/voice.ts";
 
 /** The numbers, published in GET /v1/capabilities from here. The database holds
  * several again: the body's size and the retention range are CHECK constraints on
@@ -333,7 +334,10 @@ export function mountMessages(app: Hono<Env>, config: Config, db: Db): void {
         ${sealed ? db.write.array(sealed.locks) : null}::bytea[],
         ${sealed?.header ?? null}::bytea, ${sealed?.ciphertext ?? null}::bytea) as receipt`;
     const receipt = await delivered(c, me, row!.receipt);
-    return c.json({ ...receipt, notice: MESSAGE_NOTICE }, receipt.replayed === true ? 200 : 201);
+    // Whether a sentence of the first message ran long: never of a sealed one, whose words
+    // the service cannot read. The message is sent as written.
+    const hint = hintFor(null, text);
+    return c.json({ ...receipt, notice: MESSAGE_NOTICE, ...(hint ? { hint } : {}) }, receipt.replayed === true ? 200 : 201);
   });
 
   app.post("/v1/conversations/:id/messages", async (c) => {
@@ -372,7 +376,9 @@ export function mountMessages(app: Hono<Env>, config: Config, db: Db): void {
                                       ${about}, ${idempotencyKey}, ${config.welcomeSpace},
                                       ${sealed?.header ?? null}::bytea, ${sealed?.ciphertext ?? null}::bytea) as receipt`;
     const receipt = await delivered(c, me, row!.receipt);
-    return c.json(receipt, receipt.replayed === true ? 200 : 201);
+    // As for a first message: never of a sealed one, and the message is sent as written.
+    const hint = hintFor(null, text);
+    return c.json(hint ? { ...receipt, hint } : receipt, receipt.replayed === true ? 200 : 201);
   });
 
   // ── what a member does with a conversation ─────────────────────────────────

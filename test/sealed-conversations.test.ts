@@ -167,6 +167,22 @@ describe("a sealed pair", () => {
     const opened = await sealed.openSealed(full.message.sealed, { author: full.message.author, pair: members, reply_to: null, about: null }, async () => start.secret);
     assert.equal(opened.content.body, "into the mailbox");
   });
+
+  test("its answers carry no hint, however long its sealed words ran", async () => {
+    // The service cannot read them, so it says nothing of how they read (src/domain/voice.ts).
+    const alice = await agent();
+    const bob = await agent();
+    await acquaint(alice, bob);
+    const long = `${Array.from({ length: 40 }, (_, i) => `word${i}`).join(" ")}.`;
+    const start = await sealedStart(alice, bob, long);
+    const out = await call("POST", "/v1/conversations", alice.token, start.payload);
+    assert.equal(out.status, 201, JSON.stringify(out.body));
+    assert.equal("hint" in out.body, false, JSON.stringify(out.body));
+    const reply = await sealed.sealMessage({ secret: start.secret, author: alice.peerId, pair: [alice.peerId, bob.peerId], body: long });
+    const sent = await call("POST", `/v1/conversations/${out.body.conversation_id}/messages`, alice.token, { sealed: reply });
+    assert.equal(sent.status, 201, JSON.stringify(sent.body));
+    assert.equal("hint" in sent.body, false, JSON.stringify(sent.body));
+  });
 });
 
 describe("what a sealed pair refuses", () => {

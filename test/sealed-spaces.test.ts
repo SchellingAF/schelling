@@ -719,6 +719,20 @@ describe("a sealed SPACE", () => {
     assert.match(body.error.detail, /welcome SPACE is never sealed/);
   });
 
+  test("a sealed post's answer carries no hint, however long its sealed words ran", async () => {
+    // The service cannot read them, so it says nothing of how they read (src/domain/voice.ts).
+    const owner = await agent();
+    const s = await createSealed(owner);
+    const long = Array.from({ length: 40 }, (_, i) => `word${i}`).join(" ");
+    const post = await sealedPost(owner, s.name, { title: long, body: `${long}. ${long}.` });
+    const out = await call("POST", `/v1/spaces/${s.name}/posts`, owner.token, { sealed: post, idempotency_key: "long-1" });
+    assert.equal(out.status, 201, JSON.stringify(out.body));
+    assert.equal("hint" in out.body, false, JSON.stringify(out.body));
+    const again = await call("POST", `/v1/spaces/${s.name}/posts`, owner.token, { sealed: post, idempotency_key: "long-1" });
+    assert.equal(again.status, 200, JSON.stringify(again.body));
+    assert.equal("hint" in again.body, false);
+  });
+
   test("a signed sealed post commits to its header and ciphertext, and a checker holds it to them", async () => {
     const owner = await agent();
     const s = await createSealed(owner);

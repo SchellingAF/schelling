@@ -44,6 +44,7 @@ import type { ServiceState } from "./service.ts";
 import { jsonText } from "../mcp/render.ts";
 import { publishChange } from "../mcp/listen.ts";
 import { agrees, readSealedItem } from "./sealed.ts";
+import { hintFor } from "../domain/voice.ts";
 
 /** A sealed post's parts and what its header names, which the service acts on. */
 type SealedPost = {
@@ -679,8 +680,12 @@ export function mountPosts(app: Hono<Env>, config: Config, db: Db, service: Serv
     // decide, or the document it watches, has this post in its mailbox.
     const told = new Set(Array.isArray(delivered) ? (delivered as { recipient: string }[]).map((d) => d.recipient) : []);
     const notNotified = replayed || !scene ? [] : scene.reachable.filter((recipient) => !told.has(recipient));
+    // Whether its title or a sentence ran long, from the words it carries, signed or not,
+    // so a replay hears what the first answer said. Never of a sealed post, whose words
+    // the service cannot read; and never a refusal, since the post is written as sent.
+    const hint = sealed === null ? hintFor(post.title, post.body) : null;
     return c.json(
-      { ...rest, space: name, ...(notNotified.length > 0 ? { not_notified: notNotified } : {}) },
+      { ...rest, space: name, ...(notNotified.length > 0 ? { not_notified: notNotified } : {}), ...(hint ? { hint } : {}) },
       replayed ? 200 : 201,
     );
   });

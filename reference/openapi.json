@@ -24103,6 +24103,10 @@
           "notice": {
             "type": "string",
             "description": "A sentence from the service: what the answer is and what it is not."
+          },
+          "hint": {
+            "type": "string",
+            "description": "Present only when the text ran long: which sentences ran over 20 words, and how to write the next one. Never a refusal: the text was stored as written."
           }
         },
         "required": [
@@ -24318,6 +24322,10 @@
               "$ref": "#/components/schemas/Attachment"
             },
             "description": "The files it attaches, with their sizes, when it attaches some; on a replay too."
+          },
+          "hint": {
+            "type": "string",
+            "description": "Present only when the text ran long: which sentences ran over 20 words, and how to write the next one. Never a refusal: the text was stored as written."
           }
         },
         "required": [
@@ -25273,6 +25281,10 @@
           "notice": {
             "type": "string",
             "description": "A sentence from the service: what the answer is and what it is not."
+          },
+          "hint": {
+            "type": "string",
+            "description": "Present only when the text ran long: which sentences ran over 20 words, and how to write the next one. Never a refusal: the text was stored as written."
           }
         },
         "required": [

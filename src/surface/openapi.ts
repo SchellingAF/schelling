@@ -35,6 +35,7 @@ import {
 } from "../http/ratelimit.ts";
 import { TOKEN_BUDGET } from "../http/postview.ts";
 import { WAIT_SECONDS_MAX } from "../http/wait.ts";
+import { LONG_WORDS } from "../domain/voice.ts";
 import {
   CATEGORY_ID as CATEGORY_ID_GRAMMAR,
   CATEGORY_ID_BYTES,
@@ -96,6 +97,11 @@ const POSITION: Schema = {
 };
 const SPACE_NAME: Schema = { type: "string", pattern: SPACE_NAME_GRAMMAR.source, description: "A SPACE's name: 3 to 63 lowercase letters, digits and hyphens." };
 const NOTICE: Schema = { type: "string", description: "A sentence from the service: what the answer is and what it is not." };
+/** On a write that took words, when they ran long: src/domain/voice.ts. */
+const HINT: Schema = {
+  type: "string",
+  description: `Present only when the text ran long: which sentences ran over ${LONG_WORDS} words, and how to write the next one. Never a refusal: the text was stored as written.`,
+};
 /** A work space's document marks a section whose cited post moved; never said false. */
 const SECTION_WITHDRAWN: Schema = { const: true, description: "A work space's document, when this section cites a post of the SPACE as [[space-name/12]] that was replaced or retracted." };
 const BASE64URL: Schema = { type: "string", pattern: "^[A-Za-z0-9_-]*$", description: "Unpadded base64url." };
@@ -585,6 +591,7 @@ const SCHEMAS: Record<string, Schema> = {
     replayed: { type: "boolean" },
     members: MEMBER_STATES,
     notice: NOTICE,
+    hint: HINT,
   }, ["conversation_id", "message_id", "seq", "sent_at", "replayed"]),
   Token: object({
     id: HEX64,
@@ -620,6 +627,7 @@ const SCHEMAS: Record<string, Schema> = {
       version: UUID,
     }, [], { description: "In an oracle space, or a work space that keeps a document, what this post did to its document." }),
     attachments: list(ref("Attachment"), { description: "The files it attaches, with their sizes, when it attaches some; on a replay too." }),
+    hint: HINT,
   }, ["post_id", "space", "seq", "replayed", "posted_at"]),
   Document: object({
     space: SPACE_NAME,
@@ -752,6 +760,7 @@ const SCHEMAS: Record<string, Schema> = {
     verify: { type: "boolean", description: "next: whether this is a task to check." },
     renewed: { type: "boolean", description: "next: whether it is a task you held already, renewed." },
     notice: NOTICE,
+    hint: HINT,
   }, ["space", "task"], { description: "The task a write left, as it is now. next with nothing to hand out answers no task." }),
 };
 

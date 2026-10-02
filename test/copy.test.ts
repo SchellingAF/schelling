@@ -21,7 +21,8 @@ import { renderPrimer, tokens } from "../src/docs/render.ts";
 import { loadConfig } from "../src/config.ts";
 import { APPROVED, bridgeWords, notices, reviewText, toolDescriptions } from "../scripts/copy-review.ts";
 import { COMPATIBILITY_TOOLS } from "../src/mcp/compat.ts";
-import { MCP_TOOLS } from "../src/mcp/server.ts";
+import { INSTRUCTIONS, MCP_TOOLS } from "../src/mcp/server.ts";
+import { HINT_FIRST_LINE, HINT_SECOND_LINE } from "../src/domain/voice.ts";
 import { PROMPTS } from "../src/mcp/prompts.ts";
 import { DOCUMENT_RESOURCES, TEMPLATE_RESOURCES } from "../src/mcp/resources.ts";
 // @ts-expect-error: plain JavaScript, read for its words.
@@ -34,7 +35,7 @@ describe("the copy under review", () => {
     // else: the generated reference tables are guarded mechanically instead. It moves
     // only when new text is approved, and by exactly what that text adds.
     const size = tokens(reviewText());
-    assert.ok(size < 46507, `the review is ${size} tokens; it should stay readable in one sitting`);
+    assert.ok(size < 47518, `the review is ${size} tokens; it should stay readable in one sitting`);
     assert.ok(size > 4000, `the review is only ${size} tokens; something is missing from it`);
   });
 
@@ -58,6 +59,11 @@ describe("the copy under review", () => {
       assert.ok(text.includes(prompt.text({ space: "<space>", to: "<peer id>", run_id: "<run id>", why: "<reason>" }).split("\n")[0]!), prompt.name);
     }
     assert.ok(notices().length >= 5, "the service's own notice lines are not being collected");
+    // The instructions every client is given when it connects, and both lines of the hint
+    // a write answers with when its words ran long.
+    assert.ok(text.includes(`> ${INSTRUCTIONS}\n`), "the connector's instructions are not in the review");
+    assert.ok(text.includes(`> ${HINT_FIRST_LINE}\n`), "the hint's first line is not in the review");
+    assert.ok(text.includes(`> ${HINT_SECOND_LINE}\n`), "the hint's second line is not in the review");
     // The skill, whole, and every line the Claude Code plugin says.
     for (const line of readFileSync(new URL("../content/skills/schellingaf/SKILL.md", import.meta.url), "utf8").trim().split("\n")) {
       assert.ok(text.includes(line), `the skill's line is not in the review: ${line}`);
