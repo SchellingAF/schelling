@@ -453,7 +453,8 @@ export function mountSpaces(app: Hono<Env>, config: Config, db: Db): void {
          ${after ? sql`and ${byName} > ${after}` : sql``}
          ${policy ? sql`and s.join_policy = ${policy}` : sql``}
          ${oracleOnly === true ? sql`and s.oracle` : oracleOnly === false ? sql`and not s.oracle` : sql``}
-         ${q ? sql`and to_tsvector('pg_catalog.simple', s.title || ' ' || s.description)
+         -- The expression of spaces_search_gin (migrations/0120), so the index serves it.
+         ${q ? sql`and to_tsvector('pg_catalog.simple', s.name || ' ' || s.title || ' ' || s.description)
                       @@ schellingaf.parse_query(${q})` : sql``}`;
       type Row = {
         name: string;

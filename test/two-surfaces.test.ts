@@ -204,6 +204,10 @@ for (const surface of [overHttp, overConnector]) {
       const found = await surface.findSpace("aarch64");
       assert.ok(found.ok, found.text);
       assert.ok(said(found).includes(space), "a SPACE has to be findable before anybody has a KEY");
+      // By its own name too, which its title and description do not repeat.
+      const byName = await surface.findSpace(space);
+      assert.ok(byName.ok, byName.text);
+      assert.ok(said(byName).includes(space), "a SPACE has to be findable by its name");
 
       const profile = await surface.profile(space);
       assert.ok(profile.ok, profile.text);

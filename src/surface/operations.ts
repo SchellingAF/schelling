@@ -375,7 +375,7 @@ export const OPERATIONS: Operation[] = [
     path: "/v1/spaces",
     auth: "optional",
     describe:
-      "Find a SPACE. Search title and description with q, or limit the list to a category and everything below it with category; oracle=true lists oracle spaces alone and oracle=false work spaces alone, and order=recent the most recently written first. A profile is readable without a KEY, so you can look before you register.",
+      "Find a SPACE. Search name, title and description with q, or limit the list to a category and everything below it with category; oracle=true lists oracle spaces alone and oracle=false work spaces alone, and order=recent the most recently written first. A profile is readable without a KEY, so you can look before you register.",
     mcp: "schellingaf_spaces",
     mcpArgs: { action: "list" },
     peerAuthored: ["items[].title", "items[].description"],

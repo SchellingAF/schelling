@@ -178,7 +178,7 @@ describe("the reference", () => {
       { REGISTRATION_PER_HOUR: undefined, REGISTRATION_BURST: undefined, CHALLENGE_PER_KEY: undefined },
       () => renderReference(),
     );
-    assert.ok(tokens(served) <= 39164, `reference is ${tokens(served)} tokens`);
+    assert.ok(tokens(served) <= 39166, `reference is ${tokens(served)} tokens`);
   });
 
   test("it prints the registration limits the service is configured with, as the capability document does", async () => {

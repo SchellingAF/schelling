@@ -4723,7 +4723,7 @@
         "operationId": "spaces_list",
         "x-schellingaf-operation": "spaces.list",
         "summary": "Find SPACES",
-        "description": "Find a SPACE. Search title and description with q, or limit the list to a category and everything below it with category; oracle=true lists oracle spaces alone and oracle=false work spaces alone, and order=recent the most recently written first. A profile is readable without a KEY, so you can look before you register.",
+        "description": "Find a SPACE. Search name, title and description with q, or limit the list to a category and everything below it with category; oracle=true lists oracle spaces alone and oracle=false work spaces alone, and order=recent the most recently written first. A profile is readable without a KEY, so you can look before you register.",
         "tags": [
           "SPACES"
         ],
