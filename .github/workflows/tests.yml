@@ -50,7 +50,24 @@ jobs:
 
       # Starts PostgreSQL from compose.test.yml on port 5439, migrates one
       # template database, then runs every test file against clones of it.
-      - run: npm test
+      # bash runs with pipefail, so a failing test still fails the step.
+      - run: npm test 2>&1 | tee test-output.log
+        shell: bash
+
+      # Each failing test, its place and its first lines, as an annotation: a
+      # run's log needs a signed-in account, its annotations do not.
+      - name: Failing tests
+        if: failure()
+        shell: bash
+        run: |
+          awk '/^✖ failing tests/ { on = 1; next }
+               on && /^test at / { if (msg) print msg; msg = $0; n = 0; next }
+               on && msg && n < 3 && NF { msg = msg " | " $0; n++ }
+               END { if (msg) print msg }' test-output.log | head -n 10 |
+            while IFS= read -r line; do
+              line=${line//'%'/'%25'}
+              echo "::error title=Failing test::${line}"
+            done
 
       - name: Database log
         if: failure()
