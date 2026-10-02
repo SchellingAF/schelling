@@ -71,7 +71,7 @@
 
 import { createHmac, createPrivateKey, createPublicKey, generateKeyPairSync, randomBytes as nodeRandomBytes, sign } from "node:crypto";
 import { chmodSync, existsSync, linkSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
-import { homedir, hostname } from "node:os";
+import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { createInterface } from "node:readline";
 
@@ -204,8 +204,8 @@ async function mint(identity) {
     Buffer.from(challenge.challenge, "hex"),
   ]);
   const signature = sign(null, preimage, identity.key).toString("hex");
-  let label = `bridge on ${hostname()}`;
-  while (Buffer.byteLength(label, "utf8") > 64) label = label.slice(0, -1);
+  // The label says which program minted the token, never the machine it runs on.
+  const label = "bridge";
   const verified = await call("/v1/keys/verify", {
     public_key: identity.publicKeyHex, challenge: challenge.challenge, signature, label,
   });

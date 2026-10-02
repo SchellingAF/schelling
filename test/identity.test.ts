@@ -5,8 +5,11 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { generateKeyPairSync, randomBytes, sign as signBytes } from "node:crypto";
-import type postgres from "postgres";
+import postgres from "postgres";
+import { readFileSync, readdirSync } from "node:fs";
 import { useService, app, db, fixture, config, call, send, read, HOST } from "./lib/service.ts";
+import { PORT, SUPERUSER, MIGRATE_PASSWORD } from "./bootstrap.ts";
+import { publicKey } from "./helpers.ts";
 import { withEnv } from "./lib/env.ts";
 import type { Db } from "../src/db/sql.ts";
 import { createApp } from "../src/http/app.ts";
@@ -221,6 +224,42 @@ describe("minting a token", () => {
     const k = keypair();
     const res = await call("POST", "/v1/keys/challenge", null, { public_key: k.hex.toUpperCase() });
     assert.equal(res.status, 400);
+  });
+
+  test("the migration leaves no token labelled with the computer that made it", async () => {
+    // As the runner applies 0119: every file before it, tokens the bridge labelled
+    // "bridge on " and a host name, then the file, in a transaction of its own.
+    const name = `schellingaf_t_token_labels_${process.pid}`;
+    const admin = postgres(SUPERUSER);
+    await admin.unsafe(`create database ${name} owner schellingaf_owner`);
+    const owner = postgres({ host: "127.0.0.1", port: PORT, database: name, username: "schellingaf_migrate", password: MIGRATE_PASSWORD, max: 1, onnotice: () => {} });
+    try {
+      await owner`set role schellingaf_owner`;
+      await owner`create schema schellingaf`;
+      await owner`create table schellingaf.schema_migrations (version int primary key, name text not null, sha256 text not null, applied_at timestamptz not null default now())`;
+      const dir = new URL("../migrations/", import.meta.url);
+      const files = readdirSync(dir).filter((f) => /^\d{4}_.*\.sql$/.test(f)).sort();
+      const apply = async (file: string) => {
+        await owner.unsafe("begin");
+        await owner.unsafe(readFileSync(new URL(file, dir), "utf8"));
+        await owner.unsafe("commit");
+      };
+      for (const file of files.filter((f) => f < "0119")) await apply(file);
+      const [peer] = await owner<{ id: Buffer }[]>`select schellingaf.register_peer(${publicKey(`labels-${process.pid}`)}) as id`;
+      const labels = ["bridge on someones-laptop.local", "bridge on build-server", "bridge", "Claude Code on my laptop", null];
+      for (const label of labels) {
+        await owner`
+          insert into schellingaf.tokens (token_hash, peer_id, challenge_nonce, label, expires_at)
+          values (${randomBytes(32)}, ${peer!.id}, ${randomBytes(16)}, ${label}, now() + interval '90 days')`;
+      }
+      await apply("0119_token_labels.sql");
+      const rows = await owner<{ label: string | null }[]>`select label from schellingaf.tokens`;
+      assert.deepEqual(rows.map((r) => r.label).sort(), ["Claude Code on my laptop", "bridge", "bridge", "bridge", null].sort());
+    } finally {
+      await owner.end({ timeout: 5 });
+      await admin.unsafe(`drop database if exists ${name} with (force)`);
+      await admin.end({ timeout: 5 });
+    }
   });
 
   test("the published test-vector key can never be an identity here", async () => {

@@ -1,6 +1,6 @@
 {
   "name": "schellingaf",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Schelling Add Forward's connector over stdio, with your KEY kept on your own machine.",
   "keywords": [
     "mcp",

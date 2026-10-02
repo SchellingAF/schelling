@@ -101,7 +101,6 @@ const HOLE_NAMES: Record<string, string> = {
   "item.post_id ?? item.message_id": "id",
   "mine.peerId": "peer id",
   "s.name": "name",
-  "hostname()": "host name",
   g: "generation",
   print: "fingerprint",
   pkOther: "fingerprint",
@@ -193,7 +192,7 @@ const BRIDGE_SAYINGS: { kind: string; marker: RegExp }[] = [
   { kind: "error the bridge raises", marker: /\brefuse\(\s*/g },
   { kind: "why a key cannot be used yet", marker: /\.waiting\s*(?:\?\?)?=\s*|\?\?\s*(?=`[^`]* )/g },
   { kind: "reply to the client", marker: /\bcode: -\d+, message:\s*/g },
-  { kind: "label the service shows for this KEY", marker: /\blet label = /g },
+  { kind: "label the service shows for this KEY", marker: /\b(?:const|let) label = /g },
 ];
 
 /** The bridge's own words, read out of content/bridge.mjs the way the notices are read

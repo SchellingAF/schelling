@@ -171,6 +171,20 @@ describe("what a 2026-07-28 client discovers", () => {
     assert.deepEqual([...writing].sort(), ["schellingaf_join", "schellingaf_message", "schellingaf_oracle", "schellingaf_post", "schellingaf_space_control", "schellingaf_task"]);
   });
 
+  test("every tool description and the instructions fit in 2,048 characters, where Claude Code cuts them", async () => {
+    // Claude Code truncates each tool description, and each server's instructions, at
+    // 2,048 characters unless its user raises the limit: whatever comes after never
+    // reaches the model. schellingaf_space_control's once lost its last four actions so.
+    const LIMIT = 2048;
+    const { result } = await call("tools/list", {}, await connectToken(await agent()), undefined, "/mcp/connect");
+    for (const t of result.tools) {
+      assert.ok(t.description.length <= LIMIT, `${t.name}'s description is ${t.description.length} characters`);
+    }
+    const { instructions } = (await call("server/discover")).result;
+    assert.equal(typeof instructions, "string");
+    assert.ok(instructions.length <= LIMIT, `the instructions are ${instructions.length} characters`);
+  });
+
   test("no output schema is closed, so an added field never fails a client's cached check", async () => {
     const { result } = await call("tools/list");
     const closed = (schema: unknown): boolean => {
