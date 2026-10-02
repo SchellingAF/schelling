@@ -24,6 +24,7 @@ import { isMetadataDocumentId, redirectMatches, sameResource } from "../src/oaut
 import { FetchBusy, FetchRefused, fetchJsonDocument, refusedAddress, sharedFetch, type Fetched } from "../src/oauth/fetch.ts";
 import { networkOfAddress } from "../src/http/ratelimit.ts";
 import { OAUTH_REFUSALS } from "../src/surface/refusals.ts";
+import { REPLAY_GRACE_SECONDS } from "../src/oauth/routes.ts";
 
 const ORIGIN = `https://${HOST}`;
 const SITE = "https://site.schellingaf.test";
@@ -278,6 +279,9 @@ describe("the way through, for an app that registered itself", () => {
       await stream.until(/subscriptions\/acknowledged/);
       assert.match(stream.text, /"resourceSubscriptions":\["schellingaf:\/\/mailbox"\]/);
 
+      // Past the grace a repeat is a replay.
+      await fixture.owner`update schellingaf.oauth_requests set redeemed_at = now() - make_interval(secs => ${REPLAY_GRACE_SECONDS + 1})
+                            where code_hash = ${sha256(code)}`;
       const again = await token({ grant_type: "authorization_code", code, redirect_uri: redirect, client_id: clientId, code_verifier: verifier });
       assert.equal(again.body.error, "invalid_grant");
       await stream.until(/"resultType":"complete"/);
@@ -287,6 +291,15 @@ describe("the way through, for an app that registered itself", () => {
     } finally {
       stream.close();
     }
+  });
+
+  test("the same app trading its code again within moments is refused, and the token its first trade minted still works", async () => {
+    const { issued, code, redirect, clientId, verifier } = await connectApp(person);
+    const again = await token({ grant_type: "authorization_code", code, redirect_uri: redirect, client_id: clientId, code_verifier: verifier });
+    assert.equal(again.status, 400);
+    assert.equal(again.body.error, "invalid_grant");
+    const whoami = await rpc("/mcp/connect", "tools/call", { name: "schellingaf_whoami", arguments: {} }, issued.body.access_token);
+    assert.match(whoami.body.result.content[0].text, new RegExp(`reading as ${person.peerId}`));
   });
 
   test("the wrong verifier, the wrong return address or another app's id gets nothing, and the code still works after", async () => {
@@ -715,9 +728,12 @@ describe("an app identified by a document it publishes", () => {
     const issued = await token(fields);
     assert.equal(issued.status, 200);
 
-    // Forgotten, so a request that reached the app's document would fetch it.
+    // Forgotten, so a request that reached the app's document would fetch it; and
+    // past the grace, so the repeat is a replay.
     forgetDocuments();
     fetched = [];
+    await fixture.owner`update schellingaf.oauth_requests set redeemed_at = now() - make_interval(secs => ${REPLAY_GRACE_SECONDS + 1})
+                          where code_hash = ${sha256(code)}`;
     const again = await token(fields);
     assert.equal(again.body.error, "invalid_grant");
     assert.deepEqual(fetched, [], "a used code caused a fetch");

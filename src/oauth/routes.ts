@@ -52,6 +52,12 @@ export const SCOPES = ["read", "write"] as const;
 /** How long a request to connect waits for the person, and a code for the app. */
 const REQUEST_MINUTES = 10;
 
+/** How long after a code is traded the same app may trade it again and be refused
+ * without what the first trade minted being revoked. Smithery's servers trade one
+ * code twice, 0.7 seconds apart (2 October 2026), and revoking then threw away the
+ * token its first trade was given. A replay needs the code and its verifier both. */
+export const REPLAY_GRACE_SECONDS = 10;
+
 export const CONNECT_PATH = "/mcp/connect";
 export const connectResource = (config: Config) => `${config.publicOrigin}${CONNECT_PATH}`;
 export const resourceMetadataUrl = (config: Config) =>
@@ -469,8 +475,10 @@ export function mountOAuth(app: Hono<Env>, config: Config, db: Db): void {
     // past its five minutes is settled here, and one code cannot hold a fetch open
     // for a day.
     const codeHash = sha256(code);
-    const [pending] = await db.read<{ code_challenge: string; resource: string; client_id: string; redeemed: boolean; expired: boolean }[]>`
-      select code_challenge, resource, client_id, redeemed_at is not null as redeemed, code_expires_at <= now() as expired
+    const [pending] = await db.read<{ code_challenge: string; resource: string; client_id: string; redeemed: boolean; recent: boolean; expired: boolean }[]>`
+      select code_challenge, resource, client_id, redeemed_at is not null as redeemed,
+             redeemed_at > now() - make_interval(secs => ${REPLAY_GRACE_SECONDS}) as recent,
+             code_expires_at <= now() as expired
         from schellingaf.oauth_requests where code_hash = ${codeHash}`;
     const notHeld = (why: string) => oauthError(c, 400, "invalid_grant", "The code or its verifier does not hold.", {}, why);
     if (!pending || pending.client_id !== clientId) return notHeld("no live code for this app");
@@ -478,6 +486,10 @@ export function mountOAuth(app: Hono<Env>, config: Config, db: Db): void {
     const expected = Buffer.from(pending.code_challenge, "base64url");
     if (expected.length !== computed.length || !timingSafeEqual(expected, computed)) return notHeld("the verifier does not match");
     if (pending.redeemed) {
+      // The same app with the verifier again within the grace: refused, and what the
+      // first use minted stands, because an app that trades twice in a moment is
+      // the app (REPLAY_GRACE_SECONDS).
+      if (pending.recent) return notHeld("the code was already used, moments ago");
       // A code with its verifier, a second time: whatever the first use minted is
       // revoked, since one of the two was not the app (RFC 6749, section 4.1.2).
       await db.write`select schellingaf.oauth_redeem(${codeHash}, ${clientId}, ${redirectUri}, ${newToken().hash},
