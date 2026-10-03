@@ -996,6 +996,9 @@ export function renderReceipt(header: string, body: Record<string, any>, summari
       ? "signed with this app connection's key, which your KEY allowed and the service holds while it serves the connection: it shows the connection signed, not that the post was seen"
       : "signed by your KEY");
   }
+  // The task this POST closed or checked, as it stands after the call.
+  const task = taskLine(body);
+  if (task !== null) lines.push(task);
   lines.push(...readCostLine(body, summarised));
   const oracle = body.oracle;
   if (oracle?.state === "current") lines.push("this version is current: you may decide here, so it went straight in");
@@ -1006,13 +1009,60 @@ export function renderReceipt(header: string, body: Record<string, any>, summari
   if (body.stage_set) lines.push("this made the SPACE's stage:", ...stageFields(body.stage_set));
   // The files it carries, as every read lists them: on a replay too.
   if (Array.isArray(body.attachments) && body.attachments.length) lines.push(attachmentList(body.attachments));
-  if (Array.isArray(body.not_notified) && body.not_notified.length) {
-    lines.push(
-      `not told in their mailbox, because notices to them are spent for now, or they block the messages of a KEY with no role here: ${body.not_notified.join(" ")}. The post is written, and they read it in the SPACE`,
-    );
-  }
-  if (body.no_role === true) lines.push("marked no_role: your KEY holds no role in this SPACE");
+  if (Array.isArray(body.not_notified) && body.not_notified.length) lines.push(notNotifiedLine(body.not_notified));
+  if (body.no_role === true) lines.push(NO_ROLE_LINE);
   if (body.receipt) lines.push(`the service signed a receipt for it, object_id ${body.object_id}: see receipt`);
+  return lines.join("\n");
+}
+
+/** The PEERS a POST did not notify, and why. */
+const notNotifiedLine = (peers: unknown[]) =>
+  `not told in their mailbox, because notices to them are spent for now, or they block the messages of a KEY with no role here: ${peers.join(" ")}. The post is written, and they read it in the SPACE`;
+const NO_ROLE_LINE = "marked no_role: your KEY holds no role in this SPACE";
+
+/** The task a POST's task part changed, by its number and state, or null with none. A
+ * replay changed nothing, so it says where the task stands. */
+function taskLine(body: Record<string, any>, replayed = body.replayed === true): string | null {
+  const task = body.task;
+  if (typeof task?.number !== "number" || typeof task?.state !== "string") return null;
+  return replayed ? `task ${task.number} stands at ${task.state}` : `task ${task.number} is now ${task.state}`;
+}
+
+/**
+ * The answer to posts: the call's seqs, then one line a POST with its id, its seq, how it
+ * was signed and its task, each POST's hint, notices and role lines under its name, and
+ * what its readers pay for them all. `summarised` is whether every POST carries a summary.
+ */
+export function renderBatchReceipt(header: string, body: Record<string, any>, summarised = false): string {
+  const items: Record<string, any>[] = Array.isArray(body.posts) ? body.posts : [];
+  // The route answers 1 to 20 POSTS, never none.
+  const seqs = `seq ${items[0]?.seq} to ${items.at(-1)?.seq}`;
+  const lines = [
+    header,
+    body.replayed
+      ? `already posted: this idempotency_key replayed ${items.length} POSTS, ${seqs}, and nothing new was written`
+      : `posted ${items.length} POSTS in ${spaceName(body.space)}, ${seqs}`,
+  ];
+  const sum = { headline: 0, snippet: 0, full: 0 };
+  let priced = 0;
+  for (const [i, item] of items.entries()) {
+    const at = `posts[${i}]${typeof item.key === "string" ? ` (${item.key})` : ""}`;
+    const how = item.signed !== true ? "unsigned" : signedThroughConnection(item) ? "signed with this app connection's key" : "signed by your KEY";
+    const task = taskLine(item, body.replayed === true);
+    lines.push(`${at}: ${item.post_id} at seq ${item.seq}, ${how}${task === null ? "" : `; ${task}`}`);
+    lines.push(...hintLines(item).map((line) => `${at}: ${line}`));
+    if (Array.isArray(item.not_notified) && item.not_notified.length) lines.push(`${at}: ${notNotifiedLine(item.not_notified)}`);
+    if (item.no_role === true) lines.push(`${at}: ${NO_ROLE_LINE}`);
+    const cost = item.read_cost;
+    if (typeof cost?.headline === "number" && typeof cost?.snippet === "number" && typeof cost?.full === "number") {
+      sum.headline += cost.headline;
+      sum.snippet += cost.snippet;
+      sum.full += cost.full;
+      priced++;
+    }
+  }
+  if (priced > 0) lines.push(...readCostLine({ read_cost: sum, sealed: items.every((item) => item.sealed === true) }, summarised));
+  if (items.some((item) => item.receipt)) lines.push("the service signed a receipt for each: see posts[].receipt");
   return lines.join("\n");
 }
 

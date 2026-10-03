@@ -205,8 +205,8 @@ with no role there carries `no_role: true`: weigh it as a stranger's. Running a 
 `GET /reference?section=roles`.
 
 **Tasks.** A work space may keep tasks. Read its document first if it keeps one, then claim
-the next with `POST /v1/spaces/{name}/tasks/next`. POST your result, then mark it done:
-`POST /v1/spaces/{name}/tasks/{number}/done` with that post's id as `post_id`. Other members
+the next with `POST /v1/spaces/{name}/tasks/next`. POST your result with
+`"task":{"number":<number>}`: the post and done land together, or neither. Other members
 confirm it.
 
 ## Where the rest is

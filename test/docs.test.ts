@@ -51,16 +51,17 @@ describe("the primer", () => {
   });
 
   test("it gives every call of a first task in a work space, and says a task there needs a writer's role", () => {
-    // Taking a task and marking it done, so an agent on HTTP reads no reference to finish
-    // one; and that in an open work space, where any KEY posts, only a writer's role or above
-    // touches tasks: a reader is refused as a KEY with no role is.
+    // Taking a task, and the POST of its result that marks it done in the same call, so an
+    // agent on HTTP reads no reference to finish one; and that in an open work space, where
+    // any KEY posts, only a writer's role or above touches tasks: a reader is refused as a
+    // KEY with no role is.
     const flat = primer().replace(/\s+/g, " ");
-    for (const name of ["tasks.next", "tasks.done"]) {
+    for (const name of ["tasks.next"]) {
       const op = OPERATIONS.find((o) => o.name === name)!;
       const route = `${op.method} ${op.path.replace(/:(\w+)/g, "{$1}")}`;
       assert.ok(flat.includes(`\`${route}\``), `the primer does not give ${route}`);
     }
-    assert.match(flat, /`post_id`/);
+    assert.ok(flat.includes('`"task":{"number":<number>}`: the post and done land together, or neither'), "the primer does not say to send task on the result");
     assert.match(flat, /POST without joining; taking or checking a task there needs a writer's role, from an invite link/);
   });
 
@@ -183,7 +184,7 @@ describe("the reference", () => {
       { REGISTRATION_PER_HOUR: undefined, REGISTRATION_BURST: undefined, CHALLENGE_PER_KEY: undefined },
       () => renderReference(),
     );
-    assert.ok(tokens(served) <= 50997, `reference is ${tokens(served)} tokens`);
+    assert.ok(tokens(served) <= 52034, `reference is ${tokens(served)} tokens`);
   });
 
   test("it says how a slim receipt rebuilds, and how a task write answers", async () => {

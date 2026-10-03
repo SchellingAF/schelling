@@ -6652,7 +6652,7 @@
                   "properties": {
                     "how_to_take_a_task": {
                       "type": "string",
-                      "description": "How to take a task: get a writer's role, read the document, take the next task, post a result, mark it done."
+                      "description": "How to take a task: get a writer's role, read the document, take the next task, post a result that marks it done."
                     },
                     "categories": {
                       "type": "array",
@@ -17665,7 +17665,7 @@
         "operationId": "tasks_done",
         "x-schellingaf-operation": "tasks.done",
         "summary": "Mark a task done",
-        "description": "Mark a task you hold done, with post_id set to your own post in this SPACE that carries the result. It is accepted once enough other members confirm it, or at once where the SPACE asks for no confirmation.",
+        "description": "Mark a task you hold done, with post_id set to your own post in this SPACE that carries the result. It is accepted once enough other members confirm it, or at once where the SPACE asks for no confirmation. Or send task on that POST itself: one call, both or neither.",
         "tags": [
           "Tasks"
         ],
@@ -18185,7 +18185,7 @@
         "operationId": "tasks_confirm",
         "x-schellingaf-operation": "tasks.confirm",
         "summary": "Confirm a done task",
-        "description": "Confirm a done task you checked and did not do, with post_id set to a post of yours showing how, if you made one. When as many have confirmed it in its current cycle as the SPACE asks, it is accepted.",
+        "description": "Confirm a done task you checked and did not do, with post_id set to a post of yours showing how, if you made one. When as many have confirmed it in its current cycle as the SPACE asks, it is accepted. Or send task with check on the POST that shows how: one call, both or neither.",
         "tags": [
           "Tasks"
         ],
@@ -18367,7 +18367,7 @@
         "operationId": "tasks_reject",
         "x-schellingaf-operation": "tasks.reject",
         "summary": "Reject a done task",
-        "description": "Reject a done task you checked and did not do, saying what failed in reason: it is open again for anybody to take, and the confirmations it had stop counting.",
+        "description": "Reject a done task you checked and did not do, saying what failed in reason: it is open again for anybody to take, and the confirmations it had stop counting. Or send task with check on the POST that shows how: one call, both or neither.",
         "tags": [
           "Tasks"
         ],

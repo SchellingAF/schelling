@@ -18,6 +18,7 @@ import {
   renderPostBatch,
   renderPostPage,
   renderReceipt,
+  renderBatchReceipt,
   renderSpace,
   renderSpaceList,
   renderTask,
@@ -174,6 +175,48 @@ describe("the connector's text says what its JSON says", () => {
     });
     assert.match(text, new RegExp(`<<<peer attachments>>>\n${"4".repeat(64)} 2 bytes text/plain a\\.txt\n<<<end attachments>>>`));
     assert.doesNotMatch(renderReceipt("reading as x", { post_id: "p", seq: "3", space: "files-space" }), /attachments/);
+  });
+
+  test("a POST that closed a task says where the task now stands, and a replay where it stands", () => {
+    const task = { number: 7, task_id: "t", state: "done" };
+    const text = renderReceipt("reading as x", { post_id: "p", seq: "3", space: "work-space", replayed: false, task });
+    assert.ok(text.split("\n").includes("task 7 is now done"), text);
+    const again = renderReceipt("reading as x", { post_id: "p", seq: "3", space: "work-space", replayed: true, task: { ...task, state: "accepted" } });
+    assert.ok(again.split("\n").includes("task 7 stands at accepted"), again);
+    assert.doesNotMatch(renderReceipt("reading as x", { post_id: "p", seq: "3", space: "work-space" }), /task/);
+  });
+
+  test("a batch of POSTS says its seqs, a line a POST with how it was signed and its task, each one's hints and notices by its name, and what its readers pay in all", () => {
+    const cost = { headline: 10, snippet: 20, full: 100 };
+    const body = {
+      space: "work-space", space_id: "s", replayed: false,
+      posts: [
+        { key: "a", post_id: "p1", seq: "4", signed: true, signed_by: "connection", read_cost: cost, task: { number: 2, task_id: "t", state: "done" }, receipt: { v: 1 } },
+        { post_id: "p2", seq: "5", signed: false, read_cost: cost, hint: "a body runs long", not_notified: [OTHER], no_role: true, receipt: { v: 1 } },
+        { key: "c", post_id: "p3", seq: "6", signed: true, read_cost: cost, receipt: { v: 1 } },
+      ],
+    };
+    const lines = renderBatchReceipt("reading as x", body).split("\n");
+    assert.equal(lines[0], "reading as x");
+    assert.equal(lines[1], "posted 3 POSTS in \"work-space\", seq 4 to 6");
+    assert.ok(lines.includes("posts[0] (a): p1 at seq 4, signed with this app connection's key; task 2 is now done"), lines.join("\n"));
+    assert.ok(lines.includes("posts[1]: p2 at seq 5, unsigned"), lines.join("\n"));
+    assert.ok(lines.includes("posts[1]: hint: a body runs long"), lines.join("\n"));
+    assert.ok(lines.some((line) => line.startsWith("posts[1]: not told in their mailbox") && line.includes(OTHER)), lines.join("\n"));
+    assert.ok(lines.includes("posts[1]: marked no_role: your KEY holds no role in this SPACE"), lines.join("\n"));
+    assert.ok(lines.includes("posts[2] (c): p3 at seq 6, signed by your KEY"), lines.join("\n"));
+    assert.ok(lines.includes("Readers pay about 30 tokens for its headline, 60 for its snippet and 300 to open it."), lines.join("\n"));
+    assert.equal(lines.at(-1), "the service signed a receipt for each: see posts[].receipt");
+  });
+
+  test("a batch replayed says nothing new was written, and where each task stands", () => {
+    const text = renderBatchReceipt("reading as x", {
+      space: "work-space", space_id: "s", replayed: true,
+      posts: [{ key: "a", post_id: "p1", seq: "4", signed: false, task: { number: 2, task_id: "t", state: "open" } }, { post_id: "p2", seq: "5", signed: false }],
+    });
+    const lines = text.split("\n");
+    assert.equal(lines[1], "already posted: this idempotency_key replayed 2 POSTS, seq 4 to 5, and nothing new was written");
+    assert.ok(lines.includes("posts[0] (a): p1 at seq 4, unsigned; task 2 stands at open"), text);
   });
 
   test("a post's receipt names who was not told, and what it did in an oracle space", () => {

@@ -1911,6 +1911,11 @@ const KINDS_WITHOUT_TITLE = ["ack", "hold", "go", "veto", "stop"];
 
 /** A post for a sealed SPACE: its words sealed under the key in use, and signed by this KEY. */
 async function sealedPost(args, { fresh = false } = {}) {
+  // A reason is stored as the service is sent it, and a sealed SPACE's words never are:
+  // its rejects go through schellingaf_task, which says so.
+  if (args.task?.reason !== undefined && args.task?.reason !== null) {
+    throw new Refusal("INVALID_REQUEST. A sealed POST's task takes no reason: the service would store it as written. Reject with schellingaf_task action reject. Nothing was sent.");
+  }
   // The service reads no sealed title, so the bridge holds a sealed post to the rule every
   // other post meets, before anything is sealed or sent, in the service's TITLE_REQUIRED.
   if (typeof args.kind === "string" && !KINDS_WITHOUT_TITLE.includes(args.kind) && !(typeof args.title === "string" && args.title.trim() !== "")) {
@@ -1944,8 +1949,11 @@ async function sealedPost(args, { fresh = false } = {}) {
     sealed: { suite: SUITE, header: toHex(await headerDigest(header)), ciphertext: toHex(await sha256(label(LABELS.ciphertext), ciphertext)) },
   }));
   const signature = await signObject(object);
-  return { space: args.space, canonical: toB64u(object), alg: "ed25519", signature, sealed: parts };
+  return { space: args.space, canonical: toB64u(object), alg: "ed25519", signature, sealed: parts, ...beside(args) };
 }
+
+/** What rides beside a signed or sealed POST, unsigned: its task, and its key in posts. */
+const beside = (args) => ({ ...(args.task === undefined ? {} : { task: args.task }), ...(args.key === undefined ? {} : { key: args.key }) });
 
 /** SPACES the service has said take only signed posts: a post to one is signed first. */
 const signedSpaces = new Set();
@@ -1991,7 +1999,7 @@ async function signedPost(args) {
   const signature = await signObject(object);
   // A post's files ride beside what is signed: their hashes are in it, as fingerprints.
   const files = Array.isArray(args.attachments) && args.attachments.length > 0 ? { attachments: args.attachments } : {};
-  return { space: args.space, canonical: toB64u(object), ...(privatePart ? { private: toB64u(privatePart) } : {}), alg: "ed25519", signature, ...files };
+  return { space: args.space, canonical: toB64u(object), ...(privatePart ? { private: toB64u(privatePart) } : {}), alg: "ed25519", signature, ...files, ...beside(args) };
 }
 
 /** A sealed pair's start: the secret made here, locked for both KEYS, and the first
@@ -2366,6 +2374,82 @@ async function saveAttachment(args) {
  * A tool call on its way to the service, sealed where it must be. Answers the message
  * to send, and for a sealed post a way to seal it again when the key changed under it.
  */
+/** A post id's shape: a reply_to of any other names the key of an earlier POST of the call. */
+const UUID_SHAPE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * posts, prepared as prepare() prepares one POST. Each item's idempotency key is the call's
+ * and its own key, or its place, as the service derives an unsigned one's; an item with a
+ * key of its own keeps it. In a sealed SPACE each item is sealed alone; otherwise, while
+ * signing, each is signed alone, except one replying by key, which goes unsigned, since its
+ * parent's id is not known before the call. Prepared once for each idempotency key, so a
+ * resend is the same bytes and replays; after a restart too, since each private part's salt
+ * is drawn from the KEY, the SPACE and the item's key.
+ */
+async function batchPrepared(args, message, withArgs) {
+  const items = args.posts;
+  for (const [i, item] of items.entries()) {
+    if (item !== null && typeof item === "object" && item.attachments !== undefined && item.attachments !== null) {
+      throw new Refusal(`INVALID_REQUEST. posts[${i}]: a POST with attachments is sent alone, not in posts. Nothing was sent.`);
+    }
+  }
+  const isItem = (item) => item !== null && typeof item === "object" && !Array.isArray(item);
+  const keyOf = (item, i) => item.idempotency_key ?? (args.idempotency_key === undefined ? undefined : `${args.idempotency_key}:${item.key ?? i}`);
+  const repliesById = (item) => item.reply_to === undefined || item.reply_to === null || (typeof item.reply_to === "string" && UUID_SHAPE.test(item.reply_to));
+  // An item as the service takes it: the call names its SPACE.
+  const asItem = ({ space: _space, ...fields }) => fields;
+  const onceKey = args.idempotency_key === undefined ? undefined : `batch|${args.space}|${args.idempotency_key}`;
+  const asksSealed = items.some((item) => isItem(item) && item.sealed === true);
+  const sealedSpace = !signedSpaces.has(args.space) || asksSealed ? (await visibilityOf(args.space)) === "sealed" : false;
+  if (sealedSpace) {
+    for (const [i, item] of items.entries()) {
+      if (isItem(item) && !repliesById(item)) {
+        throw new Refusal(`INVALID_REQUEST. posts[${i}]: in a sealed SPACE a POST replies by post id. Post its parent first, then reply in a later call. Nothing was sent.`);
+      }
+    }
+    const sealAll = async (keys, fresh) => {
+      const out = [];
+      for (const [i, item] of items.entries()) {
+        out.push(isItem(item) ? asItem(await sealedPost({ ...item, space: args.space, idempotency_key: keys(item, i) }, { fresh: fresh && i === 0 })) : item);
+      }
+      return { ...args, posts: out };
+    };
+    const sealed = await once(onceKey, args, () => sealAll(keyOf, false));
+    return {
+      message: withArgs(sealed),
+      note: firstNote(args.space),
+      // Sealed under a key that changed before it arrived: every item sealed again under
+      // the new one, each with the idempotency key it had, and kept in place of the first.
+      again: async () => {
+        const had = sealed.posts.map((item) => (isItem(item) && typeof item.canonical === "string"
+          ? JSON.parse(Buffer.from(item.canonical, "base64url").toString("utf8")).idempotency_key
+          : undefined));
+        const next = await sealAll((_item, i) => had[i], true);
+        if (onceKey !== undefined) sealedOnce.set(onceKey, { plain: JSON.stringify(args), sealed: Promise.resolve(next) });
+        return withArgs(next);
+      },
+    };
+  }
+  if (asksSealed) {
+    throw new Refusal(`SEALED_REFUSED. You asked for a sealed post, and the service says ${args.space} is not sealed. Nothing was sent.`);
+  }
+  // Each item that is neither signed already nor replying by key, signed here.
+  const signAll = async () => {
+    signedSpaces.add(args.space);
+    return withArgs(await once(onceKey, args, async () => {
+      const out = [];
+      for (const [i, item] of items.entries()) {
+        out.push(isItem(item) && item.canonical === undefined && repliesById(item)
+          ? asItem(await signedPost({ ...item, space: args.space, idempotency_key: keyOf(item, i) }))
+          : item);
+      }
+      return { ...args, posts: out };
+    }));
+  };
+  if (signsEvery() || signedSpaces.has(args.space)) return { message: await signAll() };
+  return { message, sign: signAll };
+}
+
 async function prepare(message) {
   const name = message.params?.name;
   let args = message.params?.arguments;
@@ -2380,6 +2464,8 @@ async function prepare(message) {
   if (name === "schellingaf_get" && args.save_as !== undefined) return { answer: await saveAttachment(args) };
   // A file to read is fetched whole here, its hash checked, and only then cut to the budget.
   if (name === "schellingaf_get" && readsHere(args)) return { answer: await readAttachmentHere(args) };
+  // Several POSTS in one call: each signed, or sealed, alone, before anything is sent.
+  if (name === SEALING_TOOLS.post && typeof args.space === "string" && Array.isArray(args.posts)) return batchPrepared(args, message, withArgs);
   // A post's files go first, uploaded here, and the post names their hashes; prepared once
   // for each idempotency key, as the signing is, so a retry is the same post.
   if (name === SEALING_TOOLS.post && typeof args.space === "string" && Array.isArray(args.attachments) && args.attachments.length > 0) {
@@ -2912,10 +2998,13 @@ let listing = null;
 const NO_DRY_RUN = new Refusal("INVALID_REQUEST. The request body or query is not valid. (dry_run: no connector tool takes one, and nothing was done. To check a POST first, send it over HTTPS to POST /v1/spaces/{name}/posts with dry_run true) Read the error detail, correct the field it names, and send the request again. Nothing was sent.");
 
 /** Whether a call's arguments name a dry run, however it is spelt, as the connector reads
- *  them: at their top level, or at the top of their data or their budget. */
+ *  them: at their top level, or at the top of their data, their budget or their task; and
+ *  the same in each item of posts. */
 const namesDryRunIn = (args) => {
   const keys = (value) => (value !== null && typeof value === "object" && !Array.isArray(value) ? Object.keys(value) : []);
-  return [...keys(args), ...keys(args?.data), ...keys(args?.budget)].some((key) => key.toLowerCase().replace(/[^a-z0-9]/g, "") === "dryrun");
+  const named = (one) => [...keys(one), ...keys(one?.data), ...keys(one?.budget), ...keys(one?.task)];
+  const items = Array.isArray(args?.posts) ? args.posts : [];
+  return [...named(args), ...items.flatMap(named)].some((key) => key.toLowerCase().replace(/[^a-z0-9]/g, "") === "dryrun");
 };
 
 /** Why a call goes nowhere, with a toolset set: the service's own words for it, held equal

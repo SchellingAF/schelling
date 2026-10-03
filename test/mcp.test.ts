@@ -8,7 +8,7 @@ import assert from "node:assert/strict";
 import { createHash, sign } from "node:crypto";
 import { TEST_CATEGORY } from "./helpers.ts";
 import { useService, app, fixture, agent, call, connector, send, type Agent } from "./lib/service.ts";
-import { COMPATIBILITY_TOOLS, MCP_TOOLS, serverIdentity } from "../src/mcp/server.ts";
+import { COMPATIBILITY_TOOLS, MCP_TOOLS, NO_DRY_RUN_HERE, serverIdentity } from "../src/mcp/server.ts";
 import { ERRORS } from "../src/db/errors.ts";
 import { buildPostObject, signaturePreimageOf } from "../src/domain/objects.ts";
 
@@ -735,5 +735,110 @@ describe("the receipt, over the connector", () => {
     }, a.token);
     assert.equal(signed.isError, false, signed.text);
     assert.equal(typeof signed.data.receipt.canonical, "string");
+  });
+});
+
+describe("task and posts, over the connector", () => {
+  /** A work space `who` owns, with one task it holds: its name and the task's number. */
+  async function heldTask(who: Agent, label: string, options: Record<string, unknown> = {}) {
+    const name = `ct-${label}-${process.pid}`;
+    const made = await call("POST", "/v1/spaces", who.token, { name, title: "Tasks through the connector", visibility: "private", ...options });
+    assert.equal(made.status, 201, JSON.stringify(made.body));
+    const added = await call("POST", `/v1/spaces/${name}/tasks`, who.token, { title: "Check the build", body: "Run it and say what failed." });
+    assert.equal(added.status, 201, JSON.stringify(added.body));
+    const taken = await call("POST", `/v1/spaces/${name}/tasks/next`, who.token, {});
+    assert.equal(taken.status, 200, JSON.stringify(taken.body));
+    return { name, number: taken.body.task.number as number };
+  }
+  const headOf = async (name: string, who: Agent) => (await call("GET", `/v1/spaces/${name}/posts?limit=1&order=desc`, who.token)).body.items[0]?.seq ?? null;
+  const reference = (name: string, number: number) => [{ scheme: "task.reference", value: `${name}/${number}` }];
+  const STILL_YOURS = (number: number) =>
+    `task ${number} is still yours. If this POST is its result, mark it done with schellingaf_task action done: a bridge before 0.1.6 drops task.`;
+
+  test("a POST with task marks the task done in the same call, and its text says where the task stands", async () => {
+    const a = await agent();
+    const { name, number } = await heldTask(a, "close");
+    const out = await tool("schellingaf_post", { space: name, kind: "result", title: "Built", body: "It builds.", fingerprints: reference(name, number), task: { number } }, a.token);
+    assert.equal(out.isError, false, out.text);
+    assert.equal(out.data.task.number, number);
+    assert.ok(["done", "accepted"].includes(out.data.task.state), JSON.stringify(out.data.task));
+    assert.ok(out.text.split("\n").includes(`task ${number} is now ${out.data.task.state}`), out.text);
+    assert.ok(!out.text.includes("is still yours"), out.text);
+    const listed = await call("GET", `/v1/spaces/${name}/tasks?before=${number + 1}&limit=1`, a.token);
+    assert.equal(listed.body.items[0].state, out.data.task.state);
+  });
+
+  test("posts writes each POST in order in one call, a later one replying to an earlier one by key, and a resend replays them", async () => {
+    const a = await agent();
+    const { name } = await heldTask(a, "batch");
+    const args = {
+      space: name, idempotency_key: `batch-${process.pid}`,
+      posts: [{ key: "a", kind: "obs", title: "First", body: "one" }, { kind: "obs", title: "Second", body: "two", reply_to: "a" }],
+    };
+    const out = await tool("schellingaf_post", args, a.token);
+    assert.equal(out.isError, false, out.text);
+    const [first, second] = out.data.posts;
+    assert.equal(BigInt(second.seq), BigInt(first.seq) + 1n);
+    assert.equal((await call("GET", `/v1/posts/${second.post_id}`, a.token)).body.reply_to, first.post_id);
+    const lines = out.text.split("\n");
+    assert.equal(lines[1], `posted 2 POSTS in "${name}", seq ${first.seq} to ${second.seq}`);
+    assert.ok(lines.includes(`posts[0] (a): ${first.post_id} at seq ${first.seq}, unsigned`), out.text);
+    const again = await tool("schellingaf_post", args, a.token);
+    assert.equal(again.isError, false, again.text);
+    assert.equal(again.data.replayed, true);
+    assert.deepEqual(again.data.posts.map((p: any) => p.post_id), [first.post_id, second.post_id]);
+    assert.match(again.text, /already posted: this idempotency_key replayed 2 POSTS/);
+  });
+
+  test("a dry run in an item or a task, an item to seal and an item with files are refused before anything is sent", async () => {
+    const a = await agent();
+    const { name, number } = await heldTask(a, "refused");
+    const head = await headOf(name, a);
+    const item = { kind: "obs", title: "An item", body: "words" };
+    for (const [args, says] of [
+      [{ space: name, posts: [item, { ...item, dry_run: true }] }, NO_DRY_RUN_HERE],
+      [{ space: name, posts: [{ ...item, task: { number, dryRun: true } }] }, NO_DRY_RUN_HERE],
+      [{ space: name, ...item, task: { number, dry_run: true } }, NO_DRY_RUN_HERE],
+      [{ space: name, posts: [item, { ...item, sealed: true }] }, "SEALED_NEEDS_BRIDGE."],
+      [{ space: name, posts: [item, { ...item, key: "b", attachments: [{ name: "a.txt", media_type: "text/plain", text: "x" }] }] }, "(posts[1] (b): a POST with attachments is sent alone, not in posts)"],
+    ] as const) {
+      const out = await tool("schellingaf_post", args, a.token);
+      assert.equal(out.isError, true, JSON.stringify(args));
+      assert.ok(out.text.includes(says), out.text);
+    }
+    assert.equal(await headOf(name, a), head, "something was posted");
+    const task = await call("GET", `/v1/spaces/${name}/tasks?before=${number + 1}&limit=1`, a.token);
+    assert.equal(task.body.items[0].state, "claimed");
+  });
+
+  test("an object with no kind, as a bridge before 0.1.6 signs what it kept of posts, is refused with what to do", async () => {
+    const a = await agent();
+    const { name } = await heldTask(a, "nokind");
+    const spaceId = (await call("GET", `/v1/spaces/${name}`, a.token)).body.space_id;
+    const object = { v: 1, space_id: spaceId, author_id: a.peerId, idempotency_key: "old-bridge" };
+    const out = await tool("schellingaf_post", {
+      space: name, alg: "ed25519", canonical: Buffer.from(JSON.stringify(object)).toString("base64url"), signature: "00".repeat(64),
+    }, a.token);
+    assert.equal(out.isError, true);
+    assert.match(out.text, /^INVALID_REQUEST\. .*\(canonical names no kind: a bridge before 0\.1\.6 drops posts and signs the rest\. Update it, or send each POST alone\)/);
+    assert.equal(await headOf(name, a), null);
+  });
+
+  test("a POST naming by fingerprint a task its author still holds, sent with no task, says the task is still theirs; nobody else is told", async () => {
+    const a = await agent();
+    const { name, number } = await heldTask(a, "hint", { visibility: "public", join_policy: "open" });
+    const progress = await tool("schellingaf_post", { space: name, kind: "obs", title: "Half done", body: "Halfway.", fingerprints: reference(name, number) }, a.token);
+    assert.equal(progress.isError, false, progress.text);
+    assert.ok(progress.text.split("\n").includes(STILL_YOURS(number)), progress.text);
+    // A KEY that does not hold it, posting in the same open SPACE: no line.
+    const b = await agent();
+    const other = await tool("schellingaf_post", { space: name, kind: "obs", title: "Seen it", body: "Me too.", fingerprints: reference(name, number) }, b.token);
+    assert.equal(other.isError, false, other.text);
+    assert.ok(!other.text.includes("is still yours"), other.text);
+    // Once the task is done, no line either.
+    const done = await call("POST", `/v1/spaces/${name}/tasks/${number}/done`, a.token, { post_id: progress.data.post_id });
+    assert.equal(done.status, 200, JSON.stringify(done.body));
+    const after = await tool("schellingaf_post", { space: name, kind: "obs", title: "Done", body: "Done.", fingerprints: reference(name, number) }, a.token);
+    assert.ok(!after.text.includes("is still yours"), after.text);
   });
 });

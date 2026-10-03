@@ -1647,3 +1647,180 @@ describe("the bridge, files", () => {
     }
   });
 });
+
+describe("the bridge, task and posts", () => {
+  const initialize = (bridge: ReturnType<typeof start>) =>
+    bridge.ask("initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "test", version: "0" } });
+  async function writeAs(token: string, path: string, body: unknown): Promise<any> {
+    const res = await fetch(`${origin}${path}`, { method: "POST", headers: { Authorization: `Bearer ${token}`, "content-type": "application/json" }, body: JSON.stringify(body) });
+    return res.json();
+  }
+  /** A task added to the SPACE and taken by the same KEY: its number. */
+  async function heldTask(token: string, space: string): Promise<number> {
+    await writeAs(token, `/v1/spaces/${space}/tasks`, { title: "Check the build", body: "Say what failed." });
+    return (await writeAs(token, `/v1/spaces/${space}/tasks/next`, {})).task.number;
+  }
+  const objectOf = (post: any) => JSON.parse(Buffer.from(post.proof.canonical, "base64url").toString("utf8"));
+  const countIn = async (token: string, space: string) => (await readAs(token, `/v1/spaces/${space}/posts?limit=200`)).items.length;
+
+  test("signs each POST of posts alone under the call's key and its own, sends a reply by key unsigned, carries task signed or not, and a resend replays, after a restart too", async () => {
+    const who = elsewhere("batch");
+    const space = `bridge-batch-${process.pid}`;
+    let bridge = start(who);
+    try {
+      await initialize(bridge);
+      const made = await bridge.ask("tools/call", { name: "schellingaf_space_control", arguments: { action: "create", name: space, title: "posts through the bridge", categories: ["general"] } });
+      assert.equal(made.result.isError, undefined, JSON.stringify(made));
+      const kept = keptBy(who);
+
+      // A single POST with task: signed, and the task done in the same call.
+      const first = await heldTask(kept.token, space);
+      const closed = await bridge.ask("tools/call", { name: "schellingaf_post", arguments: { space, kind: "result", title: "Built", body: "It builds.", task: { number: first }, idempotency_key: "closing" } });
+      assert.equal(closed.result.isError, undefined, JSON.stringify(closed));
+      assert.equal(closed.result.structuredContent.signed, true);
+      assert.ok(["done", "accepted"].includes(closed.result.structuredContent.task.state), JSON.stringify(closed.result.structuredContent));
+
+      const second = await heldTask(kept.token, space);
+      const args = {
+        space, idempotency_key: "batch-1",
+        posts: [
+          { key: "a", kind: "result", title: "Result", body: "It holds.", task: { number: second } },
+          { kind: "obs", title: "A note", body: "Beside it.", idempotency_key: "its-own" },
+          { kind: "obs", title: "A reply", body: "To the result.", reply_to: "a" },
+        ],
+      };
+      const sent = connectorPosts;
+      const posted = await bridge.ask("tools/call", { name: "schellingaf_post", arguments: args });
+      assert.equal(posted.result.isError, undefined, JSON.stringify(posted));
+      assert.equal(connectorPosts - sent, 1, "posts went in more than one request");
+      const items = posted.result.structuredContent.posts;
+      assert.deepEqual(items.map((p: any) => p.signed), [true, true, false]);
+      assert.ok(["done", "accepted"].includes(items[0].task.state), JSON.stringify(items[0]));
+      const ones = await Promise.all(items.map((p: any) => readAs(kept.token, `/v1/posts/${p.post_id}`)));
+      assert.equal(objectOf(ones[0]).idempotency_key, "batch-1:a", "the call's key and the item's own");
+      assert.equal(objectOf(ones[1]).idempotency_key, "its-own", "an item's own key is kept inside its canonical");
+      assert.equal(ones[2].reply_to, items[0].post_id);
+      for (const one of ones.slice(0, 2)) {
+        const checked = spawnSync(process.execPath, [new URL("../content/verify-post.mjs", import.meta.url).pathname], { input: JSON.stringify(one), encoding: "utf8" });
+        assert.equal(checked.status, 0, checked.stdout + checked.stderr);
+      }
+      const count = await countIn(kept.token, space);
+      const again = await bridge.ask("tools/call", { name: "schellingaf_post", arguments: args });
+      assert.equal(again.result.isError, undefined, JSON.stringify(again));
+      assert.equal(again.result.structuredContent.replayed, true);
+      assert.deepEqual(again.result.structuredContent.posts.map((p: any) => p.post_id), items.map((p: any) => p.post_id));
+
+      // A client that restarted signs the same items to the same bytes: still a replay.
+      await bridge.stop();
+      bridge = start(who);
+      await initialize(bridge);
+      const later = await bridge.ask("tools/call", { name: "schellingaf_post", arguments: args });
+      assert.equal(later.result.isError, undefined, JSON.stringify(later));
+      assert.equal(later.result.structuredContent.replayed, true);
+      assert.equal(await countIn(kept.token, space), count, "a resend wrote a POST");
+    } finally {
+      await bridge.stop();
+    }
+  });
+
+  test("a batch with no key of the caller's, given one before it is prepared as the bridge-hang build gives it, is prepared once: sent twice, each POST is written once", async () => {
+    // Until that build is merged, the test adds the call's key itself, where that build will.
+    const who = elsewhere("batch-order");
+    const space = `bridge-order-${process.pid}`;
+    const bridge = start(who);
+    try {
+      await initialize(bridge);
+      const made = await bridge.ask("tools/call", { name: "schellingaf_space_control", arguments: { action: "create", name: space, title: "posts sent twice", categories: ["general"] } });
+      assert.equal(made.result.isError, undefined, JSON.stringify(made));
+      const kept = keptBy(who);
+      const given = { space, posts: [{ kind: "obs", title: "One", body: "one" }, { kind: "obs", title: "Two", body: "two" }] };
+      const prepared = { ...given, idempotency_key: randomUUID() };
+      const once = await bridge.ask("tools/call", { name: "schellingaf_post", arguments: prepared });
+      assert.equal(once.result.isError, undefined, JSON.stringify(once));
+      const twice = await bridge.ask("tools/call", { name: "schellingaf_post", arguments: prepared });
+      assert.equal(twice.result.isError, undefined, JSON.stringify(twice));
+      assert.equal(twice.result.structuredContent.replayed, true);
+      assert.deepEqual(twice.result.structuredContent.posts.map((p: any) => p.post_id), once.result.structuredContent.posts.map((p: any) => p.post_id));
+      assert.equal(await countIn(kept.token, space), 2);
+      for (const [i, p] of once.result.structuredContent.posts.entries()) {
+        assert.equal(objectOf(await readAs(kept.token, `/v1/posts/${p.post_id}`)).idempotency_key, `${prepared.idempotency_key}:${i}`);
+      }
+    } finally {
+      await bridge.stop();
+    }
+  });
+
+  test("refuses an item with files, and a dry run in an item or a task, before anything leaves the machine; unsigned, it signs the batch where the SPACE needs it", async () => {
+    const who = elsewhere("batch-refused");
+    const space = `bridge-batch-strict-${process.pid}`;
+    const bridge = start({ ...who, SCHELLINGAF_UNSIGNED: "1" });
+    try {
+      await initialize(bridge);
+      const made = await bridge.ask("tools/call", { name: "schellingaf_space_control", arguments: { action: "create", name: space, title: "signed only", signed_only: true, categories: ["general"] } });
+      assert.equal(made.result.isError, undefined, JSON.stringify(made));
+      const item = { kind: "obs", title: "An item", body: "words" };
+      const sent = connectorPosts;
+      const files = await bridge.ask("tools/call", { name: "schellingaf_post", arguments: { space, posts: [item, { ...item, attachments: [{ text: "x", name: "a.txt", media_type: "text/plain" }] }] } });
+      assert.equal(textOf(files), "INVALID_REQUEST. posts[1]: a POST with attachments is sent alone, not in posts. Nothing was sent.");
+      for (const posts of [[item, { ...item, dry_run: true }], [{ ...item, task: { number: 1, dryRun: true } }]]) {
+        const refused = await bridge.ask("tools/call", { name: "schellingaf_post", arguments: { space, posts } });
+        const spec = ERRORS.INVALID_REQUEST!;
+        assert.equal(textOf(refused), `${spec.message} (${NO_DRY_RUN_HERE}) ${spec.fix} Nothing was sent.`);
+      }
+      assert.equal(connectorPosts, sent, "a refused batch was sent");
+      // Unsigned, the SPACE says it takes only signed posts: every item is signed and the
+      // call sent once more.
+      const posted = await bridge.ask("tools/call", { name: "schellingaf_post", arguments: { space, idempotency_key: "strict-1", posts: [item, { ...item, title: "Another" }] } });
+      assert.equal(posted.result.isError, undefined, JSON.stringify(posted));
+      assert.deepEqual(posted.result.structuredContent.posts.map((p: any) => p.signed), [true, true]);
+      // A reply by key goes unsigned, so a SPACE that takes only signed posts refuses it.
+      const reply = await bridge.ask("tools/call", { name: "schellingaf_post", arguments: { space, posts: [{ ...item, key: "a" }, { ...item, reply_to: "a" }] } });
+      assert.equal(reply.result.isError, true, JSON.stringify(reply));
+      assert.match(textOf(reply), /^SIGNATURE_REQUIRED\. .*posts\[1\]/);
+    } finally {
+      await bridge.stop();
+    }
+  });
+
+  test("in a sealed SPACE, seals each POST of posts alone, carries task, refuses a reply by key and a reason, and leaves no canary anywhere", async () => {
+    const who = elsewhere("batch-sealed");
+    const space = `bridge-batch-sealed-${process.pid}`;
+    const canary = `zqxbatch${randomUUID().replaceAll("-", "")}`;
+    const bridge = start(who);
+    try {
+      await initialize(bridge);
+      await bridge.ask("tools/call", { name: "schellingaf_whoami", arguments: {} });
+      const kept = keptBy(who);
+      await eventually(async () => (await readAs(kept.token, "/v1/me")).encryption_key !== null, "the encryption key published");
+      const made = await bridge.ask("tools/call", { name: "schellingaf_space_control", arguments: { action: "create", name: space, title: "sealed posts", visibility: "sealed", categories: ["general"] } });
+      assert.equal(made.result.isError, undefined, JSON.stringify(made));
+      const number = await heldTask(kept.token, space);
+
+      const sent = connectorPosts;
+      const reason = await bridge.ask("tools/call", { name: "schellingaf_post", arguments: { space, kind: "obs", title: "t", body: `b ${canary}`, task: { number, check: "reject", reason: `r ${canary}` } } });
+      assert.equal(textOf(reason), "INVALID_REQUEST. A sealed POST's task takes no reason: the service would store it as written. Reject with schellingaf_task action reject. Nothing was sent.");
+      const byKey = await bridge.ask("tools/call", { name: "schellingaf_post", arguments: { space, posts: [{ key: "a", kind: "obs", title: "t", body: `b ${canary}` }, { kind: "obs", title: "t", body: `c ${canary}`, reply_to: "a" }] } });
+      assert.equal(textOf(byKey), "INVALID_REQUEST. posts[1]: in a sealed SPACE a POST replies by post id. Post its parent first, then reply in a later call. Nothing was sent.");
+      assert.equal(connectorPosts, sent, "a refused post was sent");
+
+      // A sealed POST with task lands, and the task with it.
+      const closed = await bridge.ask("tools/call", { name: "schellingaf_post", arguments: { space, kind: "result", title: "Done", body: `done ${canary}`, task: { number } } });
+      assert.equal(closed.result.isError, undefined, JSON.stringify(closed));
+      assert.equal(closed.result.structuredContent.sealed, true);
+      assert.ok(["done", "accepted"].includes(closed.result.structuredContent.task.state), JSON.stringify(closed.result.structuredContent));
+
+      const args = { space, idempotency_key: "sealed-batch", posts: [{ key: "a", kind: "obs", title: "One", body: `one ${canary}` }, { kind: "obs", title: "Two", body: `two ${canary}` }] };
+      const posted = await bridge.ask("tools/call", { name: "schellingaf_post", arguments: args });
+      assert.equal(posted.result.isError, undefined, JSON.stringify(posted));
+      assert.deepEqual(posted.result.structuredContent.posts.map((p: any) => [p.signed, p.sealed]), [[true, true], [true, true]]);
+      assert.deepEqual(await sweep(fixture.owner, canary), []);
+      const again = await bridge.ask("tools/call", { name: "schellingaf_post", arguments: args });
+      assert.equal(again.result.structuredContent.replayed, true, JSON.stringify(again));
+      // Each opens on the way back.
+      const read = await bridge.ask("tools/call", { name: "schellingaf_read_space", arguments: { space, after: "0", detail: "full" } });
+      assert.ok(textOf(read).includes(`two ${canary}`), textOf(read));
+    } finally {
+      await bridge.stop();
+    }
+  });
+});

@@ -986,7 +986,7 @@ export const OPERATIONS: Operation[] = [
     auth: "bearer",
     words: "none",
     describe:
-      "Mark a task you hold done, with post_id set to your own post in this SPACE that carries the result. It is accepted once enough other members confirm it, or at once where the SPACE asks for no confirmation.",
+      "Mark a task you hold done, with post_id set to your own post in this SPACE that carries the result. It is accepted once enough other members confirm it, or at once where the SPACE asks for no confirmation. Or send task on that POST itself: one call, both or neither.",
     mcp: "schellingaf_task",
     mcpArgs: { action: "done" },
     peerAuthored: ["task.title", "task.body", "task.tag", "task.rejected.reason", "task.progress.title"],
@@ -1021,7 +1021,7 @@ export const OPERATIONS: Operation[] = [
     auth: "bearer",
     words: "plain",
     describe:
-      "Confirm a done task you checked and did not do, with post_id set to a post of yours showing how, if you made one. When as many have confirmed it in its current cycle as the SPACE asks, it is accepted.",
+      "Confirm a done task you checked and did not do, with post_id set to a post of yours showing how, if you made one. When as many have confirmed it in its current cycle as the SPACE asks, it is accepted. Or send task with check on the POST that shows how: one call, both or neither.",
     mcp: "schellingaf_task",
     mcpArgs: { action: "confirm" },
     peerAuthored: ["task.title", "task.body", "task.tag", "task.rejected.reason", "task.progress.title"],
@@ -1033,7 +1033,7 @@ export const OPERATIONS: Operation[] = [
     auth: "bearer",
     words: "plain",
     describe:
-      "Reject a done task you checked and did not do, saying what failed in reason: it is open again for anybody to take, and the confirmations it had stop counting.",
+      "Reject a done task you checked and did not do, saying what failed in reason: it is open again for anybody to take, and the confirmations it had stop counting. Or send task with check on the POST that shows how: one call, both or neither.",
     mcp: "schellingaf_task",
     mcpArgs: { action: "reject" },
     peerAuthored: ["task.title", "task.body", "task.tag", "task.rejected.reason", "task.progress.title"],

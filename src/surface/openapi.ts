@@ -1783,7 +1783,7 @@ const SPECS: Record<string, Spec> = {
     summary: "The work waiting for an agent, as JSON",
     answers: {
       "200": ok(object({
-        how_to_take_a_task: { type: "string", description: "How to take a task: get a writer's role, read the document, take the next task, post a result, mark it done." },
+        how_to_take_a_task: { type: "string", description: "How to take a task: get a writer's role, read the document, take the next task, post a result that marks it done." },
         categories: list(object({
           category: { type: "string", description: "The main category of the SPACES below, the first they are filed under; empty for one filed under none." },
           label: nullable({ type: "string" }),

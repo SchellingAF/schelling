@@ -694,6 +694,57 @@ describe("a post through an app connection with a key", () => {
     assert.deepEqual(verifyPostRun(posts, site, null), []);
   });
 
+  test("posts: each item is signed with the connection key but one replying by key, task rides beside, and a resend replays", async () => {
+    const work = await makeSpace(person);
+    assert.equal((await call("POST", `/v1/spaces/${work.name}/tasks`, person.token, { title: "Check it", body: "Say what failed." })).status, 201);
+    const taken = await call("POST", `/v1/spaces/${work.name}/tasks/next`, person.token, {});
+    const number = taken.body.task.number as number;
+    const callKey = `batch-${randomUUID()}`;
+    const args = {
+      space: work.name, idempotency_key: callKey,
+      posts: [
+        { key: "a", kind: "result", title: "Result", body: "It holds.", task: { number } },
+        { kind: "obs", title: "A note", body: "Beside it." },
+        { kind: "obs", title: "A reply", body: "To the result.", reply_to: "a" },
+      ],
+    };
+    const out = await postThrough(connection.appToken, args);
+    assert.equal(out.result.isError, undefined, JSON.stringify(out.body));
+    const items = out.result.structuredContent.posts;
+    assert.deepEqual(items.map((p: any) => p.signed), [true, true, false]);
+    assert.ok(["done", "accepted"].includes(items[0].task.state), JSON.stringify(items[0]));
+    const text = out.result.content[0].text.split("\n");
+    assert.ok(text.includes(`posts[2]: ${items[2].post_id} at seq ${items[2].seq}, unsigned`), text.join("\n"));
+    assert.ok(text.some((line: string) => line.startsWith("posts[0] (a): ") && line.includes("signed with this app connection's key; task")), text.join("\n"));
+    // Each signed item's key is drawn from the call's and its own, or its place.
+    for (const [i, expected] of [[0, `${callKey}:a`], [1, `${callKey}:1`]] as const) {
+      const one = await call("GET", `/v1/posts/${items[i].post_id}`, person.token);
+      assert.equal(one.body.proof.signature.alg, "connection");
+      assert.equal(JSON.parse(Buffer.from(one.body.proof.canonical, "base64url").toString("utf8")).idempotency_key, connectionIdempotencyKey(connection.made!.seed, work.id, expected));
+      assert.deepEqual(verifyPost(one.body, site), []);
+    }
+    assert.equal((await call("GET", `/v1/posts/${items[2].post_id}`, person.token)).body.reply_to, items[0].post_id);
+    const again = await postThrough(connection.appToken, args);
+    assert.equal(again.result.isError, undefined, JSON.stringify(again.body));
+    assert.equal(again.result.structuredContent.replayed, true);
+    assert.deepEqual(again.result.structuredContent.posts.map((p: any) => p.post_id), items.map((p: any) => p.post_id));
+  });
+
+  test("a single POST's task rides beside what the connection signs, and no hint is read there", async () => {
+    const work = await makeSpace(person);
+    assert.equal((await call("POST", `/v1/spaces/${work.name}/tasks`, person.token, { title: "Check it", body: "Say what failed." })).status, 201);
+    const number = (await call("POST", `/v1/spaces/${work.name}/tasks/next`, person.token, {})).body.task.number as number;
+    const reference = [{ scheme: "task.reference", value: `${work.name}/${number}` }];
+    // No task: it lands, and at /mcp/connect nothing is said of the task, which it never drops.
+    const progress = await postThrough(connection.appToken, { space: work.name, kind: "obs", title: "Halfway", body: "Half.", fingerprints: reference });
+    assert.equal(progress.result.isError, undefined, JSON.stringify(progress.body));
+    assert.ok(!progress.result.content[0].text.includes("is still yours"), progress.result.content[0].text);
+    const out = await postThrough(connection.appToken, { space: work.name, kind: "result", title: "Done", body: "Done.", fingerprints: reference, task: { number } });
+    assert.equal(out.result.isError, undefined, JSON.stringify(out.body));
+    assert.equal(out.result.structuredContent.signed, true);
+    assert.ok(["done", "accepted"].includes(out.result.structuredContent.task.state), JSON.stringify(out.result.structuredContent));
+  });
+
   test("the tool takes no alg but ed25519 from an agent, so connection cannot be named through it", async () => {
     const out = await postThrough(connection.appToken, { space: space.name, kind: "obs", alg: "connection", canonical: "e30", signature: "00".repeat(64) });
     assert.equal(out.result.isError, true);
