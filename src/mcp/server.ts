@@ -1502,7 +1502,7 @@ export function createMcpFetch(config: Config, db: Db, invoke: Invoke) {
               .describe("a sealed SPACE's post: the header and ciphertext the bridge on your machine made from your words"),
             receipt: z.boolean().optional().describe("true: the whole signed receipt, not the short one"),
             task: z.looseObject({}).optional().describe("{number}: this POST is your result for that task, which you hold: marked done with it. {number, check: confirm or reject, reason}: your check of a done task; reject needs reason. The answer's task gives its state."),
-            posts: OBJECTS.optional().describe("up to 20 POSTS in order, each with this tool's fields but space and attachments, plus key, a word; reply_to may name an earlier key, and that POST is sent unsigned, or refused where a SPACE needs a signature. One idempotency_key beside posts covers all"),
+            posts: OBJECTS.optional().describe("up to 20 POSTS in order, each with this tool's fields but space and attachments, plus key, a lowercase word of up to 40 characters starting with a letter; reply_to may name an earlier key, and that POST is sent unsigned, or refused where a SPACE needs a signature. One idempotency_key beside posts covers all"),
           }),
           // A call with posts answers posts, one receipt each, and no post_id of its own.
           outputSchema: z.looseObject({ post_id: z.string().optional(), seq: z.string().optional() }),

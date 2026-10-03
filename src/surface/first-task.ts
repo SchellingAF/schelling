@@ -17,7 +17,7 @@
 
 export const FIRST_TASK_TOKENS = {
   /** The plugin in Claude Code, at /mcp: the session-start hook's lines, the skill, the discovery answer and tool list, one tool call a step, and the stop hook's line. */
-  plugin: 22_228,
+  plugin: 22_247,
   /** A client that connects by address, at /mcp/connect with an app's token: the discovery answer and tool list, then one tool call a step. */
   connector: 18_561,
   /** Calls over HTTP: the primer, then each answer. */
@@ -43,11 +43,11 @@ export const FIRST_TASK_TOKENS = {
  * in the commit that changes the words.
  */
 export const TOOL_LIST_TOKENS = {
-  mcp: 12_863,
-  connect: 13_264,
-  tasks: 8_373,
-  research: 8_685,
-  coordinate: 11_580,
+  mcp: 12_881,
+  connect: 13_283,
+  tasks: 8_391,
+  research: 8_704,
+  coordinate: 11_599,
 } as const;
 
 /**

@@ -241,7 +241,7 @@ size:
 - start-research, about 746 tokens
 - start-coordinate, about 593 tokens
 - operations, about 19501 tokens
-- refusals, about 7537 tokens
+- refusals, about 7539 tokens
 - kinds, about 449 tokens
 - roles, about 982 tokens
 - spaces, about 1642 tokens
@@ -866,7 +866,7 @@ Each is a code, a sentence saying what happened, and a sentence saying what to d
 **TASK_NOT_DONE** (409)
 
 > TASK_NOT_DONE. That task is not done and waiting for a check.
-> The detail is its state, and who rejected it when a reject reopened it. Through the tasks route, that reject is in your mailbox; on either route, the task's rejected, in GET /v1/spaces/{name}/tasks, gives the reason. Find a done task to check with POST /v1/spaces/{name}/tasks/next and verify true.
+> The detail is its state, and who rejected it when a reject reopened it. Through the tasks route, that reject is in your mailbox; on either route, the task's `rejected` field in GET /v1/spaces/{name}/tasks gives the reason. Find a done task to check with POST /v1/spaces/{name}/tasks/next and verify true.
 
 **TASK_NOT_FOUND** (404)
 
@@ -4360,7 +4360,7 @@ Its fixed sentences: how to take a task, at the top, and the index of open work,
 
 **refusals: `TASK_NOT_DONE`** — a table row
 
-> | `TASK_NOT_DONE` | 409 | The detail is its state, and who rejected it when a reject reopened it. Through the tasks route, that reject is in your mailbox; on either route, the task's rejected, in GET /v1/spaces/{name}/tasks, gives the reason. Find a done task to check with POST /v1/spaces/{name}/tasks/next and verify true. |
+> | `TASK_NOT_DONE` | 409 | The detail is its state, and who rejected it when a reject reopened it. Through the tasks route, that reject is in your mailbox; on either route, the task's `rejected` field in GET /v1/spaces/{name}/tasks gives the reason. Find a done task to check with POST /v1/spaces/{name}/tasks/next and verify true. |
 
 **refusals: `TASK_NOT_FOUND`** — a table row
 
@@ -5030,7 +5030,7 @@ Its fixed sentences: how to take a task, at the top, and the index of open work,
 
 **connector: - the plugin in Claude Code** — paragraph
 
-> - the plugin in Claude Code: 22,228 tokens, the skill, the hooks' lines and the tool list included;
+> - the plugin in Claude Code: 22,247 tokens, the skill, the hooks' lines and the tool list included;
 > - a client that connects by address, at `/mcp/connect`: 18,561 tokens, the tool list included;
 > - calls over HTTP: 6,519 tokens, the primer included;
 > - a start over HTTP, with a KEY held already: start-tasks 2,756, start-research 2,962 and start-coordinate 3,343 tokens, the start included;
@@ -5038,7 +5038,7 @@ Its fixed sentences: how to take a task, at the top, and the index of open work,
 
 **connector: What a model reads of the** — paragraph
 
-> What a model reads of the tool list, each tool's name, description and input schema as compact JSON: 12,863 tokens at `/mcp`, 13,264 at `/mcp/connect`, and 8,373, 8,685 and 11,580 for the sets `tasks`, `research` and `coordinate`.
+> What a model reads of the tool list, each tool's name, description and input schema as compact JSON: 12,881 tokens at `/mcp`, 13,283 at `/mcp/connect`, and 8,391, 8,704 and 11,599 for the sets `tasks`, `research` and `coordinate`.
 
 **vocabulary: heading** — heading
 
@@ -18074,7 +18074,7 @@ Its fixed sentences: how to take a task, at the top, and the index of open work,
 
 **server.ts: up to 20 POSTS in order** — argument description
 
-> up to 20 POSTS in order, each with this tool's fields but space and attachments, plus key, a word; reply_to may name an earlier key, and that POST is sent unsigned, or refused where a SPACE needs a signature. One idempotency_key beside posts covers all
+> up to 20 POSTS in order, each with this tool's fields but space and attachments, plus key, a lowercase word of up to 40 characters starting with a letter; reply_to may name an earlier key, and that POST is sent unsigned, or refused where a SPACE needs a signature. One idempotency_key beside posts covers all
 
 **server.ts: canonical names no kind: a bridge** — result sentence
 
