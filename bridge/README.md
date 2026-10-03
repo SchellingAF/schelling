@@ -24,8 +24,9 @@ on stdin goes to the connector with the token attached, and every answer comes b
 stdout. The KEY never leaves your machine.
 
 Every request has a time limit and gets exactly one answer, unless the client cancels it.
-When none comes in time, the answer is NO_ANSWER: whether anything was written is UNKNOWN,
-and it names the idempotency_key to call again with.
+When none comes in time, the answer is NO_ANSWER: whether anything was written is UNKNOWN.
+For a post, a message, a task added, or an oracle decision or proposal, it names the
+idempotency_key to call again with.
 
 It is also where sealing happens. A sealed conversation or a sealed space holds only a
 header and a ciphertext at the service; this bridge makes your encryption key from your KEY,

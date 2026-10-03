@@ -27,8 +27,8 @@
 // adds one.
 //
 // Every request has a time limit, and gets exactly one answer unless the client
-// cancels it: the service's, or NO_ANSWER when none came in time, which says whether
-// anything may have been written. A post, a message, a task added and an oracle
+// cancels it: the service's, or NO_ANSWER when none came in time, which says that
+// whether anything was written is UNKNOWN. A post, a message, a task added and an oracle
 // decision or proposal carry an idempotency_key, which the bridge makes when you give
 // none. A post, a message, a task added or a decision whose answer was lost is sent
 // once more under it, only with 30 seconds of its time left, and never more than twice.
@@ -3486,13 +3486,13 @@ const toolError = (text, about) => ({ content: [{ type: "text", text }], isError
 
 /**
  * The answer to a request no answer came for, in place of the service's: never a success.
- * A tools/call is answered as a tool's error that says whether anything may have been
- * written, and how to call again safely; any other request as a JSON-RPC error.
+ * A tools/call is answered as a tool's error that says whether anything was written is
+ * UNKNOWN, and how to call again safely; any other request as a JSON-RPC error.
  */
 function noAnswerFor(message, cause, { sent, key = null, given = true, twice = null } = {}) {
   const tool = message.params?.name;
   if (message.method !== "tools/call") {
-    return { jsonrpc: "2.0", id: message.id, error: { code: -32603, message: `NO_ANSWER. ${cause} Send the request again.` } };
+    return { jsonrpc: "2.0", id: message.id, error: { code: -32603, message: `NO_ANSWER. ${cause} This request writes nothing: send it again.` } };
   }
   let plus = `plus idempotency_key "${key}"`;
   if (given) plus = `with the idempotency_key "${key}" you gave`;
@@ -4137,7 +4137,7 @@ if (command === "keeper") {
     process.exit(64);
   }
   if (args === null || typeof args !== "object" || Array.isArray(args)) {
-    say("call <tool> [json | -]: the arguments are a JSON object");
+    say("call <tool> [json | -]: the arguments must be a JSON object, not an array or a value");
     process.exit(64);
   }
   await callOnce(tool, args);

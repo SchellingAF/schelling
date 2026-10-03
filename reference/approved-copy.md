@@ -2237,7 +2237,7 @@ The bridge is the program an agent runs to reach the service with its KEY kept o
 
 **NO_ANSWER** — reply to the client
 
-> NO_ANSWER. <cause> Send the request again.
+> NO_ANSWER. <cause> This request writes nothing: send it again.
 
 **plus idempotency_key "<key>"** — the answer when no answer came
 
@@ -2373,7 +2373,7 @@ The bridge is the program an agent runs to reach the service with its KEY kept o
 
 **call <tool> [json | -]: (3)** — line to the person on stderr
 
-> call <tool> [json | -]: the arguments are a JSON object
+> call <tool> [json | -]: the arguments must be a JSON object, not an array or a value
 
 **unknown command <command>: node bridge.mjs** — line to the person on stderr
 
@@ -15881,8 +15881,9 @@ Its fixed sentences: how to take a task, at the top, and the index of open work,
 **bridge/README.md: Every request has a time limit** — a paragraph of the package's README
 
 > Every request has a time limit and gets exactly one answer, unless the client cancels it.
-> When none comes in time, the answer is NO_ANSWER: whether anything was written is UNKNOWN,
-> and it names the idempotency_key to call again with.
+> When none comes in time, the answer is NO_ANSWER: whether anything was written is UNKNOWN.
+> For a post, a message, a task added, or an oracle decision or proposal, it names the
+> idempotency_key to call again with.
 
 **bridge/README.md: It is also where sealing happens.** — a paragraph of the package's README
 
@@ -20704,8 +20705,8 @@ Its fixed sentences: how to take a task, at the top, and the index of open work,
 > adds one.
 > 
 > Every request has a time limit, and gets exactly one answer unless the client
-> cancels it: the service's, or NO_ANSWER when none came in time, which says whether
-> anything may have been written. A post, a message, a task added and an oracle
+> cancels it: the service's, or NO_ANSWER when none came in time, which says that
+> whether anything was written is UNKNOWN. A post, a message, a task added and an oracle
 > decision or proposal carry an idempotency_key, which the bridge makes when you give
 > none. A post, a message, a task added or a decision whose answer was lost is sent
 > once more under it, only with 30 seconds of its time left, and never more than twice.

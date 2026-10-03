@@ -183,7 +183,7 @@ describe("one answer for each request id", () => {
     try {
       bridge.send({ jsonrpc: "2.0", id: "list-1", method: "tools/list", params: {} });
       const answer = await bridge.answerTo("list-1");
-      assert.deepEqual(answer?.error, { code: -32603, message: "NO_ANSWER. The service accepted the request and sent no answer to it. Send the request again." });
+      assert.deepEqual(answer?.error, { code: -32603, message: "NO_ANSWER. The service accepted the request and sent no answer to it. This request writes nothing: send it again." });
     } finally {
       await done();
     }
@@ -525,7 +525,7 @@ describe("no request waits without end", () => {
       bridge.send(listen("listen-2"));
       const answer = await bridge.answerTo("listen-2", 5000);
       assert.ok(since(from) >= at(45) - 100 && since(from) <= at(45) + 500, `answered after ${since(from)} ms`);
-      assert.equal(answer?.error?.message, `NO_ANSWER. The service's answer stopped arriving for ${Math.ceil(at(45) / 1000)} seconds. Send the request again.`);
+      assert.equal(answer?.error?.message, `NO_ANSWER. The service's answer stopped arriving for ${Math.ceil(at(45) / 1000)} seconds. This request writes nothing: send it again.`);
     } finally {
       await done();
     }
@@ -850,7 +850,7 @@ describe("a write whose answer was lost is sent once more, under the same key", 
       assert.equal(textOf(notSent), `NO_ANSWER. No answer came from the service within ${Math.ceil(at(20) / 1000)} seconds. The call was not sent to the service. Call it again.`);
       assert.deepEqual(about(notSent), { code: "NO_ANSWER", written: "no", cause: `No answer came from the service within ${Math.ceil(at(20) / 1000)} seconds.` });
       bridge.send({ jsonrpc: "2.0", id: 4, method: "prompts/list", params: {} });
-      assert.deepEqual((await bridge.answerTo(4, 4000))?.error, { code: -32603, message: "NO_ANSWER. The service accepted the request and sent no answer to it. Send the request again." });
+      assert.deepEqual((await bridge.answerTo(4, 4000))?.error, { code: -32603, message: "NO_ANSWER. The service accepted the request and sent no answer to it. This request writes nothing: send it again." });
       for (const m of bridge.out.filter((o) => o.id !== 4)) {
         assert.ok(!/\b(posted|done|ok)\b/.test(textOf(m)), `a NO_ANSWER reads as a result: ${textOf(m)}`);
       }
@@ -967,8 +967,8 @@ describe("call, the help and the start", () => {
     for (const [args, said] of [
       [[], /call <tool> \[json \| -\]: name the tool to run/],
       [["schellingaf_read_space", "{not json"], /the arguments are not JSON/],
-      [["schellingaf_read_space", "[1,2]"], /the arguments are a JSON object/],
-      [["schellingaf_read_space", "7"], /the arguments are a JSON object/],
+      [["schellingaf_read_space", "[1,2]"], /the arguments must be a JSON object, not an array or a value/],
+      [["schellingaf_read_space", "7"], /the arguments must be a JSON object, not an array or a value/],
     ] as const) {
       const usage = await callAgainst({}, [...args]);
       assert.equal(usage.code, 64, `${args.join(" ")}: ${usage.err}`);
