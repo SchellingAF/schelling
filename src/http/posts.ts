@@ -37,7 +37,7 @@ import {
 } from "../domain/validate.ts";
 import { authorClause, authorOf, boundedNumber, budgetCut, cursor, itemCost, postColumns, detailOr, hideOldVersions, kindClause, kindsOf, openPart, openParts, PAGE_DETAILS, PostPage, readCost, readDenied, render, tokenBudget, type Detail, type PostRow, type Written, withinBudget } from "./postview.ts";
 import { charge, CONCURRENT_READS_PER_CALLER, emptyOf, holdRead, limitRead, LIMITS, openPostsPerDay, OWN, READS_PER_MINUTE, readKey, SHARED, spend } from "./ratelimit.ts";
-import { connectorSignedWith, floorPlace, inProcessCall, optionalBearer, requireBearer, type Env } from "./app.ts";
+import { connectorSignedWith, floorPlace, optionalBearer, requireBearer, type Env } from "./app.ts";
 import { RANKS, receipt } from "./spaces.ts";
 import { firstDay } from "./auth.ts";
 import { ATTACHMENT_LIMITS, isFinishedStage, SUMMARY_MAX_BYTES } from "../surface/vocabulary.ts";
@@ -49,7 +49,7 @@ import { RECEIPT_VERSION, type ServiceState } from "./service.ts";
 import { jsonText } from "../mcp/render.ts";
 import { publishChange } from "../mcp/listen.ts";
 import { agrees, readSealedItem } from "./sealed.ts";
-import { dryRunHint, hintForPost, STAGE_HINT } from "../domain/voice.ts";
+import { DRY_RUN_STAGE_HINT, hintForPost, NOTHING_POSTED, STAGE_HINT } from "../domain/voice.ts";
 
 /** A sealed post's parts and what its header names, which the service acts on. */
 type SealedPost = {
@@ -424,14 +424,18 @@ function receiptForm(raw: string | undefined): boolean {
  * so a replay hears what the first answer said. Never of a sealed post, whose words the
  * service cannot read; and never a refusal, since the post is written as sent. Before it,
  * said of a post that is not a version but carries data.stage: there the key is free, and
- * sets no stage. From the words sent, so a replay says the same.
+ * sets no stage. From the words sent, so a replay says the same. A dry run says each line
+ * before the POST, not after it, and its last says NOTHING_POSTED.
  */
-function hintOf(post: PostInput, sealed: boolean): string | null {
-  const stageHint = !sealed && post.kind !== "version" && post.data !== null && Object.hasOwn(post.data, "stage")
-    ? STAGE_HINT
+function hintOf(post: PostInput, sealed: boolean, dryRun = false): string | null {
+  if (sealed) return null;
+  const stageHint = post.kind !== "version" && post.data !== null && Object.hasOwn(post.data, "stage")
+    ? (dryRun ? DRY_RUN_STAGE_HINT : STAGE_HINT)
     : null;
-  const longHint = sealed ? null : hintForPost(post.title, post.body, post.kind);
-  return [stageHint, longHint].filter((line) => line !== null).join("\n") || null;
+  const longHint = hintForPost(post.title, post.body, post.kind, dryRun);
+  // A long hint after a dry run ends with NOTHING_POSTED already; the stage line alone does not.
+  const lines = [stageHint, longHint ?? (dryRun && stageHint !== null ? NOTHING_POSTED : null)];
+  return lines.filter((line) => line !== null).join("\n") || null;
 }
 
 /** What a dry run found it could not refuse: the SPACE, and what a price needs. */
@@ -575,13 +579,9 @@ async function dryChecks(sql: Sql, name: string, author: Buffer, post: PostInput
  */
 async function dryRunOf(c: Context<Env>, db: Db, name: string, author: Buffer, post: PostInput, attachments: Attachment[]) {
   const me = toHex(author);
-  // The connector's in-process call was counted as a read with its /mcp request.
-  let release = () => {};
-  if (!inProcessCall(c)) {
-    const who = readKey(c, me);
-    limitRead(who, READS_PER_MINUTE);
-    release = holdRead(who, CONCURRENT_READS_PER_CALLER);
-  }
+  const who = readKey(c, me);
+  limitRead(who, READS_PER_MINUTE);
+  const release = holdRead(who, CONCURRENT_READS_PER_CALLER);
   let found: DryRun;
   try {
     found = await db.readTx(me, (sql) => dryChecks(sql, name, author, post, attachments));
@@ -604,8 +604,8 @@ async function dryRunOf(c: Context<Env>, db: Db, name: string, author: Buffer, p
         },
       })
     : null;
-  const hint = hintOf(post, false);
-  return { dry_run: true, space: name, ...(price ? { read_cost: price } : {}), ...(hint ? { hint: dryRunHint(hint) } : {}) };
+  const hint = hintOf(post, false, true);
+  return { dry_run: true, space: name, ...(price ? { read_cost: price } : {}), ...(hint ? { hint } : {}) };
 }
 
 export function mountPosts(app: Hono<Env>, config: Config, db: Db, service: ServiceState): void {
@@ -613,6 +613,11 @@ export function mountPosts(app: Hono<Env>, config: Config, db: Db, service: Serv
     const bearer = requireBearer(c.get("bearer"));
     // How the receipt comes back, read before anything is spent or written: a query,
     // never a body field, since a signed post refuses any field beside its signed ones.
+    // The one name its query takes: a field sent there instead of in the body would be
+    // dropped, and a POST written without it, so anything else is refused.
+    if ([...new URL(c.req.url).searchParams.keys()].some((name) => name !== "receipt")) {
+      throw new ApiError("INVALID_REQUEST", { detail: "the query of POST /v1/spaces/(name)/posts takes receipt alone: send every field in the JSON body" });
+    }
     const fullReceipt = receiptForm(c.req.query("receipt"));
     // Not readBody, which reads an empty body as no fields: a post is never empty. A
     // body cut off part-way cannot be read, and is the caller's malformed request.

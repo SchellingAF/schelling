@@ -71,7 +71,7 @@ import {
   readSignatureEnvelope,
   type SignatureEnvelope,
 } from "../domain/encryption.ts";
-import { asObject, optionalString, parseStrictJson } from "../domain/validate.ts";
+import { asObject, namesDryRun, optionalString, parseStrictJson, refuseDryRunHere } from "../domain/validate.ts";
 import { COMPATIBILITY_TOOLS, DOCUMENT_RESOURCES, MCP_TOOLS, PROMPTS, TEMPLATE_RESOURCES, TOOLSETS, createMcpFetch, isListen, type Toolset } from "../mcp/server.ts";
 import { CONNECT_PATH, SCOPES, bearerChallenge, connectResource, mountOAuth, oauthAvailable, resourceMetadataUrl } from "../oauth/routes.ts";
 import { WAIT_SECONDS_MAX, WAITS_PER_CALLER } from "./wait.ts";
@@ -431,12 +431,6 @@ export type InvokeBytes = { send?: Uint8Array; answerBytes?: boolean };
 
 function reentryOf(c: { env: unknown }): Reentry | undefined {
   return (c.env as { schellingafReentry?: Reentry } | undefined)?.schellingafReentry;
-}
-
-/** Whether this is the connector's in-process call, whose /mcp request was counted as a
- * read already: see Reentry. */
-export function inProcessCall(c: { env: unknown }): boolean {
-  return reentryOf(c) !== undefined;
 }
 
 /** The connection key the connector signed this in-process call's post with, or null
@@ -835,6 +829,32 @@ export function createApp(config: Config, db: Db): Hono<Env> {
     if (config.readOnly) {
       const op = operationAt(c.req.method, c.req.path);
       if (op && op.method !== "GET" && !CHALLENGE_PATHS.has(op.path)) throw new ApiError("SERVICE_READ_ONLY");
+    }
+    await next();
+  });
+
+  // A dry run is dry_run in the JSON body of POST /v1/spaces/{name}/posts, and nothing
+  // else. A name that reads as one (namesDryRun) in the query of any write, or at the top
+  // of any write's JSON body but that one, is refused here, before any route runs, reads
+  // its body or spends anything: a route that ignored it would do for real what its sender
+  // meant only to try. A body that is not JSON is the route's to refuse; an upload's raw
+  // bytes are never read here.
+  app.use("/v1/*", async (c, next) => {
+    const method = c.req.method;
+    if (method === "GET" || method === "HEAD" || method === "OPTIONS") return next();
+    if ([...new URL(c.req.url).searchParams.keys()].some(namesDryRun)) refuseDryRunHere();
+    if (!(method === "PUT" && FILE_PATH.test(c.req.path))) {
+      const text = await c.req.text().catch(() => {
+        throw new ApiError("INVALID_REQUEST");
+      });
+      let body: unknown = null;
+      try {
+        body = text.trimStart().startsWith("{") ? JSON.parse(text) : null;
+      } catch {
+        body = null;
+      }
+      const taken = operationAt(method, c.req.path)?.name === "posts.append" ? "dry_run" : null;
+      if (body !== null && typeof body === "object" && Object.keys(body).some((key) => key !== taken && namesDryRun(key))) refuseDryRunHere();
     }
     await next();
   });

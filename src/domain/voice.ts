@@ -55,6 +55,14 @@ export const POSTED_AS_WRITTEN = "Posted as written.";
 /** Said last after a dry run of a POST, in place of POSTED_AS_WRITTEN: it wrote nothing. */
 export const NOTHING_POSTED = "Nothing was posted: this was a dry run.";
 
+/**
+ * The lines a dry run of a POST says in their place: before the POST, not after it, and
+ * NOTHING_POSTED where the POST would say POSTED_AS_WRITTEN.
+ */
+const beforeYouPost = (line: string) => line.replace(/^Next time, /, "Before you post, ");
+export const DRY_RUN_TITLE_HINT_LINE = beforeYouPost(TITLE_HINT_LINE);
+export const DRY_RUN_VERSION_TITLE_HINT_LINE = beforeYouPost(VERSION_TITLE_HINT_LINE);
+
 /** A title, or a sentence, of more words than this ran long. */
 export const LONG_WORDS = 20;
 /** How many long sentences the hint names, the first in the text. */
@@ -77,11 +85,17 @@ export const POST_HINT_FIRST_LINE = HINT_FIRST_LINE.replace("Title ran <n> words
 export const HINT_SECOND_LINE =
   "Next time, split each long sentence, unless it carries a reason, an order or a list that must stay whole. State or need first, then conditions. One fact per sentence. Keep every number, condition and doubt. Posted as written.";
 
+/** HINT_SECOND_LINE as a dry run of a POST says it. */
+export const DRY_RUN_HINT_SECOND_LINE = beforeYouPost(HINT_SECOND_LINE).replace(/Posted as written\.$/, NOTHING_POSTED);
+
 /**
  * Said, before any other hint, after a post that is not a version but carries data.stage:
  * there `stage` is a free key and sets nothing. scripts/copy-review.ts shows it.
  */
 export const STAGE_HINT = "data.stage sets a SPACE's stage only on a version, once it is current. This post set none.";
+
+/** STAGE_HINT as a dry run of a POST says it. */
+export const DRY_RUN_STAGE_HINT = STAGE_HINT.replace(/This post set none\.$/, "This post would set none.");
 
 /** A sentence that was counted: its words, and its first words as written. */
 export type Sentence = { words: number; quote: string };
@@ -217,9 +231,10 @@ export function hintFor(title: string | null | undefined, body: string | null | 
  * is counted in bytes, against TITLE_HINT_BYTES, since a headline shows it whole: the first
  * line as POST_HINT_FIRST_LINE, then TITLE_HINT_LINE when the title ran long, or on a
  * version, which takes no summary, VERSION_TITLE_HINT_LINE, then HINT_SECOND_LINE when a
- * sentence did, or else POSTED_AS_WRITTEN.
+ * sentence did, or else POSTED_AS_WRITTEN. A dry run says each of those lines in its
+ * DRY_RUN_ form, and NOTHING_POSTED in place of POSTED_AS_WRITTEN.
  */
-export function hintForPost(title: string | null | undefined, body: string | null | undefined, kind?: string): string | null {
+export function hintForPost(title: string | null | undefined, body: string | null | undefined, kind?: string, dryRun = false): string | null {
   const titleBytes = title ? Buffer.byteLength(title, "utf8") : 0;
   const longTitle = titleBytes > TITLE_HINT_BYTES;
   const sentencesPart = longSentences(body);
@@ -227,15 +242,13 @@ export function hintForPost(title: string | null | undefined, body: string | nul
   if (longTitle) parts.push(`Title ran ${titleBytes} bytes`);
   if (sentencesPart !== null) parts.push(sentencesPart);
   if (parts.length === 0) return null;
-  return [`${parts.join("; ")}.`, ...(longTitle ? [kind === "version" ? VERSION_TITLE_HINT_LINE : TITLE_HINT_LINE] : []), sentencesPart !== null ? HINT_SECOND_LINE : POSTED_AS_WRITTEN].join("\n");
-}
-
-/**
- * A POST's hint as its dry run says it: the same lines, with NOTHING_POSTED in place of
- * the POSTED_AS_WRITTEN that ends HINT_SECOND_LINE or stands alone.
- */
-export function dryRunHint(hint: string): string {
-  return hint.endsWith(POSTED_AS_WRITTEN) ? `${hint.slice(0, -POSTED_AS_WRITTEN.length)}${NOTHING_POSTED}` : hint;
+  const titleLine = kind === "version"
+    ? (dryRun ? DRY_RUN_VERSION_TITLE_HINT_LINE : VERSION_TITLE_HINT_LINE)
+    : (dryRun ? DRY_RUN_TITLE_HINT_LINE : TITLE_HINT_LINE);
+  const last = sentencesPart !== null
+    ? (dryRun ? DRY_RUN_HINT_SECOND_LINE : HINT_SECOND_LINE)
+    : (dryRun ? NOTHING_POSTED : POSTED_AS_WRITTEN);
+  return [`${parts.join("; ")}.`, ...(longTitle ? [titleLine] : []), last].join("\n");
 }
 
 /** The first line's part on a body's long sentences, or null when none ran long. */

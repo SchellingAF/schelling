@@ -65,11 +65,16 @@ const NUL = "\u0000";
  * It is called once for every member at every depth, with the member's name, so
  * it checks the names as well as the values, as the website and the software that
  * seals do.
+ *
+ * An object that names one member twice is refused too: JSON.parse keeps the last, and
+ * another reader may keep the first, so one body would say two things, such as
+ * `"dry_run":true,"dry_run":false`, which is a POST written for real.
  */
 export function parseStrictJson(text: string): unknown {
   if (text.includes(NUL)) throw new ApiError("INVALID_REQUEST");
+  let parsed: unknown;
   try {
-    return JSON.parse(text, function (key, value, context?: { source?: string }) {
+    parsed = JSON.parse(text, function (key, value, context?: { source?: string }) {
       if (key.includes(NUL) || !key.isWellFormed()) throw new ApiError("INVALID_REQUEST");
       if (typeof value === "string") {
         if (value.includes(NUL)) throw new ApiError("INVALID_REQUEST");
@@ -93,6 +98,61 @@ export function parseStrictJson(text: string): unknown {
     if (error instanceof ApiError) throw error;
     throw new ApiError("INVALID_REQUEST");
   }
+  if (namesOneMemberTwice(text)) throw new ApiError("INVALID_REQUEST", { detail: "a JSON object names one member twice" });
+  return parsed;
+}
+
+/**
+ * Whether an object in `text`, which JSON.parse has read, names one member twice, by its
+ * name as decoded: `"a"` and `"a"` are one name. One pass over the text, a set of
+ * names for each object open around the place it reads.
+ */
+function namesOneMemberTwice(text: string): boolean {
+  if (!text.includes("{")) return false;
+  const open: (Set<string> | null)[] = [];
+  let name = false;
+  for (let i = 0; i < text.length; i++) {
+    const at = text[i];
+    if (at === '"') {
+      let end = i + 1;
+      while (text[end] !== '"') end += text[end] === "\\" ? 2 : 1;
+      const names = open.at(-1);
+      if (name && names) {
+        const decoded = JSON.parse(text.slice(i, end + 1)) as string;
+        if (names.has(decoded)) return true;
+        names.add(decoded);
+      }
+      name = false;
+      i = end;
+    } else if (at === "{" || at === "[") {
+      open.push(at === "{" ? new Set() : null);
+      name = at === "{";
+    } else if (at === "}" || at === "]") {
+      open.pop();
+      name = false;
+    } else if (at === ",") {
+      name = open.length > 0 && open.at(-1) !== null;
+    } else if (at === ":") {
+      name = false;
+    }
+  }
+  return false;
+}
+
+/**
+ * Whether a name reads as a dry run: `dry_run` however it is spelt, with any case and
+ * with or without any character that is not a letter or a digit, such as `dryRun`,
+ * `DRY-RUN` or `dry run`. Only POST /v1/spaces/(name)/posts takes one, as `dry_run` in its
+ * JSON body; anywhere else, or spelt otherwise, it is refused, since a request that
+ * ignored it would do for real what its sender meant only to try.
+ */
+export function namesDryRun(name: string): boolean {
+  return name.toLowerCase().replace(/[^a-z0-9]/g, "") === "dryrun";
+}
+
+/** A dry run refused where it is not taken. */
+export function refuseDryRunHere(): never {
+  throw new ApiError("INVALID_REQUEST", { detail: "dry_run is taken only by POST /v1/spaces/(name)/posts, spelt so, in its JSON body: nothing was done" });
 }
 
 export function asObject(value: unknown, detail?: string): Record<string, unknown> {

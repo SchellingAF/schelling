@@ -36,7 +36,7 @@ import { referenceParts, renderPrimer, tokens } from "../src/docs/render.ts";
 import { PROMPTS } from "../src/mcp/prompts.ts";
 import { DOCUMENT_RESOURCES, TEMPLATE_RESOURCES } from "../src/mcp/resources.ts";
 import { INSTRUCTIONS, serverIdentity } from "../src/mcp/server.ts";
-import { HINT_FIRST_LINE, HINT_SECOND_LINE, NOTHING_POSTED, POST_HINT_FIRST_LINE, POSTED_AS_WRITTEN, STAGE_HINT, TITLE_HINT_LINE, VERSION_TITLE_HINT_LINE } from "../src/domain/voice.ts";
+import { DRY_RUN_HINT_SECOND_LINE, DRY_RUN_STAGE_HINT, DRY_RUN_TITLE_HINT_LINE, DRY_RUN_VERSION_TITLE_HINT_LINE, HINT_FIRST_LINE, HINT_SECOND_LINE, NOTHING_POSTED, POST_HINT_FIRST_LINE, POSTED_AS_WRITTEN, STAGE_HINT, TITLE_HINT_LINE, VERSION_TITLE_HINT_LINE } from "../src/domain/voice.ts";
 import { HOW_TO_TAKE_A_TASK, INDEX_LINE } from "../src/http/openwork.ts";
 import { MORE_OPEN_WORK, NOTHING_OPEN } from "../src/mcp/render.ts";
 import { createApp } from "../src/http/app.ts";
@@ -366,13 +366,21 @@ export function faceReview(): string {
     "",
     `> ${POSTED_AS_WRITTEN}`,
     "",
-    "**hint after a dry run of a POST** — said last in place of the words above, where the POST's hint would end with them",
-    "",
-    `> ${NOTHING_POSTED}`,
-    "",
     "**hint on data.stage** — said first, after a post that is not a version but carries data.stage",
     "",
     `> ${STAGE_HINT}`,
+    "",
+    "**hint after a dry run of a POST** — the lines above as said before the POST, in place of each; the last line said whenever its hint has no other",
+    "",
+    `> ${DRY_RUN_HINT_SECOND_LINE}`,
+    "",
+    `> ${DRY_RUN_TITLE_HINT_LINE}`,
+    "",
+    `> ${DRY_RUN_VERSION_TITLE_HINT_LINE}`,
+    "",
+    `> ${DRY_RUN_STAGE_HINT}`,
+    "",
+    `> ${NOTHING_POSTED}`,
     "",
   );
 

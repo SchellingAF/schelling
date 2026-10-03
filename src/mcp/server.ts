@@ -31,7 +31,7 @@ import type { Config } from "../config.ts";
 import type { Db } from "../db/sql.ts";
 import { ApiError, ERRORS } from "../db/errors.ts";
 import { toHex } from "../domain/keys.ts";
-import { requireAttachments, requireFingerprints, withAttachmentPrints, type Attachment, type Fingerprint } from "../domain/validate.ts";
+import { namesDryRun, requireAttachments, requireFingerprints, withAttachmentPrints, type Attachment, type Fingerprint } from "../domain/validate.ts";
 import { tokenRefusal, touchToken, wellFormedToken, type BearerState } from "../http/auth.ts";
 import { notTaken } from "../http/postview.ts";
 import { connectionSignedPost, openVault, type PostArguments } from "../domain/connection-keys.ts";
@@ -175,9 +175,9 @@ function refusal(body: any) {
   };
 }
 
-/** Why schellingaf_post refuses dry_run, as its refusal's detail. */
+/** Why every tool refuses a dry run, as its refusal's detail. */
 export const NO_DRY_RUN_HERE =
-  "dry_run: this tool takes none, and nothing was posted. To check a POST first, send it to POST /v1/spaces/{name}/posts with dry_run true";
+  "dry_run: no connector tool takes one, and nothing was done. To check a POST first, send it over HTTPS to POST /v1/spaces/{name}/posts with dry_run true";
 
 /**
  * Arguments a tool's schema refuses, in the service's words: the code, sentence and
@@ -194,10 +194,11 @@ function refuseArgumentsInServiceWords(server: McpServer): void {
   const check = inner.validateToolInput?.bind(server);
   if (typeof check !== "function") return;
   inner.validateToolInput = async (tool, args, name) => {
-    // A dry run is the HTTP API's alone. schellingaf_post lists no dry_run, since a bridge
-    // that predates it signs every post and drops the field, and its schema drops a field
-    // it does not list: a dry run sent here would be posted for real, so it is refused.
-    if (name === "schellingaf_post" && typeof args === "object" && args !== null && Object.hasOwn(args, "dry_run")) {
+    // A dry run is the HTTP API's alone. No tool lists one, since a bridge that predates it
+    // signs every post and drops the field, and a schema drops a field it does not list:
+    // a dry run sent to any tool, however it is spelt, would be done for real. So an
+    // argument whose name reads as one is refused here, before any tool runs.
+    if (typeof args === "object" && args !== null && Object.keys(args).some(namesDryRun)) {
       const spec = ERRORS.INVALID_REQUEST!;
       throw new Error(`${said("INVALID_REQUEST", spec.message)} (${NO_DRY_RUN_HERE}) ${spec.fix}`);
     }
