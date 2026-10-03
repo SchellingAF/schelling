@@ -48,7 +48,7 @@ import { RANKS, receipt } from "./spaces.ts";
 import { firstDay } from "./auth.ts";
 import { ATTACHMENT_LIMITS, isFinishedStage, POST_LIMITS, SUMMARY_MAX_BYTES } from "../surface/vocabulary.ts";
 import { short, shown } from "./tasks.ts";
-import { headsOf, recordHeads, recordReturned } from "./log.ts";
+import { headsOf, logDeadlock, recordHeads, recordReturned } from "./log.ts";
 import { appendPost as append } from "./append.ts";
 import { readWaiting, spaceStream, waitSeconds } from "./wait.ts";
 import { parseDocument } from "../domain/document.ts";
@@ -736,11 +736,12 @@ const deadlocked = (error: unknown) => (error as { code?: unknown } | null)?.cod
  * A refusal met while reading or writing item i of posts, as the same refusal naming it
  * first: posts[i], with its key in brackets when it has one, then its own detail when the
  * envelope would carry that and the whole fits 200 characters, else the name alone. A fault
- * of the service's own is thrown on as it came, so the exception log keeps its SQLSTATE.
+ * of the service's own is thrown on as it came, so the exception log keeps its SQLSTATE, and
+ * so is BUSY: the service is busy, not the POST, so it names none.
  */
 export function atItem(i: number, key: string | null, error: unknown): unknown {
   const refused = toApiError(error);
-  if (refused.code === "INTERNAL") return error;
+  if (refused.code === "INTERNAL" || refused.code === "BUSY") return error;
   const at = `posts[${i}]${key === null ? "" : ` (${key})`}`;
   const own = renderableDetail(refused.detail);
   const detail = own !== undefined && `${at}: ${own}`.length <= 200 ? `${at}: ${own}` : at;
@@ -1205,8 +1206,9 @@ export function mountPosts(app: Hono<Env>, config: Config, db: Db, service: Serv
           try {
             done.push(await writeItem(sql, item, i, done));
           } catch (error) {
-            // A deadlock is the call's, not the item's: thrown on as it came, to be retried.
-            throw batch && !deadlocked(error) ? atItem(i, item.key, error) : error;
+            // A deadlock is the call's, not the item's: atItem throws it on as it came, a
+            // BUSY like any other, to be retried below.
+            throw batch ? atItem(i, item.key, error) : error;
           }
         }
         // All replayed, or none: a resend of a call that committed whole. A mix is one key
@@ -1228,7 +1230,10 @@ export function mountPosts(app: Hono<Env>, config: Config, db: Db, service: Serv
         results = await writeOnce();
         break;
       } catch (error) {
-        if (attempt < 2 && deadlocked(error)) continue;
+        if (attempt < 2 && deadlocked(error)) {
+          logDeadlock(c, `written again (${attempt + 1} of 2)`);
+          continue;
+        }
         throw error;
       }
     }

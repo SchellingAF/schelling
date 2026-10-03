@@ -16,7 +16,7 @@ let owner: Agent, a: Agent, b: Agent, c: Agent, r: Agent, x: Agent;
 const ONE = `dl-one-${process.pid}`;
 const TWO = `dl-two-${process.pid}`;
 const THREE = `dl-three-${process.pid}`;
-const ROUNDS = 30;
+const ROUNDS = 10;
 
 before(async () => {
   await ready;

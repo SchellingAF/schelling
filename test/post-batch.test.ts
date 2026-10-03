@@ -466,12 +466,17 @@ describe("posts: several POSTS in one call", () => {
     assert.equal(await spentSince(writer, 60), 0);
   });
 
-  test("a fault of the service's own in a POST is thrown on as it came, so its SQLSTATE is logged; a refusal is named", () => {
+  test("a fault of the service's own in a POST, or BUSY, is thrown on as it came, so its SQLSTATE is logged; a refusal is named", () => {
     const fault = Object.assign(new Error("could not read block"), { code: "XX001" });
     assert.equal(atItem(2, "k", fault), fault);
     const named = atItem(2, "k", new ApiError("WRITE_DENIED")) as ApiError;
     assert.equal(named.code, "WRITE_DENIED");
     assert.equal(named.detail, "posts[2] (k)");
+    // BUSY is the service's, not the POST's: thrown on as it came, naming none.
+    const busy = new ApiError("BUSY", { retryAfter: 1 });
+    assert.equal(atItem(2, "k", busy), busy);
+    const deadlock = Object.assign(new Error("deadlock detected"), { code: "40P01" });
+    assert.equal(atItem(2, "k", deadlock), deadlock);
   });
 
   test("what posts refuses before anything is spent, each named by its POST", async () => {
@@ -842,5 +847,105 @@ describe("what a call tells, and when", () => {
     const caps = await call("GET", "/v1/capabilities");
     assert.equal(caps.body.limits.posts_per_call, 20);
     assert.equal(caps.body.limits.batch_idempotency_key_bytes, 80);
+  });
+});
+
+describe("a deadlock's victim is written again, twice at most, and each one is logged", () => {
+  /** What `during` answers while the next `times` writes end as a deadlock's victim: a
+   * transaction once its writes are done, so it rolls back whole, and a single POST's one
+   * statement before it runs. Also how many met one, and the lines logged meanwhile. */
+  async function deadlocking<T>(times: number, during: () => Promise<T>): Promise<{ out: T; met: number; lines: string[] }> {
+    const original = db.write;
+    let left = times;
+    const victim = () => Object.assign(new Error("deadlock detected"), { code: "40P01" });
+    const lines: string[] = [];
+    const real = console.error;
+    console.error = (...parts: unknown[]) => void lines.push(parts.map(String).join(" "));
+    db.write = new Proxy(original, {
+      apply(target, self, args) {
+        if (left > 0 && Array.isArray(args[0]) && args[0].join("?").includes("schellingaf.append_post(")) {
+          left--;
+          return Promise.reject(victim());
+        }
+        return Reflect.apply(target, self, args);
+      },
+      get(target, prop) {
+        if (prop !== "begin") return Reflect.get(target, prop, target);
+        return (fn: (tx: unknown) => Promise<unknown>) => target.begin(async (tx) => {
+          const done = await fn(tx);
+          if (left > 0) {
+            left--;
+            throw victim();
+          }
+          return done;
+        });
+      },
+    });
+    try {
+      return { out: await during(), met: times - left, lines };
+    } finally {
+      db.write = original;
+      console.error = real;
+    }
+  }
+
+  /** The lines that name this answer's request id and SQLSTATE 40P01. */
+  const deadlockLines = (lines: string[], out: Reply) => {
+    const id = out.headers.get("X-Request-Id")!;
+    assert.ok(id);
+    return lines.filter((line) => line.includes(`[${id}]`) && line.includes("40P01"));
+  };
+
+  test("a single POST deadlocked twice is written once, spends one write, and logs both", async () => {
+    const writer = await member();
+    await fixture.setBucket(`peer:${writer.peerId}`, 30);
+    const before = await state(WORK);
+    const { out, met, lines } = await deadlocking(2, () => call("POST", posts(WORK), writer.token, result("Once")));
+    assert.equal(out.status, 201, JSON.stringify(out.body));
+    assert.equal(met, 2);
+    assert.equal(await spentSince(writer, 30), 1);
+    assert.equal(BigInt((await state(WORK)).head as string), BigInt(before.head as string) + 1n);
+    assert.equal(deadlockLines(lines, out).length, 2);
+  });
+
+  test("a batch deadlocked twice is written once, and spends its writes once", async () => {
+    const writer = await member();
+    await fixture.setBucket(`peer:${writer.peerId}`, 30);
+    const one = await deadlocking(2, () => call("POST", posts(WORK), writer.token, { posts: [result("Alone")] }));
+    assert.equal(one.out.status, 201, JSON.stringify(one.out.body));
+    assert.equal(one.met, 2);
+    assert.equal(await spentSince(writer, 30), 1);
+
+    await fixture.setBucket(`peer:${writer.peerId}`, 30);
+    const before = await state(WORK);
+    const three = await deadlocking(2, () => call("POST", posts(WORK), writer.token, { posts: [result("A"), result("B"), result("C")] }));
+    assert.equal(three.out.status, 201, JSON.stringify(three.out.body));
+    assert.equal(await spentSince(writer, 30), 3);
+    const after = await state(WORK);
+    assert.equal(BigInt(after.head as string), BigInt(before.head as string) + 3n);
+    assert.equal(after.posts, (before.posts as number) + 3);
+    assert.deepEqual(deadlockLines(three.lines, three.out).map((line) => line.split("40P01 ")[1]), [
+      "deadlock_detected: written again (1 of 2)",
+      "deadlock_detected: written again (2 of 2)",
+    ]);
+  });
+
+  test("a third deadlock is BUSY with Retry-After 1, names no POST, writes nothing, and spends one", async () => {
+    const writer = await member();
+    await fixture.setBucket(`peer:${writer.peerId}`, 30);
+    const before = await state(WORK);
+    const { out, met, lines } = await deadlocking(3, () => call("POST", posts(WORK), writer.token, { posts: [result("A"), result("B"), result("C")] }));
+    assert.equal(met, 3);
+    assert.equal(out.status, 503, JSON.stringify(out.body));
+    assert.equal(out.body.error.code, "BUSY");
+    assert.equal(out.body.error.detail, undefined);
+    assert.equal(out.headers.get("Retry-After"), "1");
+    assert.deepEqual(await state(WORK), before);
+    assert.equal(await spentSince(writer, 30), 1);
+    assert.deepEqual(deadlockLines(lines, out).map((line) => line.split("40P01 ")[1]), [
+      "deadlock_detected: written again (1 of 2)",
+      "deadlock_detected: written again (2 of 2)",
+      "deadlock_detected: answered BUSY",
+    ]);
   });
 });

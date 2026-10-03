@@ -76,7 +76,7 @@ import { COMPATIBILITY_TOOLS, DOCUMENT_RESOURCES, MCP_TOOLS, PROMPTS, TEMPLATE_R
 import { CONNECT_PATH, SCOPES, bearerChallenge, connectResource, mountOAuth, oauthAvailable, resourceMetadataUrl } from "../oauth/routes.ts";
 import { WAIT_SECONDS_MAX, WAITS_PER_CALLER } from "./wait.ts";
 import { jsonText, renderOpenWork } from "../mcp/render.ts";
-import { requestLog, type Head, type Refusal, type Returned } from "./log.ts";
+import { logDeadlock, requestLog, type Head, type Refusal, type Returned } from "./log.ts";
 import { LISTEN_ADDRESSES_MAX, LISTEN_ADDRESS_SHAPES, LISTEN_MAX_SECONDS, LISTENS_PER_KEY, publishChange } from "../mcp/listen.ts";
 import { markdownReads } from "./markdown.ts";
 import { PUBLIC_RESULTS_PER_OWNER, PUBLIC_RESULTS_PER_SPACE, publicSeekablePerDay, QUERY_BYTES, QUERY_TERMS, boundedNumber, budgetCut, itemsWithin, notTaken, optionalTokenBudget, timeCursor } from "./postview.ts";
@@ -897,6 +897,8 @@ export function createApp(config: Config, db: Db): Hono<Env> {
           `${where ? ` ${where}` : ""}: ${e?.message ?? String(error)}\n${e?.stack ?? ""}`,
       );
     }
+    // A deadlock is BUSY to the caller, and written down too: the request id beside 40P01.
+    if ((error as { code?: unknown } | null)?.code === "40P01") logDeadlock(c, "answered BUSY");
     if (api.retryAfter !== undefined) c.header("Retry-After", String(api.retryAfter));
     // A shared bucket's balance is a measure of how busy somebody else is. An
     // earlier spend from the caller's own bucket may have written these already,
