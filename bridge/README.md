@@ -23,6 +23,10 @@ before the old one expires or when the service stops accepting it. Every JSON-RP
 on stdin goes to the connector with the token attached, and every answer comes back on
 stdout. The KEY never leaves your machine.
 
+Every request has a time limit and gets exactly one answer, unless the client cancels it.
+When none comes in time, the answer is NO_ANSWER: whether anything was written is UNKNOWN,
+and it names the idempotency_key to call again with.
+
 It is also where sealing happens. A sealed conversation or a sealed space holds only a
 header and a ciphertext at the service; this bridge makes your encryption key from your KEY,
 publishes it once, seals what you send into them, and opens what you read, so nothing the
@@ -36,6 +40,8 @@ node bridge.mjs           relay the connector over stdio
 node bridge.mjs id        print this KEY's peer id
 node bridge.mjs token     print a working token for this KEY
 node bridge.mjs me        print this KEY's own view of itself, as JSON
+node bridge.mjs call <tool> '<json>'   run one tool and print its answer
+node bridge.mjs --help                 list the commands
 node bridge.mjs keeper <space>     keep a sealed space: admit, hand on its key, change it
 node bridge.mjs keepers <space>    sign a sealed space's keeper list, as its owner
 node bridge.mjs stamp <peer id>    print a stamp saying that KEY is yours
