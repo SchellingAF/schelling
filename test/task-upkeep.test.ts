@@ -321,6 +321,28 @@ describe("document upkeep", () => {
     assert.equal(replay.body.changed, false);
   });
 
+  test("a POST carrying task finishes it only as a version, and its refusal names the POST, never post_id", async () => {
+    const { owner, a, b, name } = await crew();
+    const v1 = await version(owner, name, "# Pages");
+    await results(b, name, 3);
+    const out = await job(a, name, { job: "upkeep" });
+    const number = out.task.number;
+    const head = async () => (await fixture.owner<{ head: string }[]>`select last_seq::text as head from schellingaf.spaces where name = ${name}`)[0]!.head;
+    const before = await head();
+    refused(await call("POST", `/v1/spaces/${name}/posts`, a.token, { kind: "result", title: "Pages in line", body: "Done.", task: { number } }),
+      400, "INVALID_REQUEST", "task: this upkeep task is done with a version, and this POST is not one");
+    const batch = await call("POST", `/v1/spaces/${name}/posts`, a.token, { posts: [{ kind: "result", title: "Pages in line", body: "Done.", task: { number } }] });
+    refused(batch, 400, "INVALID_REQUEST", "posts[0]: task: this upkeep task is done with a version, and this POST is not one");
+    assert.equal(await head(), before, "nothing posted");
+    assert.equal((await task(name, number)).state, "claimed");
+
+    const mine = await call("POST", `/v1/spaces/${name}/posts`, a.token, { kind: "version", title: "Pages in line", body: "# Pages, in line", supersedes: v1.post_id, task: { number } });
+    assert.equal(mine.status, 201, JSON.stringify(mine.body));
+    assert.equal(mine.body.oracle?.state, "pending", JSON.stringify(mine.body));
+    assert.equal(mine.body.task.state, "done");
+    assert.equal((await task(name, number)).done_post_id, mine.body.post_id);
+  });
+
   test("a coordinator's version is current at once, so its done is accepted at once", async () => {
     const { owner, coordinator, a, name } = await crew();
     const v1 = await version(owner, name, "# Pages");
@@ -575,6 +597,24 @@ describe("the task review", () => {
     const later = await job(coordinator, name, { job: "upkeep" });
     assert.equal(later.job, "upkeep", "the version decided while it was held calls the next review");
     assert.equal(later.why, fill(NEXT_WORDS.why.upkeep_tasks, { signals: NEXT_WORDS.signals.version }));
+  });
+
+  test("a POST carrying task finishes a review only as a decision, accepted at once, and its refusal names the POST", async () => {
+    const { owner, coordinator, name } = await crew();
+    await version(owner, name, "# Pages");
+    await added(owner, name);
+    const out = await job(coordinator, name, { job: "upkeep" });
+    assert.equal(out.task.upkeep, "tasks");
+    const number = out.task.number;
+    refused(await call("POST", `/v1/spaces/${name}/posts`, coordinator.token, { kind: "obs", title: "Kept task 1", body: "Kept.", task: { number } }),
+      400, "INVALID_REQUEST", "task: this upkeep task is done with a decision, and this POST is not one");
+    assert.equal((await task(name, number)).state, "claimed");
+    const decision = await call("POST", `/v1/spaces/${name}/posts`, coordinator.token,
+      { kind: "decision", title: "Kept task 1", body: "Kept task 1: the document does not settle it.", task: { number } });
+    assert.equal(decision.status, 201, JSON.stringify(decision.body));
+    assert.equal(decision.body.task.state, "accepted");
+    assert.equal((await task(name, number)).done_post_id, decision.body.post_id);
+    assert.ok((await upkeepOf(name))!.last_review_at);
   });
 
   test("a decision posted before the take is refused", async () => {

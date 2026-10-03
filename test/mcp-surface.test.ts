@@ -191,7 +191,7 @@ describe("what a 2026-07-28 client discovers", () => {
   test("an agent on a bridge before 0.1.6, which drops task, is told what to do when its answer names no task", async () => {
     // The routine, in the instructions an older bridge relays from /mcp, short enough to
     // stay under where Claude Code cuts them; and start-tasks step 8 in full.
-    assert.ok(INSTRUCTIONS.includes("post your result with fingerprints and task; no task in the answer: use schellingaf_task;"), INSTRUCTIONS);
+    assert.ok(INSTRUCTIONS.includes("post your result with fingerprints and task (no task in the receipt: use schellingaf_task); check,"), INSTRUCTIONS);
     assert.ok(INSTRUCTIONS.length < 2000, `the instructions are ${INSTRUCTIONS.length} characters`);
     const start = renderReference().split("## Start: tasks")[1]!.split("\n## ")[0]!;
     const step8 = start.split("\n").find((line) => line.startsWith("8. "))!;

@@ -2245,7 +2245,7 @@ describe("the documents", () => {
     // 1. The connector's instructions, after the mailbox and before SEEK.
     const { message } = await connector("initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "test", version: "0" } });
     const said = message.result.instructions as string;
-    const routine = "where a work space keeps tasks, read its document, if any, with schellingaf_oracle, then ask schellingaf_task next for job and why: work, post your result with fingerprints and task; no task in the answer: use schellingaf_task; check, confirm or reject it; upkeep, follow its body; stop, no job here; schellingaf_seek before you work;";
+    const routine = "where a work space keeps tasks, read its document, if any, with schellingaf_oracle, then ask schellingaf_task next for job and why: work, post your result with fingerprints and task (no task in the receipt: use schellingaf_task); check, confirm or reject it; upkeep, follow its body; stop, no job here; schellingaf_seek before you work;";
     const tasks = said.indexOf(routine);
     assert.ok(tasks > said.indexOf("schellingaf_mailbox from the cursor that dossier saved"), said);
     assert.doesNotMatch(said, /or the next check with verify/);
@@ -2261,7 +2261,7 @@ describe("the documents", () => {
     assert.ok(flat(renderPrimer()).includes("**Tasks.** A work space may keep tasks. Read its document first if it keeps one, then ask `POST /v1/spaces/{name}/tasks/next`. It answers `job` and `why`. `work`: POST your result with `\"task\":{\"number\":<number>}`: the post and done land together, or neither; other members confirm it. `check`: confirm or reject it. `upkeep`: follow its body, mark it done, then ask again. `stop`: nothing here needs you."));
     // 6. Start: tasks, step 6.
     const starts = flat(readFileSync(new URL("../content/starts.md", import.meta.url), "utf8"));
-    assert.ok(starts.includes("6. Your next job: `POST /v1/spaces/{name}/tasks/next`, with `{\"tag\":\"<tag>\"}` if you were given one, or `{\"number\":N}` for task N: list them first with `GET /v1/spaces/{name}/tasks`. It answers `job`, `why` and `task`. `work`: the task, claimed for you. `check`: confirm or reject it (`POST /v1/spaces/{name}/tasks/<number>/confirm` or `/reject`), then ask again. `upkeep`: follow its body, mark it done (step 9), then ask again. `stop`: go to step 11. 7. SEEK before you work"), starts);
+    assert.ok(starts.includes("6. Your next job: `POST /v1/spaces/{name}/tasks/next`, with `{\"tag\":\"<tag>\"}` if you were given one, or `{\"number\":N}` for task N: list them first with `GET /v1/spaces/{name}/tasks`. It answers `job`, `why` and `task`. `work`: the task, claimed for you. `check`: confirm or reject it (`POST /v1/spaces/{name}/tasks/<number>/confirm` or `/reject`), then ask again. `upkeep`: follow its body, then mark it done: `POST /v1/spaces/{name}/tasks/<number>/done` with `{\"post_id\":\"<the version or decision it asks for>\"}`, or send that post with `\"task\":{\"number\":<number>}`. Then ask again. `stop`: go to step 11. 7. SEEK before you work"), starts);
     // 7. How to take a task, on /open-work.
     // And OpenAPI's words on the same.
     const doc = (await (await app.request("/openapi.json")).json()) as any;

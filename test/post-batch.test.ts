@@ -825,6 +825,50 @@ describe("a dry run of a POST with task, and of posts", () => {
   });
 });
 
+describe("a dry run of a POST with task meets a retired, deleted or upkeep task as the write does", () => {
+  const made = { retired: 0, deleted: 0, upkeep: 0 };
+  const doc = `pb-upkeep-${tag}`;
+  before(async () => {
+    await ready;
+    made.retired = await addTask(WORK);
+    await take(WORK, writer, made.retired);
+    assert.equal((await call("POST", `/v1/spaces/${WORK}/tasks/${made.retired}/retire`, owner.token, { reason: "Settled elsewhere." })).status, 200);
+    made.deleted = await addTask(WORK);
+    assert.equal((await call("POST", `/v1/spaces/${WORK}/tasks/${made.deleted}/delete`, owner.token, { reason: "Added by mistake." })).status, 200);
+    // An upkeep task: three results by a member in a work space that keeps a document.
+    assert.equal((await call("POST", "/v1/spaces", owner.token, { name: doc, title: "Upkeep", document: true })).status, 201);
+    for (const who of [writer, checker]) {
+      assert.equal((await call("PUT", `/v1/spaces/${doc}/members/${who.peerId}`, owner.token, { role: "writer" })).status, 200);
+    }
+    for (const page of [1, 2, 3]) assert.equal((await call("POST", posts(doc), writer.token, result(`Page ${page}`))).status, 201);
+    const handed = await call("POST", `/v1/spaces/${doc}/tasks/next`, writer.token, { job: "upkeep" });
+    assert.equal(handed.body.job, "upkeep", JSON.stringify(handed.body));
+    made.upkeep = handed.body.task.number;
+  });
+
+  /** The dry run's refusal, then the write's, which is the same and leaves everything as it was. */
+  async function same(name: string, who: Agent, task: Record<string, unknown>, expected: { status: number; code: string; detail?: string }) {
+    const before = await state(name);
+    const dry = refused(await call("POST", posts(name), who.token, { ...result("Dry"), task, dry_run: true }));
+    assert.deepEqual(dry, { detail: undefined, ...expected }, JSON.stringify(task));
+    assert.deepEqual(refused(await call("POST", posts(name), who.token, { ...result("Written"), task })), dry, JSON.stringify(task));
+    assert.deepEqual(await state(name), before);
+  }
+
+  test("finishing a retired task, by the KEY that held it, is TASK_NOT_OPEN, detail retired", async () => {
+    await same(WORK, writer, { number: made.retired }, { status: 409, code: "TASK_NOT_OPEN", detail: "retired" });
+  });
+  test("finishing a deleted task is TASK_NOT_FOUND, detail deleted, for a KEY that never held it too", async () => {
+    await same(WORK, checker, { number: made.deleted }, { status: 404, code: "TASK_NOT_FOUND", detail: "deleted" });
+  });
+  test("checking a deleted task is TASK_NOT_FOUND, detail deleted, not TASK_NOT_DONE", async () => {
+    await same(WORK, checker, { number: made.deleted, check: "confirm" }, { status: 404, code: "TASK_NOT_FOUND", detail: "deleted" });
+  });
+  test("checking an upkeep task is TASK_IS_UPKEEP", async () => {
+    await same(doc, checker, { number: made.upkeep, check: "confirm" }, { status: 409, code: "TASK_IS_UPKEEP" });
+  });
+});
+
 describe("a sealed POST with task", () => {
   test("finishes the task; a reason is refused, and so is a reply by key", async () => {
     const number = await addTask(SEALED, "Seal it");

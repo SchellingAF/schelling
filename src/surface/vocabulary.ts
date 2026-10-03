@@ -181,6 +181,7 @@ export const TASK_LIMITS = {
  * capability document as limits.posts_per_call and limits.batch_idempotency_key_bytes.
  */
 export const POST_LIMITS = { batch: 20, idempotencyKeyBytes: 80 } as const;
+
 /** The two kinds of upkeep task: the task list's review, and the document's. */
 export const UPKEEP_KINDS = ["document", "tasks"] as const;
 

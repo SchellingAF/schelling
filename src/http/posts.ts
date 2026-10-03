@@ -594,9 +594,11 @@ async function dryChecks(sql: Sql, name: string, author: Buffer, post: PostInput
  * TASK_NOT_FOUND, an oracle space's too, which keeps none. To finish it, the caller holds
  * it: done or accepted is TASK_NOT_OPEN, open TASK_NOT_CLAIMANT, held by another KEY
  * TASK_NOT_OPEN claimed; and its words are the revision sent, or, with none sent, the ones
- * the caller took, or TASK_CHANGED, as task_done() says. To check it, it is done and the
- * caller did not do it. The rank rules, a claim that passed, upkeep, and an earlier check
- * are task_done()'s and task_check()'s to say, at the write: nothing here copies them.
+ * the caller took, or TASK_CHANGED, as task_done() says. A deleted task is TASK_NOT_FOUND,
+ * detail deleted, and a retired one TASK_NOT_OPEN, detail retired. To check it, it is no
+ * upkeep task (TASK_IS_UPKEEP), it is done, and the caller did not do it. The rank rules, a
+ * claim that passed, what post finishes an upkeep task, and an earlier check are
+ * task_done()'s and task_check()'s to say, at the write: nothing here copies them.
  */
 async function dryTaskChecks(sql: Sql, spaceId: string, author: Buffer, task: PostTask): Promise<Record<string, unknown>> {
   const [row] = await sql<{ item: Record<string, unknown>; revision: number; claim_revision: number | null }[]>`
@@ -605,9 +607,10 @@ async function dryTaskChecks(sql: Sql, spaceId: string, author: Buffer, task: Po
      where t.space_id = ${spaceId}::uuid and t.number = ${task.number}::int`;
   if (!row) throw new ApiError("TASK_NOT_FOUND");
   const state = String(row.item.state);
+  if (state === "deleted") throw new ApiError("TASK_NOT_FOUND", { detail: "deleted" });
   const mine = row.item.claimed_by === toHex(author);
   if (task.check === null) {
-    if (state === "done" || state === "accepted") throw new ApiError("TASK_NOT_OPEN", { detail: state });
+    if (state === "done" || state === "accepted" || state === "retired") throw new ApiError("TASK_NOT_OPEN", { detail: state });
     // A claim that passed reads as open, and its holder may still finish it.
     if (state === "open" && !(mine && row.item.claim_expired === true)) throw new ApiError("TASK_NOT_CLAIMANT");
     if (state === "claimed" && !mine) throw new ApiError("TASK_NOT_OPEN", { detail: "claimed" });
@@ -615,6 +618,7 @@ async function dryTaskChecks(sql: Sql, spaceId: string, author: Buffer, task: Po
       throw new ApiError("TASK_CHANGED", { detail: String(row.revision) });
     }
   } else {
+    if (row.item.upkeep) throw new ApiError("TASK_IS_UPKEEP");
     if (state !== "done") throw new ApiError("TASK_NOT_DONE", { detail: state });
     if (mine) throw new ApiError("TASK_SELF_CHECK");
   }
@@ -735,6 +739,18 @@ const BATCH_FIELDS = ["posts", "idempotency_key", "dry_run"];
 /** Whether PostgreSQL ended this write as a deadlock's victim: rolled back whole, and safe
  * to write again. */
 const deadlocked = (error: unknown) => (error as { code?: unknown } | null)?.code === "40P01";
+
+/**
+ * task_done()'s refusal of an upkeep task's post, as a POST carrying `task` meets it. That
+ * POST is the caller's own, in this SPACE, written now, so only its kind can be wrong; the
+ * SQL's detail names post_id, a field a POST never sends. Any other error is thrown on as
+ * it came.
+ */
+function upkeepPost(error: unknown): unknown {
+  const refused = toApiError(error);
+  const kind = refused.code === "INVALID_REQUEST" ? /^post_id: your (version|decision) in this SPACE/.exec(refused.detail ?? "")?.[1] : undefined;
+  return kind === undefined ? error : new ApiError("INVALID_REQUEST", { detail: `task: this upkeep task is done with a ${kind}, and this POST is not one` });
+}
 
 /**
  * A refusal met while reading or writing item i of posts, as the same refusal naming it
@@ -1171,6 +1187,7 @@ export function mountPosts(app: Hono<Env>, config: Config, db: Db, service: Serv
       const [out] = check === null
         ? await sql<{ out: Record<string, unknown> }[]>`
             select schellingaf.task_done(${name}, ${bearer.peerId}, ${number}::int, ${String(receipt.post_id)}::uuid, ${revision}::int) as out`
+            .catch((error: unknown) => { throw upkeepPost(error); })
         : await sql<{ out: Record<string, unknown> }[]>`
             select schellingaf.task_check(${name}, ${bearer.peerId}, ${number}::int, ${check},
                                           ${String(receipt.post_id)}::uuid, ${reason}, true) as out`;
