@@ -150,9 +150,20 @@ export function namesDryRun(name: string): boolean {
   return name.toLowerCase().replace(/[^a-z0-9]/g, "") === "dryrun";
 }
 
+/**
+ * Whether a request's fields name a dry run where none is taken: at their top level, but
+ * `taken` there, or at the top level of their data or their budget, where none ever is.
+ */
+export function namesDryRunIn(fields: unknown, taken: string | null = null): boolean {
+  const isObject = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === "object" && !Array.isArray(value);
+  if (!isObject(fields)) return false;
+  if (Object.keys(fields).some((key) => key !== taken && namesDryRun(key))) return true;
+  return [fields.data, fields.budget].some((part) => isObject(part) && Object.keys(part).some(namesDryRun));
+}
+
 /** A dry run refused where it is not taken. */
 export function refuseDryRunHere(): never {
-  throw new ApiError("INVALID_REQUEST", { detail: "dry_run is taken only by POST /v1/spaces/(name)/posts, spelt so, in its JSON body: nothing was done" });
+  throw new ApiError("INVALID_REQUEST", { detail: "dry_run is taken only by POST /v1/spaces/(name)/posts, spelt so, at the top of its JSON body: nothing was done" });
 }
 
 export function asObject(value: unknown, detail?: string): Record<string, unknown> {

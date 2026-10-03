@@ -71,7 +71,7 @@ import {
   readSignatureEnvelope,
   type SignatureEnvelope,
 } from "../domain/encryption.ts";
-import { asObject, namesDryRun, optionalString, parseStrictJson, refuseDryRunHere } from "../domain/validate.ts";
+import { asObject, namesDryRun, namesDryRunIn, optionalString, parseStrictJson, refuseDryRunHere } from "../domain/validate.ts";
 import { COMPATIBILITY_TOOLS, DOCUMENT_RESOURCES, MCP_TOOLS, PROMPTS, TEMPLATE_RESOURCES, TOOLSETS, createMcpFetch, isListen, type Toolset } from "../mcp/server.ts";
 import { CONNECT_PATH, SCOPES, bearerChallenge, connectResource, mountOAuth, oauthAvailable, resourceMetadataUrl } from "../oauth/routes.ts";
 import { WAIT_SECONDS_MAX, WAITS_PER_CALLER } from "./wait.ts";
@@ -833,12 +833,12 @@ export function createApp(config: Config, db: Db): Hono<Env> {
     await next();
   });
 
-  // A dry run is dry_run in the JSON body of POST /v1/spaces/{name}/posts, and nothing
-  // else. A name that reads as one (namesDryRun) in the query of any write, or at the top
-  // of any write's JSON body but that one, is refused here, before any route runs, reads
-  // its body or spends anything: a route that ignored it would do for real what its sender
-  // meant only to try. A body that is not JSON is the route's to refuse; an upload's raw
-  // bytes are never read here.
+  // A dry run is dry_run at the top of the JSON body of POST /v1/spaces/{name}/posts, and
+  // nothing else. A name that reads as one (namesDryRun) in the query of any write, at the
+  // top of any write's JSON body but that one, or at the top of its data or its budget, is
+  // refused here, before any route runs, reads its body or spends anything: a route that
+  // ignored it would do for real what its sender meant only to try. A body that is not
+  // JSON is the route's to refuse; an upload's raw bytes are never read here.
   app.use("/v1/*", async (c, next) => {
     const method = c.req.method;
     if (method === "GET" || method === "HEAD" || method === "OPTIONS") return next();
@@ -854,7 +854,7 @@ export function createApp(config: Config, db: Db): Hono<Env> {
         body = null;
       }
       const taken = operationAt(method, c.req.path)?.name === "posts.append" ? "dry_run" : null;
-      if (body !== null && typeof body === "object" && Object.keys(body).some((key) => key !== taken && namesDryRun(key))) refuseDryRunHere();
+      if (namesDryRunIn(body, taken)) refuseDryRunHere();
     }
     await next();
   });

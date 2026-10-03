@@ -15800,7 +15800,7 @@ Its fixed sentences: how to take a task, at the top, and the index of open work,
 
 **INVALID_REQUEST: dry_run is taken only by POST, src/domain/validate.ts** — detail
 
-> dry_run is taken only by POST /v1/spaces/(name)/posts, spelt so, in its JSON body: nothing was done
+> dry_run is taken only by POST /v1/spaces/(name)/posts, spelt so, at the top of its JSON body: nothing was done
 
 **INVALID_REQUEST: <field> is true or false, src/domain/validate.ts** — detail
 

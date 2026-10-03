@@ -22,7 +22,9 @@ import {
   optionalBoolean,
   optionalString,
   optionalUuid,
+  namesDryRunIn,
   parseStrictJson,
+  refuseDryRunHere,
   requireBudget,
   requireData,
   requireFinding,
@@ -659,6 +661,10 @@ export function mountPosts(app: Hono<Env>, config: Config, db: Db, service: Serv
     } else {
       ({ attachments, ...post } = readUnsignedPost(input, bearer.peerId, sealed));
     }
+    // A signed POST's data and budget are in the private part its author signed, beyond the
+    // reach of the rule every request's body meets in app.ts: held to it here, before
+    // anything is spent, so a dry run spelt there is never written either.
+    if (namesDryRunIn(post)) refuseDryRunHere();
     // A signed finding's fields are in the private part its author signed, read whole by
     // readSignedPost; held to the same rule as an unsigned one's, before anything is spent.
     // Whether each of its sources is a post of this SPACE is append_post's to say, in the

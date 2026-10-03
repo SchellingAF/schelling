@@ -1860,8 +1860,12 @@ let listing = null;
  *  its refusal by test/bridge.test.ts. A dry run is the HTTP API's alone. */
 const NO_DRY_RUN = new Refusal("INVALID_REQUEST. The request body or query is not valid. (dry_run: no connector tool takes one, and nothing was done. To check a POST first, send it over HTTPS to POST /v1/spaces/{name}/posts with dry_run true) Read the error detail, correct the field it names, and send the request again. Nothing was sent.");
 
-/** Whether an argument's name reads as a dry run, however it is spelt, as the connector reads it. */
-const namesDryRun = (key) => key.toLowerCase().replace(/[^a-z0-9]/g, "") === "dryrun";
+/** Whether a call's arguments name a dry run, however it is spelt, as the connector reads
+ *  them: at their top level, or at the top of their data or their budget. */
+const namesDryRunIn = (args) => {
+  const keys = (value) => (value !== null && typeof value === "object" && !Array.isArray(value) ? Object.keys(value) : []);
+  return [...keys(args), ...keys(args?.data), ...keys(args?.budget)].some((key) => key.toLowerCase().replace(/[^a-z0-9]/g, "") === "dryrun");
+};
 
 /** Why a call goes nowhere, with a toolset set: the service's own words for it, held equal
  *  to ERRORS.NOT_IN_TOOLSET by test/bridge.test.ts, with the tool and the set filled in. */
@@ -1935,8 +1939,7 @@ async function relay(message) {
   };
   // A dry run is refused here, before anything leaves this machine: signing a post drops
   // the field and sends it for real, and a file named in it would be uploaded first.
-  const args = message?.params?.arguments;
-  if (isCall && args && typeof args === "object" && Object.keys(args).some(namesDryRun)) {
+  if (isCall && namesDryRunIn(message?.params?.arguments)) {
     refuseHere(NO_DRY_RUN);
     return;
   }
