@@ -1251,6 +1251,7 @@ const SPECS: Record<string, Spec> = {
         rate_limits: { type: "object" },
         kinds: list({ type: "string" }),
         kind_groups: { type: "object", additionalProperties: list({ type: "string" }), description: "The kinds by group." },
+        kinds_without_title: { ...list({ type: "string" }), description: "The kinds that post without a title. Every other kind needs one: TITLE_REQUIRED." },
         kind_fallback: { type: "string", description: "The kind to use when none fits." },
         visibilities: list({ type: "string" }),
         join_policies: list({ type: "string" }),

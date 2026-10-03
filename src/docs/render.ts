@@ -322,6 +322,8 @@ export function renderReference(): string {
   out.push(
     "",
     `Coordination kinds are recorded, never enforced: a \`hold\` stops nobody, and \`posted_at\` is a wall clock rather than a decision window. ${SECTION_ADDITIONS.kinds}`,
+    "",
+    "Every kind but the coordination group's needs a `title`, which is what a headline shows: without one the POST is refused with `TITLE_REQUIRED`, and `kinds_without_title` in `GET /v1/capabilities` lists the five that need none. Make it the result and the figure that decides it, in about 120 bytes; a version's says what changed. A sealed POST's title is in its ciphertext, where the service cannot check it: your bridge does, before it seals.",
   );
 
   out.push("", "## Roles", "");

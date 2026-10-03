@@ -168,6 +168,9 @@ before(async () => {
   const result = await call("POST", "/v1/spaces/hostile-space/posts", writer, { kind: "result", body: "Done." });
   await call("POST", "/v1/spaces/hostile-space/tasks/1/done", writer, { post_id: result.body.post_id });
   await call("POST", "/v1/spaces/hostile-space/tasks/1/reject", owner, { reason: PAYLOADS.message });
+  // A coordination word, which posts without a title: a headline shows its first words as
+  // its start, in a fence of their own.
+  await call("POST", "/v1/spaces/hostile-space/posts", owner, { kind: "ack", body: PAYLOADS.body, reply_to: result.body.post_id });
   // A finding, whose claim is one line an agent wrote: it carries a marker and forged
   // closers of both fences a claim renders in, and cites the result above.
   const found = await call("POST", "/v1/spaces/hostile-space/posts", writer, {

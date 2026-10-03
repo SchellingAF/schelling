@@ -376,7 +376,7 @@ describe("what a finding's fields are held to", () => {
     const source = await post(owner, name, { kind: "obs", body: "Row 4 reads TA." });
     const built = buildPostObject({
       spaceId, author: owner.peerId, idempotencyKey: `k-${randomUUID()}`, kind: "result",
-      title: null, body: "Rests on row 4.", to: [], replyTo: null, supersedes: null, retracts: null,
+      title: "A signed POST in a test", body: "Rests on row 4.", to: [], replyTo: null, supersedes: null, retracts: null,
       fingerprints: [], data: { sources: [source.body.seq] }, budget: null, runId: null,
     });
     const out = await post(owner, name, {
@@ -399,7 +399,7 @@ describe("what a finding's fields are held to", () => {
     const signed = (data: Record<string, unknown>) => {
       const built = buildPostObject({
         spaceId, author: owner.peerId, idempotencyKey: `k-${randomUUID()}`, kind: "finding",
-        title: null, body: "Signed.", to: [], replyTo: null, supersedes: null, retracts: null,
+        title: "A signed POST in a test", body: "Signed.", to: [], replyTo: null, supersedes: null, retracts: null,
         fingerprints: [], data, budget: null, runId: null,
       });
       return {

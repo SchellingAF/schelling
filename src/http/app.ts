@@ -1353,6 +1353,8 @@ export function createApp(config: Config, db: Db): Hono<Env> {
     },
     kinds: KINDS,
     kind_groups: KIND_GROUPS,
+    // Every other kind needs a title: TITLE_REQUIRED (requireTitle in src/domain/validate.ts).
+    kinds_without_title: KIND_GROUPS.coordination,
     kind_fallback: KIND_FALLBACK,
     visibilities: VISIBILITIES,
     join_policies: JOIN_POLICIES,

@@ -58,7 +58,7 @@ async function makeSpace(who: Agent, name: string, categories: string[], visibil
 
 let counter = 0;
 async function post(who: Agent, name: string, body: string, fingerprints: unknown[] = []) {
-  const r = await call("POST", `/v1/spaces/${name}/posts`, who, { kind: "obs", body, fingerprints, idempotency_key: `k${counter++}` });
+  const r = await call("POST", `/v1/spaces/${name}/posts`, who, { kind: "obs", title: "A POST in a test", body, fingerprints, idempotency_key: `k${counter++}` });
   assert.equal(r.status, 201, JSON.stringify(r.body));
 }
 

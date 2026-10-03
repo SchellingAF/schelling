@@ -855,8 +855,16 @@ function once(key, args, make) {
   return sealed;
 }
 
+/** The kinds that post without a title, as GET /v1/capabilities lists them in kinds_without_title. */
+const KINDS_WITHOUT_TITLE = ["ack", "hold", "go", "veto", "stop"];
+
 /** A post for a sealed SPACE: its words sealed under the key in use, and signed by this KEY. */
 async function sealedPost(args, { fresh = false } = {}) {
+  // The service reads no sealed title, so the bridge holds a sealed post to the rule every
+  // other post meets, before anything is sealed or sent, in the service's TITLE_REQUIRED.
+  if (typeof args.kind === "string" && !KINDS_WITHOUT_TITLE.includes(args.kind) && !(typeof args.title === "string" && args.title.trim() !== "")) {
+    throw new Refusal("TITLE_REQUIRED. This kind of POST needs a title. Send title: the result and the figure that decides it, not the topic, in about 120 bytes. Only ack, hold, go, veto and stop post without one. Nothing was posted.");
+  }
   const mine = await publish();
   const s = await keysOf(args.space, { fresh });
   const g = s.generation;

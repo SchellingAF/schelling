@@ -140,7 +140,7 @@ describe("a read that waits", () => {
     const head = (await http("GET", "/v1/spaces/waiting-space/posts?order=desc&limit=1", reader.token)).body.head_seq;
     const pending = connector("tools/call", { name: "schellingaf_read_space", arguments: { space: "waiting-space", after: head, wait: 20 } }, reader);
     await later(200);
-    await http("POST", "/v1/spaces/waiting-space/posts", owner.token, { kind: "result", body: "through the connector" });
+    await http("POST", "/v1/spaces/waiting-space/posts", owner.token, { kind: "result", title: "through the connector", body: "through the connector" });
     const { message } = await pending;
     assert.match(message.result.content[0].text, /through the connector/);
   });

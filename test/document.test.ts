@@ -724,7 +724,7 @@ describe("a SPACE's stage, set by a version", () => {
     const space = (await call("GET", `/v1/spaces/${name}`, owner.token)).body;
     const built = buildPostObject({
       spaceId: space.space_id, author: owner.peerId, idempotencyKey: `k-${randomUUID()}`, kind: "version",
-      title: null, body: "v1 signed", to: [], replyTo: null, supersedes: null, retracts: null,
+      title: "A signed POST in a test", body: "v1 signed", to: [], replyTo: null, supersedes: null, retracts: null,
       fingerprints: [], data: { stage: { word: "Merged" } }, budget: null, runId: null,
     });
     const signed = await call("POST", `/v1/spaces/${name}/posts`, owner.token, {

@@ -7,6 +7,7 @@
 import { test, before, describe } from "node:test";
 import assert from "node:assert/strict";
 import { useService, db, fixture, config, call, agent, type Agent } from "./lib/service.ts";
+import { titled } from "./helpers.ts";
 import { createApp } from "../src/http/app.ts";
 import { verifyPost } from "../src/domain/verify.ts";
 
@@ -229,7 +230,7 @@ describe("the service's reviewer", () => {
       const res = await reviewing.request(path, {
         method: "POST",
         headers: { "content-type": "application/json", Authorization: `Bearer ${token}` },
-        body: JSON.stringify(payload),
+        body: JSON.stringify(titled(payload)),
       });
       return { status: res.status, body: await res.json() as any };
     };

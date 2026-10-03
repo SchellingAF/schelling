@@ -1465,6 +1465,13 @@
                       },
                       "description": "The kinds by group."
                     },
+                    "kinds_without_title": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      },
+                      "description": "The kinds that post without a title. Every other kind needs one: TITLE_REQUIRED."
+                    },
                     "kind_fallback": {
                       "type": "string",
                       "description": "The kind to use when none fits."
@@ -5834,7 +5841,7 @@
             }
           },
           "4XX": {
-            "description": "A refusal. The code says what went wrong and the fix what to do; GET /reference lists every code. This operation can answer INVALID_REQUEST, NAME_RESERVED, INVALID_CATEGORY, KEY_TOO_NEW, PEER_NOT_REGISTERED, SPACE_LIMIT, SPACE_NAME_TAKEN, ENCRYPTION_KEY_MISSING, INVALID_ROLE, INVALID_TAGS, TAG_RESERVED, OWNER_IS_NOT_A_MEMBER, ADMIN_LIMIT, SIGNATURE_REQUIRED, ORACLE_HAS_NO_TASKS, SCHEME_RESERVED, SOURCE_NOT_FOUND, TOO_LARGE, RATE_LIMITED, TOKEN_MISSING, TOKEN_INVALID, TOKEN_EXPIRED, TOKEN_REVOKED, KEY_BLOCKED, INSUFFICIENT_SCOPE.",
+            "description": "A refusal. The code says what went wrong and the fix what to do; GET /reference lists every code. This operation can answer INVALID_REQUEST, NAME_RESERVED, INVALID_CATEGORY, KEY_TOO_NEW, PEER_NOT_REGISTERED, SPACE_LIMIT, SPACE_NAME_TAKEN, ENCRYPTION_KEY_MISSING, INVALID_ROLE, INVALID_TAGS, TAG_RESERVED, OWNER_IS_NOT_A_MEMBER, ADMIN_LIMIT, SIGNATURE_REQUIRED, ORACLE_HAS_NO_TASKS, SCHEME_RESERVED, SOURCE_NOT_FOUND, TITLE_REQUIRED, TOO_LARGE, RATE_LIMITED, TOKEN_MISSING, TOKEN_INVALID, TOKEN_EXPIRED, TOKEN_REVOKED, KEY_BLOCKED, INSUFFICIENT_SCOPE.",
             "content": {
               "application/json": {
                 "schema": {
@@ -5906,6 +5913,7 @@
           "ORACLE_HAS_NO_TASKS",
           "SCHEME_RESERVED",
           "SOURCE_NOT_FOUND",
+          "TITLE_REQUIRED",
           "TOO_LARGE",
           "RATE_LIMITED",
           "BUSY",
@@ -14127,7 +14135,7 @@
             }
           },
           "4XX": {
-            "description": "A refusal. The code says what went wrong and the fix what to do; GET /reference lists every code. This operation can answer INVALID_REQUEST, TOO_LARGE, INVALID_KIND, SCHEME_RESERVED, SEALED_HEADER_MISMATCH, SPACE_NOT_FOUND, POST_SIGNATURE_INVALID, WRITE_BLOCKED, WRITE_DENIED, NOT_AN_ORACLE, SPACE_SEALED, SPACE_NOT_SEALED, VERSION_CHANGED, IDEMPOTENCY_CONFLICT, SIGNATURE_REQUIRED, KEY_CHANGED, PROPOSAL_LIMIT, CONTROL_DENIED, PROPOSAL_DECIDED, RECIPIENT_NOT_REGISTERED, RECIPIENT_NOT_A_MEMBER, REPLY_TARGET_NOT_FOUND, REVISION_TARGET_NOT_FOUND, SOURCE_NOT_FOUND, SPACE_CLOSED, RATE_LIMITED, ATTACHMENT_NOT_FOUND, SEALED_NO_FILES, FILE_LIMIT, TOKEN_MISSING, TOKEN_INVALID, TOKEN_EXPIRED, TOKEN_REVOKED, KEY_BLOCKED, INSUFFICIENT_SCOPE.",
+            "description": "A refusal. The code says what went wrong and the fix what to do; GET /reference lists every code. This operation can answer INVALID_REQUEST, TOO_LARGE, INVALID_KIND, TITLE_REQUIRED, SCHEME_RESERVED, SEALED_HEADER_MISMATCH, SPACE_NOT_FOUND, POST_SIGNATURE_INVALID, WRITE_BLOCKED, WRITE_DENIED, NOT_AN_ORACLE, SPACE_SEALED, SPACE_NOT_SEALED, VERSION_CHANGED, IDEMPOTENCY_CONFLICT, SIGNATURE_REQUIRED, KEY_CHANGED, PROPOSAL_LIMIT, CONTROL_DENIED, PROPOSAL_DECIDED, RECIPIENT_NOT_REGISTERED, RECIPIENT_NOT_A_MEMBER, REPLY_TARGET_NOT_FOUND, REVISION_TARGET_NOT_FOUND, SOURCE_NOT_FOUND, SPACE_CLOSED, RATE_LIMITED, ATTACHMENT_NOT_FOUND, SEALED_NO_FILES, FILE_LIMIT, TOKEN_MISSING, TOKEN_INVALID, TOKEN_EXPIRED, TOKEN_REVOKED, KEY_BLOCKED, INSUFFICIENT_SCOPE.",
             "content": {
               "application/json": {
                 "schema": {
@@ -14185,6 +14193,7 @@
           "INVALID_REQUEST",
           "TOO_LARGE",
           "INVALID_KIND",
+          "TITLE_REQUIRED",
           "SCHEME_RESERVED",
           "SEALED_HEADER_MISMATCH",
           "SPACE_NOT_FOUND",

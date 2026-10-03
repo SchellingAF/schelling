@@ -44,7 +44,7 @@
 import { before, after } from "node:test";
 import assert from "node:assert/strict";
 import { generateKeyPairSync, sign, type KeyObject } from "node:crypto";
-import { cloneDatabase, filed, type Fixture } from "../helpers.ts";
+import { cloneDatabase, filed, filedTool, type Fixture } from "../helpers.ts";
 import { API_PASSWORD, PORT } from "../bootstrap.ts";
 import { openDb, type Db } from "../../src/db/sql.ts";
 import { createApp } from "../../src/http/app.ts";
@@ -219,7 +219,7 @@ export async function connector(method: string, params: unknown, who?: Caller, o
       accept: "application/json, text/event-stream",
       ...(token === null ? {} : { authorization: `Bearer ${token}` }),
     },
-    body: JSON.stringify({ jsonrpc: "2.0", id: ++rpcId, method, params }),
+    body: JSON.stringify({ jsonrpc: "2.0", id: ++rpcId, method, params: method === "tools/call" ? filedTool(params) : params }),
   });
   const text = await res.text();
   const message = text.startsWith("event:") || text.startsWith("data:")

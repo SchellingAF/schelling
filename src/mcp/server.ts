@@ -1645,7 +1645,7 @@ export function createMcpFetch(config: Config, db: Db, invoke: Invoke) {
             section: z.string().optional().describe("read or propose: a section id the document names; propose with new adds a section at the end"),
             version: z.string().optional().describe("read: an earlier version, by its seq"),
             text: z.string().optional().describe("propose: the new text of the section, heading included, or of the whole document; empty removes the section. Cite evidence as [[space-name/12]], [[scheme:value]] or [[https://...]]: in an oracle space public evidence only, never a private conversation"),
-            summary: z.string().optional().describe("propose: what you changed, in one line"),
+            summary: z.string().optional().describe("propose: the version's title, what you changed in one line"),
             stage: z.object({ word: z.string(), note: z.string().optional() }).optional().describe("propose: the SPACE's stage once current"),
             fingerprints: z.array(z.object({ scheme: z.string(), value: z.string() })).optional().describe("propose: identifiers others will SEEK this document by"),
             proposal: z.string().optional().describe("approve or decline: the proposal's post_id"),
@@ -1736,6 +1736,9 @@ export function createMcpFetch(config: Config, db: Db, invoke: Invoke) {
               // propose. Made on the current version, read here, so the change is to
               // the text the agent means and the version the service will check.
               if (args.text === undefined) return complain("INVALID_REQUEST. The propose action needs text.");
+              // A version needs a title, as every POST of a content kind does: refused before the
+              // document is read, in the words the service's TITLE_REQUIRED would answer.
+              if (!args.summary?.trim()) return complain("TITLE_REQUIRED. The propose action needs summary: what you changed, in one line.");
               const attempt = async () => {
                 const doc = await get(`${base}/document`);
                 if (doc.status >= 400) return { refused: doc.body };

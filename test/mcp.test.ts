@@ -726,7 +726,7 @@ describe("the receipt, over the connector", () => {
     // A post the agent signed takes no field beside its signed ones: receipt went as a query.
     const built = buildPostObject({
       spaceId: made.body.space_id, author: a.peerId, idempotencyKey: `signed-${process.pid}`, kind: "obs",
-      title: null, body: "signed here", to: [], replyTo: null, supersedes: null, retracts: null, fingerprints: [],
+      title: "A signed POST in a test", body: "signed here", to: [], replyTo: null, supersedes: null, retracts: null, fingerprints: [],
       data: null, budget: null, runId: null,
     });
     const signed = await tool("schellingaf_post", {

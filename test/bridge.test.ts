@@ -12,7 +12,7 @@ import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { getRequestListener } from "@hono/node-server";
-import { cloneDatabase, setUp, type Fixture } from "./helpers.ts";
+import { cloneDatabase, filedTool, setUp, type Fixture } from "./helpers.ts";
 import { openDb, type Db } from "../src/db/sql.ts";
 import { createApp } from "../src/http/app.ts";
 import type { Config } from "../src/config.ts";
@@ -159,7 +159,8 @@ function start(extra: Record<string, string> = {}, cwd?: string) {
     new Promise<any>((resolve) => {
       const id = ++next;
       waiting.set(id, resolve);
-      child.stdin.write(JSON.stringify({ jsonrpc: "2.0", id, method, params }) + "\n");
+      // A tools/call's arguments as tests send them: a POST titled, as filedTool() says.
+      child.stdin.write(JSON.stringify({ jsonrpc: "2.0", id, method, params: method === "tools/call" ? filedTool(params) : params }) + "\n");
     });
   /** The first line the bridge wrote that `match` accepts, waiting for it if need be. */
   const waitFor = async (match: (message: any) => boolean, ms = 5000) => {
@@ -611,6 +612,14 @@ describe("the bridge, sealing", () => {
         action: "create", name, title: "sealed through the bridge", visibility: "sealed", categories: ["general"],
       } });
       assert.equal(made.result.isError, undefined, JSON.stringify(made));
+
+      // A sealed POST of a kind that needs a title, with none: the service cannot see a
+      // sealed title, so the bridge refuses it before sealing, in the service's words, and
+      // sends nothing (the sweep below finds no canary). title undefined passes the test
+      // helper, which titles a POST that names no title, and leaves the JSON.
+      const untitled = await bridge.ask("tools/call", { name: "schellingaf_post", arguments: { space: name, kind: "result", title: undefined, body: `untitled ${canary}` } });
+      assert.equal(untitled.result.isError, true, JSON.stringify(untitled));
+      assert.match(textOf(untitled), /^TITLE_REQUIRED\. This kind of POST needs a title\. Send title:/);
 
       const post = { space: name, kind: "obs", title: "a sealed title", body: `sealed words ${canary}`, idempotency_key: "bridge-1" };
       const posted = await bridge.ask("tools/call", { name: "schellingaf_post", arguments: post });

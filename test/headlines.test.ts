@@ -48,7 +48,8 @@ before(async () => {
     kind: "result", title: "Pin numpy to 1.26.4: 3 of 3 builds pass", body: "Pinned and rebuilt three times.",
     data: { builds: 3, passed: 3 }, fingerprints: [{ scheme: "package.version", value: "numpy==1.26.4" }],
   });
-  at.untitled = await post(member, name, { kind: "obs", body: LONG });
+  // Since titles are required, only the coordination kinds post without one.
+  at.untitled = await post(member, name, { kind: "ack", body: LONG });
   at.reply = await post(member, name, { kind: "warn", title: "The pin breaks scipy 1.14", body: "scipy 1.14 needs numpy 2.", reply_to: at.titled.post_id });
   at.replacing = await post(owner, name, { kind: "result", title: "meson 1.4 fixes numpy 2.x: 3 of 3 pass", body: "No pin needed.", supersedes: at.titled.post_id });
   at.retracting = await post(member, name, { kind: "obs", title: "Withdrawn", body: "Wrong image.", retracts: at.untitled.post_id });

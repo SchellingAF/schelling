@@ -17,6 +17,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { useService, app, db, fixture, call, send, read, agent, passkey, passkeyAssertion, HOST, type Agent, type Passkey } from "./lib/service.ts";
+import { filedTool } from "./helpers.ts";
 import { sweep } from "./lib/sweep.ts";
 import { canonicalBytes } from "../src/domain/jcs.ts";
 import { ApiError } from "../src/db/errors.ts";
@@ -160,7 +161,7 @@ async function rpc(at: string, name: string, args: unknown, bearer: string) {
   const res = await app.request(at, {
     method: "POST",
     headers: { "content-type": "application/json", accept: "application/json, text/event-stream", Authorization: `Bearer ${bearer}` },
-    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: args } }),
+    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: filedTool({ name, arguments: args }) }),
   });
   const text = await res.text();
   const parsed = text.startsWith("event:") || text.startsWith("data:")
@@ -708,7 +709,7 @@ describe("alg connection from anywhere but the connector, for its own connection
     const s = await makeSpace(person);
     // A post signed with a's key, correctly, by somebody who holds a's seed.
     const built = buildPostObject({
-      spaceId: s.id, author: person.peerId, idempotencyKey: `forged-${randomUUID()}`, kind: "obs", title: null, body: "forged",
+      spaceId: s.id, author: person.peerId, idempotencyKey: `forged-${randomUUID()}`, kind: "obs", title: "A signed POST in a test", body: "forged",
       to: [], replyTo: null, supersedes: null, retracts: null, fingerprints: [], data: null, budget: null, runId: null,
     });
     const body = {
@@ -757,7 +758,7 @@ describe("alg connection from anywhere but the connector, for its own connection
               ${Buffer.alloc(64, 1)}, ${fixture.owner.json({ alg: "ed25519", signature: "00".repeat(64) })})`;
     const append = async (alg: string, connectionKey: Buffer | null) => {
       const built = buildPostObject({
-        spaceId: s.id, author: person.peerId, idempotencyKey: `sql-${randomUUID()}`, kind: "obs", title: null, body: "x",
+        spaceId: s.id, author: person.peerId, idempotencyKey: `sql-${randomUUID()}`, kind: "obs", title: "A signed POST in a test", body: "x",
         to: [], replyTo: null, supersedes: null, retracts: null, fingerprints: [], data: null, budget: null, runId: null,
       });
       return fixture.owner`
@@ -1044,7 +1045,7 @@ describe("a post signed through a connection never reads as signed by its author
     const own = await ed25519Person();
     const theirs = await makeSpace(own);
     const viaBridgeShape = buildPostObject({
-      spaceId: theirs.id, author: own.peerId, idempotencyKey: "own", kind: "obs", title: null, body: "signed by the KEY",
+      spaceId: theirs.id, author: own.peerId, idempotencyKey: "own", kind: "obs", title: "A signed POST in a test", body: "signed by the KEY",
       to: [], replyTo: null, supersedes: null, retracts: null, fingerprints: [], data: null, budget: null, runId: null,
     });
     if (own.kind !== "ed25519") throw new Error("an Ed25519 KEY");
@@ -1243,7 +1244,7 @@ describe("a vault opens only while its token is live", () => {
     assert.equal(bearer.state, "valid");
     await fixture.owner`update schellingaf.tokens set expires_at = now() - interval '1 second' where token_hash = ${sha256(d.appToken)}`;
     const built = buildPostObject({
-      spaceId: s.id, author: person.peerId, idempotencyKey: `expired-${randomUUID()}`, kind: "obs", title: null, body: "expired",
+      spaceId: s.id, author: person.peerId, idempotencyKey: `expired-${randomUUID()}`, kind: "obs", title: "A signed POST in a test", body: "expired",
       to: [], replyTo: null, supersedes: null, retracts: null, fingerprints: [], data: null, budget: null, runId: null,
     });
     const out = await read(await app.request(`/v1/spaces/${s.name}/posts`, {

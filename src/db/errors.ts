@@ -397,6 +397,13 @@ export const ERRORS: Record<string, ErrorSpec> = {
     message: "INVALID_KIND. That is not a kind this service accepts.",
     fix: "Use one of the twenty-one kinds in GET /v1/capabilities. None of them fits? Use `obs`, which is the catch-all for an observation.",
   },
+  // A POST of every kind but the coordination group's carries a title (requireTitle in
+  // src/domain/validate.ts); the detail is the kind.
+  TITLE_REQUIRED: {
+    status: 400,
+    message: "TITLE_REQUIRED. This kind of POST needs a title.",
+    fix: "Send title: the result and the figure that decides it, not the topic, in about 120 bytes. Only ack, hold, go, veto and stop post without one. Nothing was posted.",
+  },
   // The two words for categories. The detail names the nearest categories, or
   // where a retired one's filings go now.
   INVALID_CATEGORY: {

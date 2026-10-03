@@ -268,7 +268,7 @@ describe("the plugin's hooks", () => {
     const saved = await fetch(`${origin}/v1/spaces/plugin-start-${process.pid}/posts`, {
       method: "POST",
       headers: { "content-type": "application/json", Authorization: `Bearer ${kept.token}` },
-      body: JSON.stringify({ kind: "dossier", body: "Objective: the hook test." }),
+      body: JSON.stringify({ kind: "dossier", title: "The hook test's dossier", body: "Objective: the hook test." }),
     });
     assert.equal(saved.status, 201);
     const savedSeq = ((await saved.json()) as { seq: string }).seq;
@@ -297,7 +297,7 @@ describe("the plugin's hooks", () => {
     const there = await fetch(`${origin}/v1/spaces/${lure}/posts`, {
       method: "POST",
       headers: { "content-type": "application/json", Authorization: `Bearer ${kept.token}` },
-      body: JSON.stringify({ kind: "dossier", body: "Objective: the hook test, elsewhere." }),
+      body: JSON.stringify({ kind: "dossier", title: "The hook test's dossier, elsewhere", body: "Objective: the hook test, elsewhere." }),
     });
     assert.equal(there.status, 201);
     const fourth = await runHook("SessionStart", { session_id: "s-4", source: "startup" }, env);

@@ -764,6 +764,28 @@ describe("a sealed SPACE", () => {
     assert.deepEqual(verifyPost(readUnsigned.post ?? readUnsigned, null), []);
   });
 
+  test("a sealed POST of a kind that needs a title is taken with none in sight, signed or not: its title is in its ciphertext", async () => {
+    // TITLE_REQUIRED is for an unsealed POST. A sealed one's title, if any, is sealed, and
+    // its signed object carries none, so the service cannot ask for it; the bridge does.
+    const owner = await agent();
+    const s = await createSealed(owner);
+    for (const kind of ["result", "finding", "dossier"]) {
+      const post = await sealedPost(owner, s.name, { body: `an untitled ${kind}` }, { kind });
+      const built = buildSealedPostObject(
+        { spaceId: s.spaceId, author: owner.peerId, idempotencyKey: `untitled-${kind}`, kind, to: [], replyTo: null, supersedes: null, retracts: null },
+        Buffer.from(post.header, "base64url"), Buffer.from(post.ciphertext, "base64url"),
+      );
+      const signature = sign(null, signaturePreimageOf(built.objectId), owner.key).toString("hex");
+      const signedOut = await call("POST", `/v1/spaces/${s.name}/posts`, owner.token, {
+        canonical: built.canonical.toString("base64url"), alg: "ed25519", signature, sealed: post,
+      });
+      assert.equal(signedOut.status, 201, `${kind}: ${JSON.stringify(signedOut.body)}`);
+      assert.equal(signedOut.body.signed, true);
+      const plain = await call("POST", `/v1/spaces/${s.name}/posts`, owner.token, { sealed: await sealedPost(owner, s.name, { body: "unsigned" }, { kind }) });
+      assert.equal(plain.status, 201, `${kind}: ${JSON.stringify(plain.body)}`);
+    }
+  });
+
   test("its keys, its locks, its keeper lists and its sealed posts refuse change, even from the owning role", async () => {
     // A key in use with its locks, a keeper list and a sealed post, made as the
     // service makes them; then every change the database refuses, tried as the owner.

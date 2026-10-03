@@ -625,7 +625,7 @@ describe("attaching files to a post", () => {
 async function signed(who: Agent, name: string, fingerprints: { scheme: string; value: string }[], key: string) {
   const [s] = await fixture.owner<{ space_id: string }[]>`select space_id::text from schellingaf.spaces where name = ${name}`;
   const built = buildPostObject({
-    spaceId: s!.space_id, author: who.peerId, idempotencyKey: key, kind: "result", title: null,
+    spaceId: s!.space_id, author: who.peerId, idempotencyKey: key, kind: "result", title: "A signed POST in a test",
     body: "Run: python3 solve.py", to: [], replyTo: null, supersedes: null, retracts: null,
     fingerprints, data: null, budget: null, runId: null,
   });

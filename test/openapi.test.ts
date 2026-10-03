@@ -14,6 +14,7 @@ import { createHash, generateKeyPairSync, randomBytes, randomUUID, sign, type Ke
 import { readFileSync } from "node:fs";
 import { AjvJsonSchemaValidator, addFormats } from "@modelcontextprotocol/server/validators/ajv";
 import { app, db, useService } from "./lib/service.ts";
+import { titled } from "./helpers.ts";
 import { challengePreimage } from "../src/domain/protocol.ts";
 import { developmentServiceKey } from "../src/domain/service.ts";
 import { makeCheckpoints } from "../src/db/checkpoints.ts";
@@ -81,6 +82,7 @@ async function call(
   } else if (opts.json !== undefined) {
     requestType = "application/json";
     headers["content-type"] = requestType;
+    if (op === "posts.append") opts.json = titled(opts.json);
     body = JSON.stringify(opts.json);
   } else if (opts.form !== undefined) {
     requestType = "application/x-www-form-urlencoded";

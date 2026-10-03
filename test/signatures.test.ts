@@ -252,7 +252,7 @@ describe("a post signed with an Ed25519 KEY", () => {
     const key = `k-${randomUUID()}`;
     const plain = await call("POST", `/v1/spaces/${s.name}/posts`, owner.token, { kind: "obs", body: "plain", idempotency_key: key });
     assert.equal(plain.status, 201);
-    const late = buildPostObject(fields(owner.peerId, s.id, { kind: "obs", title: null, body: "plain", fingerprints: [], idempotencyKey: key }));
+    const late = buildPostObject(fields(owner.peerId, s.id, { kind: "obs", title: "A POST in a test", body: "plain", fingerprints: [], idempotencyKey: key }));
     const signLater = await call("POST", `/v1/spaces/${s.name}/posts`, owner.token, signedBody(owner, late));
     assert.equal(signLater.body.error?.code, "IDEMPOTENCY_CONFLICT", JSON.stringify(signLater.body));
   });
@@ -277,7 +277,7 @@ describe("a post signed with a passkey", () => {
   test("is accepted when the prompt's challenge is the hash of the object-signature preimage", async () => {
     const person = await passkeyAgent();
     const s = await makeSpace(person);
-    const built = buildPostObject(fields(person.peerId, s.id, { title: null, fingerprints: [] }));
+    const built = buildPostObject(fields(person.peerId, s.id, { title: "A signed POST in a test", fingerprints: [] }));
     const a = assertion(person, passkeyChallengeOf(built.objectId));
     const out = await call("POST", `/v1/spaces/${s.name}/posts`, person.token, {
       alg: "webauthn", canonical: built.canonical.toString("base64url"), ...a,

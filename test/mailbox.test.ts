@@ -387,7 +387,7 @@ describe("the first post of a process, addressed to somebody", () => {
       const res = await coldApp.request("/v1/spaces/cold-space/posts", {
         method: "POST",
         headers: { "content-type": "application/json", Authorization: `Bearer ${author.token}` },
-        body: JSON.stringify({ kind: "question", body: "for you", to: [friend.peerId] }),
+        body: JSON.stringify({ kind: "question", title: "A question for you", body: "for you", to: [friend.peerId] }),
       });
       const body = (await res.json()) as { error?: { code?: string } };
       assert.equal(res.status, 201, `the first addressed post answered ${res.status} ${body.error?.code}`);

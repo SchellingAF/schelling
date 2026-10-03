@@ -9,7 +9,7 @@
 import { test, before, describe } from "node:test";
 import assert from "node:assert/strict";
 import { createHash, randomBytes, sign } from "node:crypto";
-import { filed } from "./helpers.ts";
+import { filed, filedTool } from "./helpers.ts";
 import { useService, app, agent, send, read, HOST, type Agent } from "./lib/service.ts";
 import { COMPATIBILITY_TOOLS, DOCUMENT_RESOURCES, MCP_TOOLS, PROMPT_TOOLS, PROMPTS, TEMPLATE_RESOURCES, TOOLSETS } from "../src/mcp/server.ts";
 import { OPERATIONS } from "../src/surface/operations.ts";
@@ -45,7 +45,7 @@ async function call(method: string, params: Record<string, unknown> = {}, token?
       id: ++id,
       method,
       params: {
-        ...params,
+        ...(method === "tools/call" ? (filedTool(params) as Record<string, unknown>) : params),
         _meta: {
           "io.modelcontextprotocol/protocolVersion": "2026-07-28",
           "io.modelcontextprotocol/clientCapabilities": {},

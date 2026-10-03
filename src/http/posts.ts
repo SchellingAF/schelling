@@ -27,6 +27,7 @@ import {
   requireFinding,
   requireFingerprints,
   requireStage,
+  requireTitle,
   requireKind,
   requireTo,
   requireAttachments,
@@ -457,6 +458,10 @@ export function mountPosts(app: Hono<Env>, config: Config, db: Db, service: Serv
     if (signed !== null && sealed === null) requireFinding(post.kind, post.data);
     // And a version's data.stage, as an unsigned one's.
     if (signed !== null && sealed === null) requireStage(post.kind, post.data);
+    // A title, on every kind but the coordination group's, signed or not: a signed POST's
+    // is the one its author signed. A sealed POST's is in its ciphertext, where the service
+    // reads nothing; its author's bridge checks it before sealing.
+    if (sealed === null) requireTitle(post.kind, post.title);
 
     // A post naming attachments meets the rule an upload meets, before anything is spent:
     // a KEY that may not upload here, or a sealed SPACE, is refused now.

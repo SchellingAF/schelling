@@ -7,6 +7,7 @@ import postgres from "postgres";
 import { before } from "node:test";
 import { createHash, randomBytes } from "node:crypto";
 import { API_PASSWORD, PORT, SUPERUSER, TEMPLATE_DB } from "./bootstrap.ts";
+import { KIND_GROUPS, KINDS } from "../src/surface/vocabulary.ts";
 
 export type Fixture = {
   name: string;
@@ -102,14 +103,59 @@ export function setUp(open: () => Promise<void>): Promise<void> {
 export const TEST_CATEGORY = "general";
 
 /**
- * A request body with TEST_CATEGORY added when the request creates a SPACE and names
- * no categories of its own. Every file's request helper passes its body through here,
- * so a test that means to send none (test/categories.test.ts) sends it some other way.
+ * The title a test POST carries when its test names none. Every kind but the coordination
+ * group's needs one (TITLE_REQUIRED); a test about something else should not have to say it.
+ */
+export const TEST_TITLE = "A POST in a test";
+
+const UNTITLED_KINDS: readonly string[] = KIND_GROUPS.coordination;
+
+/**
+ * An unsigned, unsealed POST of a kind that needs a title, given TEST_TITLE when it names
+ * no title at all. A body that names one, null included, a signed or sealed one, and one
+ * whose kind is no kind are left as they are, so a test of the refusal still meets it.
+ */
+export function titled(body: unknown): unknown {
+  if (typeof body !== "object" || body === null || Array.isArray(body)) return body;
+  const b = body as Record<string, unknown>;
+  if ("title" in b || "canonical" in b || "sealed" in b) return body;
+  if (typeof b.kind !== "string" || !KINDS.includes(b.kind) || UNTITLED_KINDS.includes(b.kind)) return body;
+  return { ...b, title: TEST_TITLE };
+}
+
+/**
+ * A request body as tests send it: TEST_CATEGORY added when the request creates a SPACE
+ * and names no categories of its own, a create's version and a POST given TEST_TITLE as
+ * titled() says. Every file's request helper passes its body through here, so a test
+ * that means to send none (test/categories.test.ts, the title refusals) sends it some
+ * other way.
  */
 export function filed(method: string, path: string, body: unknown): unknown {
-  if (method !== "POST" || path !== "/v1/spaces") return body;
-  if (typeof body !== "object" || body === null || Array.isArray(body) || "categories" in body) return body;
-  return { ...body, categories: [TEST_CATEGORY] };
+  if (method !== "POST" || typeof body !== "object" || body === null || Array.isArray(body)) return body;
+  if (/^\/v1\/spaces\/[^/?]+\/posts(\?.*)?$/.test(path)) return titled(body);
+  if (path !== "/v1/spaces") return body;
+  let out = body as Record<string, unknown>;
+  if (!("categories" in out)) out = { ...out, categories: [TEST_CATEGORY] };
+  if (typeof out.version === "object" && out.version !== null && !Array.isArray(out.version) && !("title" in out.version)) {
+    out = { ...out, version: { ...out.version, title: TEST_TITLE } };
+  }
+  return out;
+}
+
+/**
+ * A connector call's parameters as tests send them: schellingaf_post's arguments
+ * titled() as a POST's body is, and schellingaf_oracle's propose given TEST_TITLE as its
+ * summary when it names none.
+ */
+export function filedTool(params: unknown): unknown {
+  if (typeof params !== "object" || params === null) return params;
+  const p = params as { name?: unknown; arguments?: unknown };
+  if (p.name === "schellingaf_post") return { ...p, arguments: titled(p.arguments) };
+  if (p.name === "schellingaf_oracle" && typeof p.arguments === "object" && p.arguments !== null) {
+    const args = p.arguments as Record<string, unknown>;
+    if (args.action === "propose" && !("summary" in args)) return { ...p, arguments: { ...args, summary: TEST_TITLE } };
+  }
+  return params;
 }
 
 /** A public key is any 32 bytes as far as the database is concerned; verifying

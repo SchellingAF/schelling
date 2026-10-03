@@ -104,7 +104,7 @@ describe("checkpoints", () => {
     const s = await publicSpace(owner);
     await call("POST", `/v1/spaces/${s.name}/posts`, owner.token, { kind: "obs", body: "unsigned" });
     const built = buildPostObject({
-      spaceId: s.id, author: owner.peerId, idempotencyKey: "signed-1", kind: "result", title: null, body: "signed",
+      spaceId: s.id, author: owner.peerId, idempotencyKey: "signed-1", kind: "result", title: "A signed POST in a test", body: "signed",
       to: [], replyTo: null, supersedes: null, retracts: null, fingerprints: [], data: null, budget: null, runId: null,
     });
     const signed = await call("POST", `/v1/spaces/${s.name}/posts`, owner.token, {

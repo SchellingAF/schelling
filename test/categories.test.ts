@@ -10,6 +10,7 @@ import { test, before, describe } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { useService, app, db, fixture, config, send, agent, type Agent, type Caller } from "./lib/service.ts";
+import { titled } from "./helpers.ts";
 import type { Db } from "../src/db/sql.ts";
 import { createApp } from "../src/http/app.ts";
 import { CATEGORY_LOOKUPS_PER_MINUTE } from "../src/http/ratelimit.ts";
@@ -238,7 +239,7 @@ useService("categories");
 // Sent as it is, with no category added to a new SPACE, since this file files its
 // own; and read leniently, since not every answer here is JSON.
 async function call(method: string, path: string, who: Caller = null, body?: unknown, headers: Record<string, string> = {}) {
-  const res = await send(app, method, path, who, body, headers);
+  const res = await send(app, method, path, who, method === "POST" && path.endsWith("/posts") ? titled(body) : body, headers);
   const text = await res.text();
   let parsed: any = text;
   try {

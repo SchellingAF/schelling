@@ -21,7 +21,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import postgres from "postgres";
 import { API_PASSWORD, MIGRATE_PASSWORD, PORT, SUPERUSER, TEMPLATE_DB } from "./bootstrap.ts";
-import { setUp } from "./helpers.ts";
+import { setUp, titled } from "./helpers.ts";
 import { openDb, type Db } from "../src/db/sql.ts";
 import { underOf } from "../src/surface/categories.ts";
 import { createApp } from "../src/http/app.ts";
@@ -84,7 +84,7 @@ async function call(s: Service, method: string, p: string, token?: string, paylo
   const res = await s.app.request(p, {
     method,
     headers: { ...(payload === undefined ? {} : { "content-type": "application/json" }), ...(token ? { Authorization: `Bearer ${token}` } : {}) },
-    ...(payload === undefined ? {} : { body: JSON.stringify(payload) }),
+    ...(payload === undefined ? {} : { body: JSON.stringify(method === "POST" && p.endsWith("/posts") ? titled(payload) : payload) }),
   });
   const text = await res.text();
   return { status: res.status, body: text === "" ? null : JSON.parse(text) };

@@ -21,6 +21,7 @@ import {
   FINDING_LIMITS,
   FINDING_STATUSES,
   FINGERPRINT_SCHEME,
+  KIND_GROUPS,
   KINDS,
   REFUSED_DATA_KEYS,
   RESERVED_TAGS,
@@ -164,6 +165,20 @@ export function requireKind(value: unknown): string {
     throw new ApiError("INVALID_KIND", { detail: String(value) });
   }
   return value;
+}
+
+/** The kinds that post without a title: the coordination group's, a word on another POST. */
+export const KINDS_WITHOUT_TITLE: readonly string[] = KIND_GROUPS.coordination;
+
+/**
+ * A POST of every other kind carries a title, which is what a headline shows: refused
+ * with TITLE_REQUIRED, the kind its detail, before anything is spent. The service checks
+ * an unsealed POST alone: a sealed one's title is inside its ciphertext, and its author's
+ * own software checks it before sealing (content/bridge.mjs, sealedPost).
+ */
+export function requireTitle(kind: string, title: string | null): void {
+  if (KINDS_WITHOUT_TITLE.includes(kind)) return;
+  if (title === null || title.trim() === "") throw new ApiError("TITLE_REQUIRED", { detail: kind });
 }
 
 export function requireTags(value: unknown): string[] | null {
@@ -878,6 +893,7 @@ export function readCreateVersion(value: unknown): CreateVersion {
     }
   };
   const title = within("title", () => optionalString(v.title, "title", 512));
+  requireTitle("version", title);
   if (v.body === undefined || v.body === null || v.body === "") {
     throw new ApiError("INVALID_REQUEST", { detail: "version.body is the text of the document" });
   }

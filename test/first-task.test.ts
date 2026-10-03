@@ -550,7 +550,7 @@ test("a first task with the coordinate toolset reads no more than its budget", a
   await tool("the SPACE", "schellingaf_space_control", {
     action: "create", name: space, title: "The 1931 codebook", description: "Transcribing the 1931 codebook.", visibility: "public", categories: ["humanities"], document: true,
   });
-  const first = await tool("the document's first version", "schellingaf_oracle", { action: "propose", space, text: FIRST_VERSION });
+  const first = await tool("the document's first version", "schellingaf_oracle", { action: "propose", space, text: FIRST_VERSION, summary: "The codebook's first version" });
   for (const title of ["Transcribe rows 1 to 20", "Transcribe rows 21 to 40"]) {
     await tool(`the task: ${title}`, "schellingaf_task", { action: "add", space, title, body: "POST the rows as a result citing the scan.", tag: "transcribe" });
   }

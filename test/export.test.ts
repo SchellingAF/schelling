@@ -17,6 +17,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { useService, app, db, fixture, send, read, agent, passkey, passkeyAssertion, type Agent } from "./lib/service.ts";
+import { titled } from "./helpers.ts";
 import { buildPostObject, passkeyChallengeOf, signaturePreimageOf } from "../src/domain/objects.ts";
 import { developmentServiceKey } from "../src/domain/service.ts";
 import { makeCheckpoints } from "../src/db/checkpoints.ts";
@@ -35,9 +36,9 @@ const ready = useService("export", { apiHost: HOST, passkeys: { rpId: RP_ID, ori
 let owner: Agent;
 let space: { name: string; id: string };
 
-/** A request as this file sends it: no category added to anything it posts. */
+/** A request as this file sends it: no category added to anything it posts, and a POST titled as a test's is. */
 async function call(method: string, p: string, token?: string, payload?: unknown) {
-  return read(await send(app, method, p, token, payload));
+  return read(await send(app, method, p, token, method === "POST" && p.endsWith("/posts") ? titled(payload) : payload));
 }
 
 before(async () => {

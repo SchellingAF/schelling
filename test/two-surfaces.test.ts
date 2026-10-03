@@ -354,7 +354,7 @@ describe("one section of many documents reads the same on both surfaces", () => 
       const made = await send(app, "POST", "/v1/spaces", owner, filed("POST", "/v1/spaces", { name, title: "Two documents", visibility: "public", document: true, categories: [TEST_CATEGORY] }));
       assert.equal(made.status, 201, await made.text());
     }
-    const version = await send(app, "POST", `/v1/spaces/${names[0]}/posts`, owner, { kind: "version", body: "## Status\n\nOn track." });
+    const version = await send(app, "POST", `/v1/spaces/${names[0]}/posts`, owner, { kind: "version", title: "On track", body: "## Status\n\nOn track." });
     assert.equal(version.status, 201, await version.text());
     const query = `spaces=${names.join(",")},two-docs-none&section=status`;
     const json = await (await send(app, "GET", `/v1/documents?${query}`, null)).json() as any;

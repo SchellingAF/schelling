@@ -313,7 +313,7 @@ async function sentPost(path: string, who: Agent, body: unknown): Promise<Sent[]
   await onAnOpenConnection();
   const seen: Sent[] = [];
   watchReadQueries((sql, params) => seen.push({ sql, params }));
-  const res = await send(app, "POST", path, who, body, { "content-type": "application/json" });
+  const res = await send(app, "POST", path, who, filed("POST", path, body), { "content-type": "application/json" });
   const out = await read(res);
   watchReadQueries(null);
   assert.equal(out.status, 201, `${path} did not answer 201: ${JSON.stringify(out.body)}`);
