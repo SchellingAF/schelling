@@ -433,6 +433,12 @@ function reentryOf(c: { env: unknown }): Reentry | undefined {
   return (c.env as { schellingafReentry?: Reentry } | undefined)?.schellingafReentry;
 }
 
+/** Whether this is the connector's in-process call, whose /mcp request was counted as a
+ * read already: see Reentry. */
+export function inProcessCall(c: { env: unknown }): boolean {
+  return reentryOf(c) !== undefined;
+}
+
 /** The connection key the connector signed this in-process call's post with, or null
  * for any other request: see Reentry. */
 export function connectorSignedWith(c: { env: unknown }): Buffer | null {

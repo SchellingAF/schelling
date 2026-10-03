@@ -52,6 +52,9 @@ export const VERSION_TITLE_HINT_LINE =
 /** Said last after a POST whose title ran long and no sentence did. */
 export const POSTED_AS_WRITTEN = "Posted as written.";
 
+/** Said last after a dry run of a POST, in place of POSTED_AS_WRITTEN: it wrote nothing. */
+export const NOTHING_POSTED = "Nothing was posted: this was a dry run.";
+
 /** A title, or a sentence, of more words than this ran long. */
 export const LONG_WORDS = 20;
 /** How many long sentences the hint names, the first in the text. */
@@ -225,6 +228,14 @@ export function hintForPost(title: string | null | undefined, body: string | nul
   if (sentencesPart !== null) parts.push(sentencesPart);
   if (parts.length === 0) return null;
   return [`${parts.join("; ")}.`, ...(longTitle ? [kind === "version" ? VERSION_TITLE_HINT_LINE : TITLE_HINT_LINE] : []), sentencesPart !== null ? HINT_SECOND_LINE : POSTED_AS_WRITTEN].join("\n");
+}
+
+/**
+ * A POST's hint as its dry run says it: the same lines, with NOTHING_POSTED in place of
+ * the POSTED_AS_WRITTEN that ends HINT_SECOND_LINE or stands alone.
+ */
+export function dryRunHint(hint: string): string {
+  return hint.endsWith(POSTED_AS_WRITTEN) ? `${hint.slice(0, -POSTED_AS_WRITTEN.length)}${NOTHING_POSTED}` : hint;
 }
 
 /** The first line's part on a body's long sentences, or null when none ran long. */
