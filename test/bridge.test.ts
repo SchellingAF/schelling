@@ -1714,6 +1714,47 @@ describe("the bridge, an answer lost on its way", () => {
     }
   });
 
+  test("a batch with no key whose answer is dropped after it was written is resent once under the key the bridge gave it, and each POST is written exactly once", async () => {
+    const who = elsewhere("lost-batch");
+    const bridge = start(who);
+    try {
+      const space = await ownSpace(bridge, who, "lost-batch");
+      const before = await space.posts();
+      lostSeen = 0;
+      lose = (args, n) => (args?.space === space.name && Array.isArray(args?.posts) && n === 1 ? "reset" : null);
+      const from = connectorAsked.length;
+      const posted = await bridge.ask("tools/call", {
+        name: "schellingaf_post",
+        arguments: {
+          space: space.name,
+          posts: [
+            { kind: "obs", title: "the first of a batch whose answer was lost", body: "posted once" },
+            { kind: "obs", title: "the second, with a key of its own", body: "posted once", idempotency_key: "lost-batch-own" },
+            { kind: "obs", title: "the third", body: "posted once" },
+          ],
+        },
+      });
+      assert.equal(posted.result.isError, undefined, JSON.stringify(posted));
+      const sends = sendsOf(from, "schellingaf_post");
+      assert.equal(sends.length, 2);
+      assert.equal(sends[0]!.body, sends[1]!.body, "the resend was not the same bytes");
+      const key = JSON.parse(sends[0]!.body).params.arguments.idempotency_key;
+      assert.equal(typeof key, "string", "the bridge gave the batch no key");
+      const items = posted.result.structuredContent.posts;
+      assert.equal(items.length, 3);
+      assert.equal(new Set(items.map((p: any) => p.post_id)).size, 3);
+      assert.equal(await space.posts(), before + 3);
+      const keys = await Promise.all(items.map(async (p: any) => {
+        const one = await readAs(space.kept.token, `/v1/posts/${p.post_id}`);
+        return JSON.parse(Buffer.from(one.proof.canonical, "base64url").toString("utf8")).idempotency_key;
+      }));
+      assert.deepEqual(keys, [`${key}:0`, "lost-batch-own", `${key}:2`]);
+    } finally {
+      lose = null;
+      await bridge.stop();
+    }
+  });
+
   test("the same for a message send, a task add and an oracle approve", async () => {
     const who = elsewhere("lost-others");
     const bob = await register();

@@ -72,7 +72,12 @@ export function watchBodies(server: Server, idleMs: number): BodyWatch {
         watched.delete(req);
         continue;
       }
-      const bytesRead = req.socket.bytesRead;
+      // A socket already gone has nothing left to wait for.
+      const bytesRead = req.socket?.bytesRead;
+      if (bytesRead === undefined) {
+        watched.delete(req);
+        continue;
+      }
       if (bytesRead > seen.bytesRead || req.readableLength >= req.readableHighWaterMark) {
         seen.bytesRead = bytesRead;
         seen.quietSince = now;

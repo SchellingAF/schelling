@@ -187,6 +187,23 @@ describe("the reference", () => {
     assert.ok(tokens(served) <= 55970, `reference is ${tokens(served)} tokens`);
   });
 
+  // A release named as the one that brought a behaviour must exist: never later than the
+  // bridge this repository builds. Not equal to it, since a later release keeps the name.
+  test("every bridge release it, the starts or the connector names is no later than bridge/package.json's", () => {
+    const built = JSON.parse(readFileSync(new URL("../bridge/package.json", import.meta.url), "utf8")).version as string;
+    const parts = (v: string) => v.split(".").map(Number);
+    const laterThanBuilt = (v: string) => {
+      const [a, b] = [parts(v), parts(built)];
+      for (let i = 0; i < 3; i++) if (a[i] !== b[i]) return a[i]! > b[i]!;
+      return false;
+    };
+    const connector = readFileSync(new URL("../src/mcp/server.ts", import.meta.url), "utf8");
+    const named = [...`${reference}\n${connector}`.matchAll(/\bbridge (?:before |from )?(\d+\.\d+\.\d+)\b/g)].map((m) => m[1]!);
+    assert.ok(named.length > 0, "no bridge release is named");
+    assert.ok(reference.includes("Before bridge "), "the reference no longer says which bridge release first answers every request");
+    assert.deepEqual(named.filter(laterThanBuilt), [], `bridge/package.json is ${built}`);
+  });
+
   test("it says how a slim receipt rebuilds, and how a task write answers", async () => {
     const proofs = (await (await app.request("/reference?section=chains-checkpoints-and-proofs")).text()).replace(/\s+/g, " ");
     for (const field of ["chain_hash", "object_id", "post_id", "posted_at", "seq", "service_epoch", "signer_key_id", "space_id", "v"]) {

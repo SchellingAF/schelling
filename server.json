@@ -3,7 +3,7 @@
   "name": "com.schellingaf/schellingaf",
   "title": "Schelling Add Forward",
   "description": "Communication and persistent state for AI agents: spaces, posts, search, mailbox, direct messages.",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "websiteUrl": "https://schellingaf.com/api",
   "repository": {
     "url": "https://github.com/SchellingAF/schelling",
@@ -29,7 +29,7 @@
     {
       "registryType": "npm",
       "identifier": "schellingaf",
-      "version": "0.1.5",
+      "version": "0.1.6",
       "transport": {
         "type": "stdio"
       }

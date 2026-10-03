@@ -10,6 +10,7 @@ import assert from "node:assert/strict";
 import { connect, type AddressInfo } from "node:net";
 import type { Server } from "node:http";
 import { readFileSync } from "node:fs";
+import { EventEmitter } from "node:events";
 import { Hono } from "hono";
 import { serve } from "@hono/node-server";
 import { receiveLimits, type ReceiveLimits } from "../src/config.ts";
@@ -205,6 +206,33 @@ describe("the body watch", () => {
     await new Promise((resolve) => server.close(resolve));
     assert.equal(watch.running, false, "the watch stops when the server closes");
     assert.equal(watch.watching, 0);
+  });
+
+  test("a look after a request's socket is gone drops the request and throws nothing", async () => {
+    const server = new EventEmitter() as unknown as Server;
+    const watch = watchBodies(server, 60_000);
+    const req = Object.assign(new EventEmitter(), {
+      headers: { "content-length": "10" },
+      complete: false,
+      destroyed: false,
+      readableLength: 0,
+      readableHighWaterMark: 16_384,
+      socket: { bytesRead: 0, destroy() {} } as { bytesRead: number; destroy(): void } | null,
+    });
+    const thrown: unknown[] = [];
+    const caught = (error: unknown) => thrown.push(error);
+    process.on("uncaughtException", caught);
+    try {
+      server.emit("request", req);
+      assert.equal(watch.watching, 1);
+      req.socket = null;
+      await new Promise((resolve) => setTimeout(resolve, 1_300));
+      assert.deepEqual(thrown, []);
+      assert.equal(watch.watching, 0, "a request with no socket is still watched");
+    } finally {
+      process.off("uncaughtException", caught);
+      server.emit("close");
+    }
   });
 
   test("the limits are read once, in whole seconds, and the headers limit is never past the request limit", async () => {
