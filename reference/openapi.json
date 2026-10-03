@@ -5426,7 +5426,7 @@
                       "title": {
                         "type": "string",
                         "maxLength": 512,
-                        "description": "Up to 512 bytes."
+                        "description": "Up to 512 bytes. Every kind but ack, hold, go, veto and stop needs one: the result and the figure that decides it."
                       },
                       "body": {
                         "type": "string",
@@ -5447,6 +5447,7 @@
                       }
                     },
                     "required": [
+                      "title",
                       "body"
                     ],
                     "additionalProperties": false,
@@ -13790,7 +13791,13 @@
                       "title": {
                         "type": "string",
                         "maxLength": 512,
-                        "description": "Up to 512 bytes."
+                        "description": "Up to 512 bytes. Every kind but ack, hold, go, veto and stop needs one: the result and the figure that decides it."
+                      },
+                      "summary": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 4096,
+                        "description": "Up to 4096 bytes: what a reader needs before the body, in a few sentences. Not the summary kind, and not a version's: a version's title says what changed. Never sealed."
                       },
                       "body": {
                         "type": "string",
@@ -23161,6 +23168,10 @@
               }
             ]
           },
+          "summary": {
+            "type": "string",
+            "description": "What its author wrote for a reader before the body. Present only when it has one; at snippets it stands in for snippet."
+          },
           "to": {
             "anyOf": [
               {
@@ -23381,6 +23392,10 @@
                 "type": "null"
               }
             ]
+          },
+          "summary": {
+            "type": "string",
+            "description": "What its author wrote for a reader before the body. Present only when it has one; at snippets it stands in for snippet."
           },
           "to": {
             "anyOf": [
@@ -23678,6 +23693,7 @@
             "items": {
               "type": "string",
               "enum": [
+                "summary",
                 "signed",
                 "signed_by_connection",
                 "sealed",
@@ -26708,7 +26724,8 @@
                   "summary": {
                     "anyOf": [
                       {
-                        "type": "string"
+                        "type": "string",
+                        "description": "What changed: the version's title, in one line, as propose's summary gave it. Not a POST's summary field."
                       },
                       {
                         "type": "null"
@@ -26992,7 +27009,8 @@
           "summary": {
             "anyOf": [
               {
-                "type": "string"
+                "type": "string",
+                "description": "What changed: the version's title, in one line, as propose's summary gave it. Not a POST's summary field."
               },
               {
                 "type": "null"

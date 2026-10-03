@@ -13,6 +13,33 @@
     "ed25519_signature_hex": "d048268b904ba34fc607775a399bcc358005c40155717bd70d59eadc2d80c6b9bf8684aacb944f3198905716854a0cf3639a56dd8b986a86fb5725b65702f403",
     "passkey_challenge_hex": "e63fa62d3727d3c0c1cea8dba677d6a5913cbc59009fa40daa8623b970cd2072"
   },
+  "object_with_summary": {
+    "fields": {
+      "spaceId": "0199aaaa-bbbb-7ccc-8ddd-eeeeeeeeeeee",
+      "author": "e89af24c6f6ab546c38b9df66c5bf52aaf3300be990d6404be769c67651b3605",
+      "idempotencyKey": "vector-2",
+      "kind": "result",
+      "title": "Build passes on linux: 2 of 2 runs",
+      "summary": "numpy 1.26.4 is pinned. Both runs passed on linux; macOS is untested.",
+      "body": "Reproduced on linux, twice.\nCommand and output follow.",
+      "to": [],
+      "replyTo": null,
+      "supersedes": null,
+      "retracts": null,
+      "fingerprints": [
+        {
+          "scheme": "git.commit",
+          "value": "b75e527ac4f1e0c2d8a3"
+        }
+      ],
+      "data": null,
+      "budget": null,
+      "runId": null
+    },
+    "canonical_utf8": "{\"author_id\":\"e89af24c6f6ab546c38b9df66c5bf52aaf3300be990d6404be769c67651b3605\",\"body\":\"Reproduced on linux, twice.\\nCommand and output follow.\",\"fingerprints\":[{\"scheme\":\"git.commit\",\"value\":\"b75e527ac4f1e0c2d8a3\"}],\"idempotency_key\":\"vector-2\",\"kind\":\"result\",\"space_id\":\"0199aaaa-bbbb-7ccc-8ddd-eeeeeeeeeeee\",\"summary\":\"numpy 1.26.4 is pinned. Both runs passed on linux; macOS is untested.\",\"title\":\"Build passes on linux: 2 of 2 runs\",\"v\":1}",
+    "object_id": "d5748f7e5c0590755c5ab0c8d4400c408634174f89200b37988c8006be3d11d5",
+    "ed25519_signature_hex": "78e56b381114e6f4c6e2d996a6f6ca592b497c94cf609ddff73601c14c2601f4f527df5c607889408a720ff6aa217236ad666a2209ae87dbdb0105cb31beac0a"
+  },
   "control": {
     "canonical_utf8": "{\"actor\":\"e89af24c6f6ab546c38b9df66c5bf52aaf3300be990d6404be769c67651b3605\",\"event\":\"space.created\",\"payload\":{\"description\":\"\",\"join_policy\":\"invite\",\"owner\":\"e89af24c6f6ab546c38b9df66c5bf52aaf3300be990d6404be769c67651b3605\",\"signed_only\":true,\"title\":\"Vectors\",\"visibility\":\"public\"},\"revision\":\"1\",\"space_id\":\"0199aaaa-bbbb-7ccc-8ddd-eeeeeeeeeeee\",\"v\":1}",
     "command_id": "fbac86c2d6f2e925ecf4d551241692a1264636fca04f8674430749ff8dbc9c55",

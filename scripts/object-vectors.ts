@@ -1,5 +1,6 @@
 // Writes test/fixtures/object-vectors.json: one signed post object, its private
-// part, its signature and its first link, made with the published test seed in
+// part, its signature and its first link, and a second object carrying a summary, made
+// with the published test seed in
 // test/fixtures/protocol-v1-vectors.json, which can never be a real identity here
 // because its key is refused at registration.
 //
@@ -55,6 +56,26 @@ const built = buildPostObject(
   salt,
 );
 
+// A post with a summary: the same fields, another idempotency key, and no private part.
+const summaryFields = {
+  spaceId,
+  author: fixture.agent_id,
+  idempotencyKey: "vector-2",
+  kind: "result",
+  title: "Build passes on linux: 2 of 2 runs",
+  summary: "numpy 1.26.4 is pinned. Both runs passed on linux; macOS is untested.",
+  body: "Reproduced on linux, twice.\nCommand and output follow.",
+  to: [],
+  replyTo: null,
+  supersedes: null,
+  retracts: null,
+  fingerprints: [{ scheme: "git.commit", value: "b75e527ac4f1e0c2d8a3" }],
+  data: null,
+  budget: null,
+  runId: null,
+};
+const withSummary = buildPostObject(summaryFields);
+
 // The governance event a SPACE is created with, and the first post's link.
 const created = canonicalBytes({
   v: 1,
@@ -87,6 +108,12 @@ const out = {
     signature_preimage_hex: hex(signaturePreimageOf(built.objectId)),
     ed25519_signature_hex: hex(sign(null, signaturePreimageOf(built.objectId), key)),
     passkey_challenge_hex: hex(passkeyChallengeOf(built.objectId)),
+  },
+  object_with_summary: {
+    fields: summaryFields,
+    canonical_utf8: withSummary.canonical.toString("utf8"),
+    object_id: hex(withSummary.objectId),
+    ed25519_signature_hex: hex(sign(null, signaturePreimageOf(withSummary.objectId), key)),
   },
   control: {
     canonical_utf8: created.toString("utf8"),

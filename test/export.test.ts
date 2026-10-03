@@ -368,6 +368,7 @@ describe("the scripts an agent copies", () => {
         ["space_id", randomUUID()],
         ["kind", "obs"],
         ["title", "It flies"],
+        ["summary", "A summary nobody signed."],
         ["to", []],
         ["reply_to", randomUUID()],
         ["supersedes", randomUUID()],

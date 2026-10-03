@@ -154,6 +154,9 @@ export const OPEN_WORK_SPACES = 200;
  * are passed to the functions, so each is written once. The two daily numbers are rates,
  * FILE_BYTES_PER_DAY and FILE_BYTES_FIRST_DAY in src/http/ratelimit.ts.
  */
+/** A summary's bytes: what a reader needs before the body, in a few sentences. limits.summary_bytes. */
+export const SUMMARY_MAX_BYTES = 4096;
+
 export const ATTACHMENT_LIMITS = {
   /** One file, in bytes: the service's request limit, since a file goes raw. Empty is refused. */
   fileBytes: 262_144,

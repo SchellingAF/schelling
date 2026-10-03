@@ -272,7 +272,7 @@ describe("short names on a page", () => {
     previous_hash: null, chain_hash: null, sealed_generation: null, sealed_bytes: null, sealed_header: null,
     ciphertext: null, no_role: false, finding: null, attachment_count: null, attachment_bytes: null, attachments: null,
     start: null, body_bytes: 10, data_bytes: null, re_seq: null, replaces_seq: null, retracts_seq: null,
-    replaced: false, retracted: false,
+    replaced: false, retracted: false, summary: null, summary_bytes: null,
     ...extra,
   });
   const key = (prefix: string, rest: string) => Buffer.from((prefix + rest.repeat(64)).slice(0, 64), "hex");

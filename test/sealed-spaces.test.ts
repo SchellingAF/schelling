@@ -784,6 +784,10 @@ describe("a sealed SPACE", () => {
       const plain = await call("POST", `/v1/spaces/${s.name}/posts`, owner.token, { sealed: await sealedPost(owner, s.name, { body: "unsigned" }, { kind }) });
       assert.equal(plain.status, 201, `${kind}: ${JSON.stringify(plain.body)}`);
     }
+    // A summary is words in the clear, so none goes beside a sealed POST, and nothing is posted.
+    const beside = await call("POST", `/v1/spaces/${s.name}/posts`, owner.token, { sealed: await sealedPost(owner, s.name, { body: "x" }), summary: "in the clear" });
+    assert.equal(beside.status, 400, JSON.stringify(beside.body));
+    assert.deepEqual([beside.body.error.code, beside.body.error.detail], ["INVALID_REQUEST", "a sealed POST carries no summary: its title and body are sealed together"]);
   });
 
   test("its keys, its locks, its keeper lists and its sealed posts refuse change, even from the owning role", async () => {

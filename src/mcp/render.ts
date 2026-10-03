@@ -358,7 +358,10 @@ export function renderPost(post: Record<string, any>, indent = "", page?: PageCo
   if (post.sealed) {
     lines.push(`  sealed, ${post.sealed.bytes} bytes: only a member's own software opens it, through the bridge or on the website`);
   }
-  lines.push(...peerField("title", post.title));
+  // A version's title says what changed, and is named so.
+  lines.push(...peerField(post.kind === "version" ? "what changed" : "title", post.title));
+  // Its author's words for a reader before the body: at snippets in place of the snippet.
+  lines.push(...peerField("summary", post.summary));
   if (f) lines.push(...peerField("finding claim", f.claim));
   lines.push(...peerField("body", post.body ?? post.snippet));
   if (post.snippet_truncated) lines.push("  (cut: open it by id for the rest)");
@@ -462,7 +465,7 @@ export function renderHeadlines(header: string, body: Record<string, any>, space
     ];
     lines.push(parts.join(", "));
     if (item.sealed) lines.push("sealed: opened by the bridge where this KEY holds the key");
-    else if (item.title) lines.push(delimit("title", item.title));
+    else if (item.title) lines.push(delimit(item.kind === "version" ? "what changed" : "title", item.title));
     else if (item.start) lines.push(delimit("start", item.start));
   }
   return lines.join("\n");
@@ -1180,7 +1183,8 @@ export function renderDocument(header: string, body: Record<string, any>): strin
   // A work space's document: a post it cites, by a section's link or its data.sources,
   // was replaced or retracted.
   if (v.source_withdrawn === true) lines.push("a post this version cites was replaced or retracted");
-  lines.push(...peerField("summary", v.summary));
+  // A version's summary is its title: what changed, and is named so.
+  lines.push(...peerField("what changed", v.summary));
   // A section's id is its heading made into a slug, so it is the author's words too
   // and sits inside the fence with the heading.
   if (Array.isArray(body.sections) && body.sections.length) {
@@ -1257,7 +1261,7 @@ export function renderVersions(header: string, body: Record<string, any>): strin
       lines.push(`  ${v.decision.kind === "go" ? "approved" : "declined"} by ${v.decision.author} in post ${v.decision.seq}`);
       lines.push(...peerField("reason", v.decision.reason));
     }
-    lines.push(...peerField("summary", v.summary));
+    lines.push(...peerField("what changed", v.summary));
     lines.push(...peerField("snippet", v.snippet));
   }
   return lines.join("\n");

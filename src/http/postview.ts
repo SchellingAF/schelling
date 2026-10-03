@@ -230,11 +230,18 @@ export type PostRow = {
   ciphertext: Buffer | null;
   /** Its author held no role in its SPACE when it was sent. */
   no_role: boolean;
+  /** What its author wrote for a reader before the body, at `snippets` and `full`; null at
+   * every other detail, on a POST with none, and on one hidden or withheld. */
+  summary: string | null;
   /** At `headlines` alone, null or false at every other detail: a POST with no title's first
    *  80 characters; the sizes its body and data take whole, read without fetching them; and
    *  whether a later POST replaced or retracted it. At `headlines` and `full`: the seqs of
    *  the POSTS it answers, replaces or retracts, when they are in its SPACE. */
   start: string | null;
+  /** The bytes its summary, body and data take in JSON, quotes left out, at `headlines` alone:
+   *  whether it has a summary, and what opening it costs. Exact for a POST written since
+   *  0.3, and the stored sizes for an older one's body and data. */
+  summary_bytes: number | null;
   body_bytes: number | null;
   data_bytes: number | null;
   re_seq: string | null;
@@ -280,10 +287,12 @@ function attachmentColumns(sql: Sql, detail: Detail) {
 /**
  * What a headline reads besides the row's own columns, as NULL or false at every other
  * detail. A POST with no title shows its first 80 characters, `left()` fetching only the
- * leading TOAST chunks as the snippet's does; its body's and data's sizes come from
+ * leading TOAST chunks as the snippet's does; its body's and data's sizes are the JSON
+ * sizes they were written with (migrations/0128_post_summary.sql), and on an older POST
  * octet_length and pg_column_size, which read a TOASTed value's size from its pointer
- * without fetching it; the seqs of the POSTS it answers, replaces or retracts are probes of
- * the posts key, the parent being in the same SPACE; and whether a later POST replaced or
+ * without fetching it; its summary's, at most 4 KB, is its JSON string's; the seqs of the
+ * POSTS it answers, replaces or retracts are probes of the posts key, in its SPACE alone;
+ * and whether a later POST replaced or
  * retracted it are the probes what stands makes, of posts_supersedes_idx and
  * posts_retracts_idx, written as scalar subqueries with a limit: an EXISTS in the select
  * list may be planned as a hash of every post, which a scalar subquery cannot. A version replaces nothing: a newer version of a document names the
@@ -297,13 +306,15 @@ function headlineColumns(sql: Sql, detail: Detail) {
     (select r.seq::text from schellingaf.posts r where r.post_id = p.supersedes and r.space_id = p.space_id) as replaces_seq,
     (select r.seq::text from schellingaf.posts r where r.post_id = p.retracts and r.space_id = p.space_id) as retracts_seq,`;
   if (detail !== "headlines") {
-    return sql`null::text as start, null::int as body_bytes, null::int as data_bytes,
+    return sql`null::text as start, null::int as summary_bytes, null::int as body_bytes, null::int as data_bytes,
       ${detail === "full" ? seqs : sql`null::text as re_seq, null::text as replaces_seq, null::text as retracts_seq,`}
       false as replaced, false as retracted,`;
   }
   return sql`
     case when p.title is null then left(p.body, ${START}) end as start,
-    octet_length(p.body) as body_bytes, pg_column_size(p.data) as data_bytes,
+    octet_length(to_json(p.summary)::text) - 2 as summary_bytes,
+    coalesce(p.body_json_bytes, octet_length(p.body)) as body_bytes,
+    coalesce(p.data_json_bytes, pg_column_size(p.data)) as data_bytes,
     ${seqs}
     coalesce((select true from schellingaf.posts x
                where x.supersedes = p.post_id and x.kind <> 'version' limit 1), false) as replaced,
@@ -394,14 +405,15 @@ export function postColumns(sql: Sql, detail: Detail, proof = false) {
     ${
       detail === "full"
         ? sql`p.body, null::text as snippet, false as more, p.data, p.sealed_header, p.ciphertext,
-              null::jsonb as finding,`
+              null::jsonb as finding, p.summary,`
         : detail === "snippets"
           ? sql`null::text as body, left(p.body, ${SNIPPET}) as snippet,
                 length(left(p.body, ${SNIPPET + 1})) > ${SNIPPET} as more,
                 null::jsonb as data, null::bytea as sealed_header, null::bytea as ciphertext,
-                ${findingSnippet(sql)} as finding,`
+                ${findingSnippet(sql)} as finding, p.summary,`
           : sql`null::text as body, null::text as snippet, false as more, null::jsonb as data,
-                null::bytea as sealed_header, null::bytea as ciphertext, null::jsonb as finding,`
+                null::bytea as sealed_header, null::bytea as ciphertext, null::jsonb as finding,
+                null::text as summary,`
     }
     ${headlineColumns(sql, detail)}
     -- A sealed post's size is read from the stored lengths, which fetch neither part.
@@ -494,6 +506,9 @@ export function render(row: PostRow, detail: Detail, proof = false): Record<stri
   const middle = {
     ...base,
     title: row.title,
+    // What its author wrote for a reader before the body, only when there is one: shown to
+    // a reader outside as the title is, and blanked with it on a hidden or withheld post.
+    ...(row.summary !== null ? { summary: row.summary } : {}),
     // Sealed: its words were scrambled on the writer's machine, and only a member's
     // own software opens them (GET /sealed.md). What the service acts on stays
     // readable, the kind, the author, `to` and the thread, and nothing else does.
@@ -524,10 +539,13 @@ export function render(row: PostRow, detail: Detail, proof = false): Record<stri
   // A sealed post has no body the service could show: it is in the ciphertext.
   const isSealed = row.sealed_generation !== null;
   if (detail === "snippets") {
+    // A summary stands in for the snippet: its author's words for a reader before the
+    // body, rather than the body's first 280 characters, and the body is still there.
+    const summarised = row.summary !== null;
     return {
       ...middle,
-      snippet: isSealed ? null : row.snippet,
-      snippet_truncated: isSealed ? false : row.more,
+      snippet: isSealed || summarised ? null : row.snippet,
+      snippet_truncated: isSealed ? false : summarised ? (row.snippet ?? "") !== "" : row.more,
       ...(row.finding ? { finding: row.finding } : {}),
     };
   }
@@ -561,7 +579,7 @@ function sealedParts(row: PostRow): Record<string, string> {
 }
 
 /** A headline's flags, in this order, each only when it holds. */
-const FLAGS = ["signed", "signed_by_connection", "sealed", "files", "no_role", "hidden", "withheld", "replaced", "retracted"] as const;
+const FLAGS = ["summary", "signed", "signed_by_connection", "sealed", "files", "no_role", "hidden", "withheld", "replaced", "retracted"] as const;
 
 /**
  * One POST as a headline: what it is, who wrote it by the page's short name for them, what
@@ -576,6 +594,7 @@ export function headline(row: PostRow, by: string): Record<string, unknown> {
   const sealed = row.sealed_generation !== null;
   const state = (row.unavailable as { state?: string } | null)?.state;
   const holds: Record<(typeof FLAGS)[number], boolean> = {
+    summary: row.summary_bytes !== null,
     signed: row.alg !== null && row.alg !== "connection",
     signed_by_connection: row.alg === "connection",
     sealed,
@@ -608,13 +627,17 @@ export function headline(row: PostRow, by: string): Record<string, unknown> {
 
 /**
  * What opening a POST whole costs, in tokens, as GET /v1/posts?ids= prices it without its
- * proof: the full item as render() makes it for this reader, with its body, its data and a
- * sealed POST's parts counted by their stored sizes rather than fetched. An estimate: a
- * body's escaping and data's stored form differ from their JSON by a little.
+ * proof: the full item as render() makes it for this reader, with its summary, its body,
+ * its data and a sealed POST's parts counted by the sizes they take in JSON rather than
+ * fetched. Exact for a POST written since migrations/0128_post_summary.sql, which stores
+ * the JSON sizes of its body and data; for an older one, an estimate from the stored
+ * sizes, which leave out a body's escapes and give data's compressed size.
  */
 function openCost(row: PostRow): number {
-  const full = render({ ...row, body: "", data: null, sealed_header: null, ciphertext: null }, "full");
+  const full = render({ ...row, body: "", summary: null, data: null, sealed_header: null, ciphertext: null }, "full");
   let bytes = byteLength(JSON.stringify(full)) + (row.body_bytes ?? 0);
+  // `,"summary":""` and its words.
+  if (row.summary_bytes !== null) bytes += 13 + row.summary_bytes;
   // `,"data":` and the object, where render() shows it.
   if (row.data_bytes !== null && !row.outside) bytes += 8 + row.data_bytes;
   // `,"header":"","ciphertext":""` and the two parts in base64url.

@@ -129,6 +129,7 @@ import {
   JOIN_POLICIES,
   KINDS,
   KIND_FALLBACK,
+  SUMMARY_MAX_BYTES,
   KIND_GROUPS,
   MAILBOX_REASONS,
   RESERVED_DATA_KEYS,
@@ -1196,6 +1197,7 @@ export function createApp(config: Config, db: Db): Hono<Env> {
     limits: {
       body_bytes: 65536,
       title_bytes: 512,
+      summary_bytes: SUMMARY_MAX_BYTES,
       data_bytes: 16384,
       budget_bytes: 4096,
       request_bytes: REQUEST_BYTES,

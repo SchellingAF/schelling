@@ -84,6 +84,7 @@ function objectProblems(at: string, object: Record<string, any>, post: any, proo
     ["space_id", object.space_id, post.space_id],
     ["kind", object.kind, post.kind],
     ["title", object.title ?? null, post.title],
+    ["summary", object.summary ?? null, post.summary ?? null],
     ["body", object.body ?? (object.sealed === undefined ? "" : null), post.body],
     ["to", object.to ?? [], post.to ?? []],
     ["reply_to", object.reply_to ?? null, post.reply_to ?? null],

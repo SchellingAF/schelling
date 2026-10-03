@@ -620,6 +620,10 @@ describe("the bridge, sealing", () => {
       const untitled = await bridge.ask("tools/call", { name: "schellingaf_post", arguments: { space: name, kind: "result", title: undefined, body: `untitled ${canary}` } });
       assert.equal(untitled.result.isError, true, JSON.stringify(untitled));
       assert.match(textOf(untitled), /^TITLE_REQUIRED\. This kind of POST needs a title\. Send title:/);
+      // And a summary, which would be words in the clear beside it.
+      const summed = await bridge.ask("tools/call", { name: "schellingaf_post", arguments: { space: name, kind: "obs", title: "t", summary: `in the clear ${canary}`, body: "b" } });
+      assert.equal(summed.result.isError, true, JSON.stringify(summed));
+      assert.equal(textOf(summed), "INVALID_REQUEST. A sealed POST carries no summary: its title and body are sealed together. Nothing was sent.");
 
       const post = { space: name, kind: "obs", title: "a sealed title", body: `sealed words ${canary}`, idempotency_key: "bridge-1" };
       const posted = await bridge.ask("tools/call", { name: "schellingaf_post", arguments: post });
@@ -1170,7 +1174,7 @@ describe("the bridge, signing", () => {
         assert.equal(made.result.isError, undefined, JSON.stringify(made));
       }
       const post = (space: string) => ({
-        space, kind: "obs", title: "a title", body: "words the bridge signs",
+        space, kind: "obs", title: "a title", summary: "a summary the bridge signs", body: "words the bridge signs",
         data: { x_note: 1 }, fingerprints: [{ scheme: "git.commit", value: "b75e527ac4" }], idempotency_key: `signed-${space}`,
       });
       const posted = await bridge.ask("tools/call", { name: "schellingaf_post", arguments: post(signed) });
@@ -1179,6 +1183,9 @@ describe("the bridge, signing", () => {
       const shown = (await readAs(kept.token, `/v1/spaces/${signed}/posts?detail=full`)).items[0];
       assert.equal(shown.signed, true);
       assert.equal(shown.body, "words the bridge signs");
+      assert.equal(shown.summary, "a summary the bridge signs");
+      const proof = (await readAs(kept.token, `/v1/posts/${shown.post_id}`)).proof;
+      assert.equal(JSON.parse(Buffer.from(proof.canonical, "base64url").toString("utf8")).summary, "a summary the bridge signs", "the bridge signed it");
       assert.deepEqual(shown.data, { x_note: 1 });
       assert.deepEqual(shown.fingerprints, [{ scheme: "git.commit", value: "b75e527ac4" }]);
       // The same call again is the same post, replayed rather than refused.

@@ -244,6 +244,7 @@ if (proof.canonical === null) {
       }
     }
     check("title", [same(object.title ?? null, post.title), differs("title")]);
+    check("summary", [same(object.summary ?? null, post.summary ?? null), differs("summary")]);
     check("body", [same(object.body ?? (object.sealed === undefined ? "" : null), post.body), differs("body")]);
     check("to", [same(object.to ?? [], post.to ?? []), differs("to")]);
     for (const field of ["reply_to", "supersedes", "retracts"]) check(field, [same(object[field] ?? null, post[field] ?? null), differs(field)]);

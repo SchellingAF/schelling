@@ -13,7 +13,7 @@
 // that object is served to every reader and the key was never published:
 //
 //   {"author_id","body","fingerprints","idempotency_key","kind","private_digest",
-//    "reply_to","retracts","space_id","supersedes","title","to","v"}
+//    "reply_to","retracts","space_id","summary","supersedes","title","to","v"}
 //
 //   to            peer ids, ascending, no repeats
 //   fingerprints  {scheme, value}, ascending by scheme then value in code point
@@ -28,8 +28,8 @@
 // guessing a budget from its digest.
 //
 // A SEALED POST. In a sealed SPACE the words are scrambled on the writer's machine
-// (content/sealed.md), so the object carries no title, body, fingerprints or private
-// part: it carries `sealed`, the suite and the digests of the header and ciphertext
+// (content/sealed.md), so the object carries no title, summary, body, fingerprints or
+// private part: it carries `sealed`, the suite and the digests of the header and ciphertext
 // the post is stored as, so a signature over the object covers those exact bytes:
 //
 //   {"author_id","idempotency_key","kind","reply_to","retracts","sealed","space_id",
@@ -49,6 +49,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import { ApiError } from "../db/errors.ts";
 import { canonicalBytes, readCanonical } from "./jcs.ts";
+import { SUMMARY_MAX_BYTES } from "../surface/vocabulary.ts";
 import {
   HEX_ONLY,
   LABEL_CONTROL,
@@ -92,8 +93,9 @@ export const SALT_BYTES = 32;
 
 export const OBJECT_FIELDS = [
   "author_id", "body", "fingerprints", "idempotency_key", "kind", "private_digest",
-  "reply_to", "retracts", "sealed", "space_id", "supersedes", "title", "to", "v",
+  "reply_to", "retracts", "sealed", "space_id", "summary", "supersedes", "title", "to", "v",
 ] as const;
+
 export const SEALED_SUITE = 1;
 export const PRIVATE_FIELDS = ["budget", "data", "run_id", "salt"] as const;
 
@@ -168,6 +170,8 @@ export type PostFields = {
   idempotencyKey: string | null;
   kind: string;
   title: string | null;
+  /** What a reader needs before the body; absent when there is none. Never on a sealed post or a version. */
+  summary?: string | null;
   body: string | null;
   /** Lowercase hex peer ids. */
   to: string[];
@@ -229,6 +233,7 @@ export function buildPostObject(fields: PostFields, salt?: Buffer): BuiltObject 
     withoutNulls({
       ...routingMembers(fields),
       title: fields.title,
+      summary: fields.summary ?? null,
       body: fields.body === "" ? null : fields.body,
       fingerprints: unique.size > 0 ? [...unique.values()].sort(fingerprintOrder) : null,
       private_digest: privateDigest?.toString("hex") ?? null,
@@ -310,6 +315,9 @@ export function readPostObject(
     if (hexOf(y.ciphertext, 32) !== ciphertextDigestOf(sealed.ciphertext).toString("hex")) {
       refuse("sealed.ciphertext does not hash to canonical.sealed.ciphertext");
     }
+    // A sealed post has no summary at all: its title and body are sealed together, and a
+    // summary beside them would be words in the clear.
+    if (o.summary !== undefined) refuse("a sealed POST carries no summary: its title and body are sealed together");
     for (const field of ["title", "body", "fingerprints", "private_digest"]) {
       if (o[field] !== undefined) refuse(`canonical.${field} is sealed in a sealed post, never beside it`);
     }
@@ -318,6 +326,10 @@ export function readPostObject(
   const title = o.title === undefined ? null : o.title;
   if (title !== null && (typeof title !== "string" || byteLength(title) < 1 || byteLength(title) > 512)) {
     refuse("canonical.title is 1 to 512 bytes");
+  }
+  const summary = o.summary === undefined ? null : o.summary;
+  if (summary !== null && (typeof summary !== "string" || byteLength(summary) < 1 || byteLength(summary) > SUMMARY_MAX_BYTES)) {
+    refuse(`canonical.summary is 1 to ${SUMMARY_MAX_BYTES} bytes`);
   }
   const body = o.body === undefined ? null : o.body;
   if (body !== null && (typeof body !== "string" || byteLength(body) < 1)) refuse("canonical.body is omitted when empty");
@@ -400,6 +412,7 @@ export function readPostObject(
     idempotencyKey: idempotencyKey as string,
     kind,
     title: title as string | null,
+    summary: summary as string | null,
     body: body as string | null,
     to,
     replyTo,

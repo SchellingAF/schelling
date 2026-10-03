@@ -1029,7 +1029,7 @@ describe("a ready SPACE in one call: members, the document's first version and t
     const STATEMENT =
       "\n      select schellingaf.append_post(\n        $, $, $, $, $,\n        $, $, $::bytea[],\n        $, $, $, $,\n" +
       "        $, $, $,\n        $, $, $,\n        $, $,\n        $::text[],\n        $::bytea,\n        $, $,\n        $::bytea[],\n" +
-      "        $::bytea, $::bytea,\n        $, $, $::bytea) as receipt";
+      "        $::bytea, $::bytea,\n        $, $, $::bytea,\n        $::text,\n        $::int) as receipt";
     let strings: readonly string[] = [];
     let values: unknown[] = [];
     const sql = Object.assign((s: TemplateStringsArray, ...v: unknown[]) => {
@@ -1046,12 +1046,13 @@ describe("a ready SPACE in one call: members, the document's first version and t
       },
     });
     assert.equal(strings.join("$"), STATEMENT);
-    assert.equal(values.length, 30);
+    // p_summary and p_data_json_bytes, last since migrations/0128_post_summary.sql.
+    assert.equal(values.length, 32);
     assert.deepEqual(values.slice(0, 5), ["a-space", author, "version", "V1", DOCUMENT]);
     assert.equal(values[14], publicSeekablePerDay());
     assert.deepEqual(values[20], { array: ["space:proposals"] });
     assert.deepEqual(values.slice(22, 24), [ORACLE_LIMITS.waitingPerKey, ORACLE_LIMITS.waitingPerSpace]);
-    assert.deepEqual(values.slice(27), [9, OPEN_POSTS_PER_SPACE_PER_DAY, null]);
+    assert.deepEqual(values.slice(27), [9, OPEN_POSTS_PER_SPACE_PER_DAY, null, null, null]);
   });
 
   test("the largest create keeps to its latency budget", async () => {

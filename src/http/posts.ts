@@ -39,7 +39,7 @@ import { charge, emptyOf, LIMITS, openPostsPerDay, OWN, SHARED, spend } from "./
 import { connectorSignedWith, floorPlace, optionalBearer, requireBearer, type Env } from "./app.ts";
 import { receipt } from "./spaces.ts";
 import { firstDay } from "./auth.ts";
-import { ATTACHMENT_LIMITS, isFinishedStage } from "../surface/vocabulary.ts";
+import { ATTACHMENT_LIMITS, isFinishedStage, SUMMARY_MAX_BYTES } from "../surface/vocabulary.ts";
 import { headsOf, recordHeads, recordReturned } from "./log.ts";
 import { appendPost as append } from "./append.ts";
 import { readWaiting, spaceStream, waitSeconds } from "./wait.ts";
@@ -135,6 +135,7 @@ function readUnsignedPost(
     }
   }
   if (sealed !== null) {
+    if (input.summary !== undefined) throw new ApiError("INVALID_REQUEST", { detail: "a sealed POST carries no summary: its title and body are sealed together" });
     for (const key of ["title", "body", "data", "budget", "fingerprints", "run_id"]) {
       if (input[key] !== undefined) {
         throw new ApiError("INVALID_REQUEST", { detail: `a sealed post carries ${key} in sealed.ciphertext, never beside it` });
@@ -146,6 +147,7 @@ function readUnsignedPost(
   const kind = sealed ? requireKind(sealed.kind) : field(() => requireKind(input.kind));
   if (sealed) agrees(input.kind === undefined ? null : requireKind(input.kind), sealed.kind, "kind");
   const title = field(() => optionalString(input.title, "title", 512));
+  const summary = field(() => optionalString(input.summary, "summary", SUMMARY_MAX_BYTES));
   const body = field(() => optionalBody(input.body));
   const data = field(() => requireData(input.data));
   // A finding's own fields, once its kind and its data are read. A sealed post carries
@@ -182,7 +184,7 @@ function readUnsignedPost(
   // One sha256.file fingerprint for each attachment, added where the author left it out,
   // before the object and the content hash are built from the list.
   return {
-    idempotencyKey, kind, title, body, to, replyTo, supersedes, retracts,
+    idempotencyKey, kind, title, summary, body, to, replyTo, supersedes, retracts,
     fingerprints: withAttachmentPrints(fingerprints, attachments), data, budget, runId, attachments,
   };
 }
@@ -462,6 +464,10 @@ export function mountPosts(app: Hono<Env>, config: Config, db: Db, service: Serv
     // is the one its author signed. A sealed POST's is in its ciphertext, where the service
     // reads nothing; its author's bridge checks it before sealing.
     if (sealed === null) requireTitle(post.kind, post.title);
+    // A version's title says what changed, and is its summary in the document's history.
+    if (post.kind === "version" && (post.summary ?? null) !== null) {
+      throw new ApiError("INVALID_REQUEST", { detail: "a version carries no summary: its title says what changed" });
+    }
 
     // A post naming attachments meets the rule an upload meets, before anything is spent:
     // a KEY that may not upload here, or a sealed SPACE, is refused now.

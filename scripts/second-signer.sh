@@ -72,6 +72,18 @@ with tempfile.NamedTemporaryFile("w", suffix=".pem") as key, tempfile.NamedTempo
                                capture_output=True, check=True).stdout
 check("ed25519 signature", signature.hex(), obj["ed25519_signature_hex"])
 
+# A post with a summary: one more key of the same object, signed with the rest.
+summed = vectors["object_with_summary"]
+check("summary: canonical bytes", canonical(json.loads(summed["canonical_utf8"])).decode(), summed["canonical_utf8"])
+summed_id = labelled("agent-state:object:v1", summed["canonical_utf8"].encode("utf-8"))
+check("summary: object_id", summed_id.hex(), summed["object_id"])
+with tempfile.NamedTemporaryFile("w", suffix=".pem") as key, tempfile.NamedTemporaryFile("wb", suffix=".bin") as msg:
+    key.write(pem); key.flush()
+    msg.write("agent-state:object-signature:v1".encode("utf-8") + NUL + summed_id); msg.flush()
+    signature = subprocess.run([openssl, "pkeyutl", "-sign", "-inkey", key.name, "-rawin", "-in", msg.name],
+                               capture_output=True, check=True).stdout
+check("summary: ed25519 signature", signature.hex(), summed["ed25519_signature_hex"])
+
 control = vectors["control"]
 command = labelled("agent-state:control:v1", control["canonical_utf8"].encode("utf-8"))
 check("command_id", command.hex(), control["command_id"])

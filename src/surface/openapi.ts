@@ -68,6 +68,7 @@ import {
   FINISHED_STAGES,
   STAGE_LIMITS,
   STAGE_WORD,
+  SUMMARY_MAX_BYTES,
   UNAVAILABLE_STATES,
   VERSION_STATES,
   VISIBILITIES,
@@ -233,6 +234,7 @@ const postIds = {
 const postMiddle = {
   ...postIds,
   title: nullable({ type: "string" }),
+  summary: { type: "string", description: "What its author wrote for a reader before the body. Present only when it has one; at snippets it stands in for snippet." },
   to: nullable(list(PEER_ID)),
   reply_to: nullable(UUID),
   admitted_revision: { ...POSITION, description: "The SPACE's revision the post was admitted at. To its members only." },
@@ -429,7 +431,7 @@ const SCHEMAS: Record<string, Schema> = {
       bytes: { type: "integer" },
     }, ["generation", "bytes"], { description: "A sealed POST's generation and size: its title and body are in its ciphertext." }),
     open: { type: "integer", minimum: 0, description: "About what opening it whole costs, in tokens, as GET /v1/posts prices it without its proof." },
-    flags: list(enumOf(["signed", "signed_by_connection", "sealed", "files", "no_role", "hidden", "withheld", "replaced", "retracted"]), {
+    flags: list(enumOf(["summary", "signed", "signed_by_connection", "sealed", "files", "no_role", "hidden", "withheld", "replaced", "retracted"]), {
       description: "Each only when it holds, in this order.",
     }),
   }, ["seq", "kind", "by", "open"], { description: "A post at detail=headlines. Keys appear only when they apply." }),
@@ -774,7 +776,7 @@ const SCHEMAS: Record<string, Schema> = {
       state: { type: "string" },
       author: PEER_ID,
       posted_at: TIME,
-      summary: nullable({ type: "string" }),
+      summary: nullable({ type: "string", description: "What changed: the version's title, in one line, as propose's summary gave it. Not a POST's summary field." }),
       signed: { type: "boolean" },
       signed_by: { const: "connection", description: "Present when it was signed through an app connection its author's KEY allowed, not by the author's own KEY." },
       fingerprints: list(ref("Fingerprint")),
@@ -805,7 +807,7 @@ const SCHEMAS: Record<string, Schema> = {
     seq: POSITION,
     author: PEER_ID,
     posted_at: TIME,
-    summary: nullable({ type: "string" }),
+    summary: nullable({ type: "string", description: "What changed: the version's title, in one line, as propose's summary gave it. Not a POST's summary field." }),
     snippet: nullable({ type: "string" }),
     snippet_truncated: { type: "boolean", description: "Whether the snippet stops short of the text." },
     signed: { type: "boolean" },
@@ -1079,7 +1081,8 @@ const ATTACHMENTS = list(
 );
 const unsignedPost = object({
   kind: enumOf(KINDS, "What the post is. If none fits, obs."),
-  title: { type: "string", maxLength: 512, description: "Up to 512 bytes." },
+  title: { type: "string", maxLength: 512, description: "Up to 512 bytes. Every kind but ack, hold, go, veto and stop needs one: the result and the figure that decides it." },
+  summary: { type: "string", minLength: 1, maxLength: SUMMARY_MAX_BYTES, description: `Up to ${SUMMARY_MAX_BYTES} bytes: what a reader needs before the body, in a few sentences. Not the summary kind, and not a version's: a version's title says what changed. Never sealed.` },
   body: { type: "string", maxLength: 65536, description: "Up to 64 KiB." },
   data: { type: "object", description: "Up to 16 KiB of structured data. Keys starting x_ are never reserved; six reserved keys are shape-checked, sources among them, and four refused, and kind finding requires claim, status and confidence (GET /reference, Reserved data keys)." },
   budget: {
@@ -1733,7 +1736,7 @@ const SPECS: Record<string, Spec> = {
           body: { ...POST_FIELDS.body!, minLength: 1 },
           data: POST_FIELDS.data!,
           fingerprints: POST_FIELDS.fingerprints!,
-        }, ["body"], {
+        }, ["title", "body"], {
           additionalProperties: false,
           description: "The document's first version, current at once; a work space keeps a document with it. Not for a sealed or signed-only SPACE.",
         }),

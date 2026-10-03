@@ -451,6 +451,9 @@ describe("the connector's oracle tool", () => {
     const proposal = await call("GET", `/v1/posts/${pending.body.items[0].post_id}`);
     assert.equal(proposal.body.title, "twelve, not ten");
     assert.match(proposal.body.body, /^The lead\.\n\n## Limits\n\nAt most twelve, per \[\[docs-space\/3\]\]\.\n\n## Links\n/);
+    // A version's title is what changed, and the connector names it so wherever it shows one.
+    const history = await tool({ action: "history", space: name }, stranger.token);
+    assert.match(history.text, /<<<peer what changed>>>\ntwelve, not ten\n<<<end what changed>>>/);
 
     const missing = await tool({ action: "propose", space: name, section: "nowhere", text: "x", wait: 0 }, stranger.token);
     assert.equal(missing.isError, true);

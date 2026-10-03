@@ -333,6 +333,7 @@ export function signAsConnection(seed: Buffer, objectId: Buffer): Buffer {
 export type PostArguments = {
   kind?: string | undefined;
   title?: string | undefined;
+  summary?: string | undefined;
   body?: string | undefined;
   data?: Record<string, unknown> | undefined;
   budget?: Record<string, unknown> | undefined;
@@ -370,6 +371,7 @@ export function connectionSignedPost(
       idempotencyKey: idempotencyKey === null ? randomUUID() : connectionIdempotencyKey(seed, where.spaceId, idempotencyKey),
       kind: args.kind as string,
       title: text(args.title),
+      summary: text(args.summary),
       body: text(args.body),
       to: args.to ?? [],
       replyTo: text(args.reply_to),

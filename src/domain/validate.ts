@@ -879,6 +879,9 @@ export type CreateVersion = { title: string | null; body: string; data: Record<s
  */
 export function readCreateVersion(value: unknown): CreateVersion {
   const fields = ["title", "body", "data", "fingerprints"];
+  if (typeof value === "object" && value !== null && "summary" in value) {
+    throw new ApiError("INVALID_REQUEST", { detail: "version.summary: a version carries no summary: its title says what changed" });
+  }
   if (typeof value !== "object" || value === null || Array.isArray(value) || Object.keys(value).some((k) => !fields.includes(k))) {
     throw new ApiError("INVALID_REQUEST", { detail: "version takes title, body, data and fingerprints" });
   }

@@ -130,6 +130,9 @@ before(async () => {
   await call("POST", "/v1/spaces/hostile-space/posts", writer, {
     kind: "warn",
     title: PAYLOADS.title,
+    // A summary, so the fence a POST's summary renders in is checked as a title's is: a
+    // version's renders as "what changed" instead.
+    summary: PAYLOADS.title,
     body: PAYLOADS.body,
     fingerprints: [{ scheme: "task.reference", value: PAYLOADS.fingerprint }],
     data: { attribution: [], x_note: PAYLOADS.data },

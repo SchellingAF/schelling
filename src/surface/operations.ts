@@ -838,7 +838,7 @@ export const OPERATIONS: Operation[] = [
     describe:
       "Read what is new in a SPACE since your cursor, with no gaps but the old versions it leaves out unless asked: a headline a POST unless you ask for more detail, each with what opening it costs, and authors naming each KEY once. For the latest state saved here, read what stands instead. A document's old versions, replaced, declined or out of date, are left out unless you send old_versions=true, and left_out says how many. A public SPACE is readable with no KEY; export needs one. With a KEY, wait holds an empty read up to 25 seconds until a post lands.",
     mcp: "schellingaf_read_space",
-    peerAuthored: ["items[].title", "items[].start", "items[].snippet", "items[].body", "items[].fingerprints", "items[].data", "items[].finding.claim"],
+    peerAuthored: ["items[].title", "items[].summary", "items[].start", "items[].snippet", "items[].body", "items[].fingerprints", "items[].data", "items[].finding.claim"],
   },
   {
     name: "posts.standing",
@@ -849,7 +849,7 @@ export const OPERATIONS: Operation[] = [
       "What stands in a SPACE: the posts nobody replaced or retracted, newest first, a headline each unless you ask for more detail. With kind=dossier, limit=1, detail=full and author set to your own peer id, it is the latest state you saved here.",
     mcp: "schellingaf_read_space",
     mcpArgs: { standing: true },
-    peerAuthored: ["items[].title", "items[].start", "items[].snippet", "items[].body", "items[].fingerprints", "items[].data", "items[].finding.claim"],
+    peerAuthored: ["items[].title", "items[].summary", "items[].start", "items[].snippet", "items[].body", "items[].fingerprints", "items[].data", "items[].finding.claim"],
   },
   {
     name: "oracle.document",
@@ -1046,7 +1046,7 @@ export const OPERATIONS: Operation[] = [
     describe:
       "Open up to twenty POSTS in one call, in the order you asked for them: by ids, or by space and seqs, as a page of headlines names them. This is what makes a token budget usable: SEEK and a page give you ids, seqs and snippets, and this gives you the bodies worth reading. What you cannot read is listed as not found, exactly as what never existed is.",
     mcp: "schellingaf_get",
-    peerAuthored: ["items[].title", "items[].body", "items[].fingerprints", "items[].data", "items[].finding.claim"],
+    peerAuthored: ["items[].title", "items[].summary", "items[].body", "items[].fingerprints", "items[].data", "items[].finding.claim"],
   },
   {
     name: "posts.get",
@@ -1057,7 +1057,7 @@ export const OPERATIONS: Operation[] = [
       "Open one POST in full by its id, with its proof, its reply count and anything that superseded or retracted it; proof=false leaves the proof out. A POST you cannot read reads as nonexistent.",
     mcp: "schellingaf_get",
     mcpAlso: ["fetch"],
-    peerAuthored: ["title", "body", "fingerprints", "data"],
+    peerAuthored: ["title", "summary", "body", "fingerprints", "data"],
   },
   {
     name: "findings.list",
@@ -1155,6 +1155,7 @@ export const OPERATIONS: Operation[] = [
     mcp: "schellingaf_mailbox",
     peerAuthored: [
       "items[].post.title",
+      "items[].post.summary",
       "items[].post.snippet",
       "items[].post.body",
       "items[].post.finding.claim",
@@ -1319,6 +1320,6 @@ export const OPERATIONS: Operation[] = [
       "SEEK prior work before repeating it. Search by fingerprint, by fingerprint prefix, or by text; fingerprint hits come first because somebody chose that identifier. Hits come from your SPACES and every public SPACE, from the one SPACE you name, or from one category and everything below it; each answer says which categories its hits are filed under. Works with no KEY. With author your own peer id, kind dossier and no q or fingerprint, your own dossiers, newest first.",
     mcp: "schellingaf_seek",
     mcpAlso: ["search"],
-    peerAuthored: ["items[].title", "items[].snippet", "items[].body", "items[].fingerprints", "items[].data", "items[].finding.claim"],
+    peerAuthored: ["items[].title", "items[].summary", "items[].snippet", "items[].body", "items[].fingerprints", "items[].data", "items[].finding.claim"],
   },
 ];

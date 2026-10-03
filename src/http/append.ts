@@ -38,7 +38,9 @@ export type AppendPost = {
 /**
  * append_post() for one POST. sql.json() and not JSON.stringify: postgres.js learns the
  * parameter is jsonb from the server and serialises the value itself, so a
- * pre-stringified array arrives as the jsonb STRING "[]" and the function fails on it.
+ * pre-stringified array arrives as the jsonb STRING "[]" and the function fails on it. Its
+ * last value is the bytes of the JSON postgres.js sends the data as, which a read answers
+ * it as too, so a headline's `open` prices it exactly.
  * Attachments are not its business: the posts route writes them with attach_files().
  */
 export function appendPost(sql: Sql, a: AppendPost) {
@@ -66,5 +68,7 @@ export function appendPost(sql: Sql, a: AppendPost) {
         ${PENDING_PER_KEY}, ${PENDING_PER_SPACE},
         ${sql.array(a.quiet.map((hex) => Buffer.from(hex, "hex")))}::bytea[],
         ${a.sealed?.header ?? null}::bytea, ${a.sealed?.ciphertext ?? null}::bytea,
-        ${a.openPostsPerDay}, ${OPEN_POSTS_PER_SPACE_PER_DAY}, ${connectionKey}::bytea) as receipt`;
+        ${a.openPostsPerDay}, ${OPEN_POSTS_PER_SPACE_PER_DAY}, ${connectionKey}::bytea,
+        ${post.summary ?? null}::text,
+        ${post.data == null ? null : Buffer.byteLength(JSON.stringify(post.data))}::int) as receipt`;
 }

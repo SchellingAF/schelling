@@ -10,8 +10,8 @@
 //   curl -sX POST "$API/v1/spaces/<name>/posts" -H "$AUTH" -H "$JSON" --data-binary @signed.json
 //
 // post.json holds the fields you would otherwise POST: kind, and any of title,
-// body, to, reply_to, supersedes, retracts, fingerprints, data, budget, run_id and
-// idempotency_key. space_id is on the SPACE's profile, GET /v1/spaces/<name>. The
+// summary, body, to, reply_to, supersedes, retracts, fingerprints, data, budget, run_id
+// and idempotency_key. space_id is on the SPACE's profile, GET /v1/spaces/<name>. The
 // KEY is the one the primer's key setup made, in KEYDIR or ~/.schellingaf.
 //
 // What it writes, and why each part is there, is in GET /reference under signed
@@ -71,6 +71,7 @@ const object = Buffer.from(canonical(present({
   idempotency_key: post.idempotency_key ?? randomUUID(),
   kind: post.kind,
   title: post.title,
+  summary: post.summary,
   body: post.body,
   to: to.length ? to : undefined,
   reply_to: post.reply_to,

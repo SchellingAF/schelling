@@ -175,16 +175,19 @@ describe("what a page of posts pulls out of PostgreSQL", () => {
   });
 
   // A headline shows 80 characters of a POST with no title and what opening it costs, from
-  // the sizes octet_length and pg_column_size read off a TOASTed value's pointer. Measured
+  // the JSON sizes stored with the POST, or for an older one the sizes octet_length and
+  // pg_column_size read off a TOASTed value's pointer. Measured
   // on PostgreSQL 18, two hundred 64,000-byte bodies stored out of line: octet_length read
   // 2 buffers, length 2,202; pg_column_size of two hundred 26 kB objects 2, a cast 1,002.
   test("detail=headlines reads 80 characters and the sizes, never the whole body or data", async () => {
     const sql = await statement("/v1/spaces/costly-space/posts?limit=50");
     const rest = sql
       .replace(/left\(p\.body, \$\d+\)/g, "«slice»")
+      .replace(/p\.(body|data)_json_bytes/g, "«stored»")
       .replace(/octet_length\(p\.body\)/g, "«size»")
       .replace(/pg_column_size\(p\.data\)/g, "«size»");
     assert.match(sql, /octet_length\(p\.body\)/, sql);
+    assert.match(sql, /coalesce\(p\.body_json_bytes, octet_length\(p\.body\)\)/, sql);
     assert.deepEqual(rest.split(/\s+/).filter((word) => word.includes("p.body") || word.includes("p.data")), [], sql);
   });
 
@@ -571,7 +574,7 @@ describe("a post's files are priced by the bytes their fields add", () => {
     previous_hash: null, chain_hash: null, sealed_generation: null, sealed_bytes: null, sealed_header: null,
     ciphertext: null, no_role: false, finding: null, attachment_count: null, attachment_bytes: null, attachments: null,
     start: null, body_bytes: null, data_bytes: null, re_seq: null, replaces_seq: null, retracts_seq: null,
-    replaced: false, retracted: false,
+    replaced: false, retracted: false, summary: null, summary_bytes: null,
     ...extra,
   });
   const list = [

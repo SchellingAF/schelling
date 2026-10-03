@@ -17,6 +17,7 @@ import { canonicalize, readCanonical } from "../src/domain/jcs.ts";
 import {
   admissionOf,
   buildPostObject,
+  ciphertextDigestOf,
   commandIdOf,
   controlChainOf,
   controlGenesisOf,
@@ -25,6 +26,8 @@ import {
   passkeyChallengeOf,
   privateDigestOf,
   readPostObject,
+  SEALED_SUITE,
+  sealedHeaderDigestOf,
   signaturePreimageOf,
 } from "../src/domain/objects.ts";
 import { inclusionPath, leavesOf, merkleRoot, objectLeafOf, rootFromPath } from "../src/domain/merkle.ts";
@@ -116,6 +119,36 @@ describe("the object vectors", () => {
     assert.deepEqual(fields.data, { x_attempts: 2, x_platform: "linux" });
     assert.throws(() => readPostObject(Buffer.from(v.object.canonical_utf8, "utf8"), null, { spaceId: v.space_id, author: v.author_id }), refusal(/not sent/));
     assert.throws(() => readPostObject(Buffer.from(v.object.canonical_utf8, "utf8"), Buffer.from(v.object.private_utf8, "utf8"), { spaceId: v.space_id, author: "00".repeat(32) }), refusal(/author_id/));
+  });
+
+  test("a summary is a key of the object, signed with the rest, and absent leaves the object as it was", () => {
+    const s = v.object_with_summary;
+    const built = buildPostObject(s.fields);
+    assert.equal(built.canonical.toString("utf8"), s.canonical_utf8);
+    assert.equal(built.objectId.toString("hex"), s.object_id);
+    const key = createPublicKey({ key: Buffer.concat([Buffer.from("302a300506032b6570032100", "hex"), Buffer.from(v.public_key_hex, "hex")]), format: "der", type: "spki" });
+    assert.ok(verify(null, signaturePreimageOf(built.objectId), key, Buffer.from(s.ed25519_signature_hex, "hex")));
+    const read = readPostObject(built.canonical, null, { spaceId: v.space_id, author: v.author_id });
+    assert.equal(read.summary, s.fields.summary);
+    // Without one, the object has no summary key, null and missing alike.
+    for (const summary of [null, undefined]) {
+      const plain = buildPostObject({ ...s.fields, summary });
+      assert.equal(plain.canonical.toString("utf8").includes("summary"), false);
+      assert.equal(readPostObject(plain.canonical, null, { spaceId: v.space_id, author: v.author_id }).summary, null);
+    }
+    // 1 to 4,096 bytes, and never in a sealed post's object.
+    const withSummary = (summary: string) => Buffer.from(JSON.stringify({ ...JSON.parse(s.canonical_utf8), summary }), "utf8");
+    assert.throws(() => readPostObject(withSummary("x".repeat(4097)), null, { spaceId: v.space_id, author: v.author_id }), refusal(/summary is 1 to 4096 bytes/));
+    const header = Buffer.from("a sealed header");
+    const ciphertext = Buffer.from("a ciphertext");
+    const sealedObject = canonicalize({
+      v: 1, space_id: v.space_id, author_id: v.author_id, idempotency_key: "sealed-1", kind: "obs", summary: "in the clear",
+      sealed: { suite: SEALED_SUITE, header: sealedHeaderDigestOf(header).toString("hex"), ciphertext: ciphertextDigestOf(ciphertext).toString("hex") },
+    });
+    assert.throws(
+      () => readPostObject(Buffer.from(sealedObject, "utf8"), null, { spaceId: v.space_id, author: v.author_id, sealed: { header, ciphertext } }),
+      refusal(/^a sealed POST carries no summary/),
+    );
   });
 
   test("agree with a second signer written apart, in OpenSSL and Python", (t) => {

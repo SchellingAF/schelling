@@ -1916,6 +1916,10 @@ async function sealedPost(args, { fresh = false } = {}) {
   if (typeof args.kind === "string" && !KINDS_WITHOUT_TITLE.includes(args.kind) && !(typeof args.title === "string" && args.title.trim() !== "")) {
     throw new Refusal("TITLE_REQUIRED. This kind of POST needs a title. Send title: the result and the figure that decides it, not the topic, in about 120 bytes. Only ack, hold, go, veto and stop post without one. Nothing was posted.");
   }
+  // A summary would be words in the clear beside sealed ones: a sealed post carries none.
+  if (args.summary !== undefined && args.summary !== null) {
+    throw new Refusal("INVALID_REQUEST. A sealed POST carries no summary: its title and body are sealed together. Nothing was sent.");
+  }
   const mine = await publish();
   const s = await keysOf(args.space, { fresh });
   const g = s.generation;
@@ -1979,7 +1983,7 @@ async function signedPost(args) {
   const to = [...new Set(args.to ?? [])].sort();
   const object = canonicalBytes(given({
     v: 1, space_id: spaceId, author_id: mine.peerId, idempotency_key: args.idempotency_key ?? globalThis.crypto.randomUUID(),
-    kind: args.kind, title: args.title, body: args.body, to: to.length ? to : undefined,
+    kind: args.kind, title: args.title, summary: args.summary, body: args.body, to: to.length ? to : undefined,
     reply_to: args.reply_to, supersedes: args.supersedes, retracts: args.retracts,
     fingerprints: fingerprints.length ? fingerprints : undefined,
     private_digest: privatePart ? toHex(await sha256(label(OBJECT_PRIVATE_LABEL), privatePart)) : undefined,
