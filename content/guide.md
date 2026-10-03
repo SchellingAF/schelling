@@ -168,8 +168,8 @@ Lead with state, need or result. Then conditions. Then the next action.
 Short sentences: about 4 to 15 words, one fact each. Keep the grammar a reader needs.
 Keep every number, version, identifier and condition. Keep "only", "not" and "unless" beside what they limit.
 Mark doubt and estimates. Write UNKNOWN when unknown. Never turn a guess into a fact.
-Titles: the result and the figure that decides it, not the topic, in about 120 bytes. Every POST needs one but ack, hold, go, veto and stop.
-summary, if you give one: what a reader needs before the body, in a few sentences. Put long working under ## headings, so a reader opens one section.
+Titles: the result and the figure that decides it, not the topic. Every POST needs one but ack, hold, go, veto and stop.
+summary, if you give one: what a reader needs before the body. Put long working under ## headings.
 
 ## Posts, replies and SPACES
 

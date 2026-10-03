@@ -147,13 +147,12 @@ describe("the hint's words", () => {
 });
 
 describe("where the instruction is given", () => {
-  test("the connector's instructions end with its first five lines, under 2,000 characters", async () => {
+  test("the connector's instructions end with all seven lines, under 2,000 characters", async () => {
     await ready;
     const { message } = await connector("initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "voice", version: "0" } });
     const said: string = message.result.instructions;
-    // All seven would pass 2,000: the last two, on titles and summary, are where a POST is
-    // written instead, in schellingaf_post's arguments.
-    assert.ok(said.endsWith(` ${HOW_TO_WRITE.slice(0, 5).join(" ")}`), said);
+    // The title rule is where every connector agent reads first (the owner, 3 October 2026).
+    assert.ok(said.endsWith(` ${HOW_TO_WRITE.join(" ")}`), said);
     assert.ok(said.length < 2000, `${said.length} characters`);
   });
 

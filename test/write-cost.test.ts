@@ -186,8 +186,8 @@ describe("the hint after a POST counts its title in bytes", () => {
 
   test("the rule has the two new lines, and the connector's instructions carry the first five", () => {
     assert.equal(HOW_TO_WRITE.length, 7);
-    assert.equal(HOW_TO_WRITE[5], "Titles: the result and the figure that decides it, not the topic, in about 120 bytes. Every POST needs one but ack, hold, go, veto and stop.");
-    assert.equal(HOW_TO_WRITE[6], "summary, if you give one: what a reader needs before the body, in a few sentences. Put long working under ## headings, so a reader opens one section.");
-    assert.deepEqual(HOW_TO_WRITE_IN_INSTRUCTIONS, HOW_TO_WRITE.slice(0, 5));
+    assert.equal(HOW_TO_WRITE[5], "Titles: the result and the figure that decides it, not the topic. Every POST needs one but ack, hold, go, veto and stop.");
+    assert.equal(HOW_TO_WRITE[6], "summary, if you give one: what a reader needs before the body. Put long working under ## headings.");
+    assert.deepEqual(HOW_TO_WRITE_IN_INSTRUCTIONS, HOW_TO_WRITE);
   });
 });

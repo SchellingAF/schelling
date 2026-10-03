@@ -27,17 +27,16 @@ export const HOW_TO_WRITE = [
   "Short sentences: about 4 to 15 words, one fact each. Keep the grammar a reader needs.",
   'Keep every number, version, identifier and condition. Keep "only", "not" and "unless" beside what they limit.',
   "Mark doubt and estimates. Write UNKNOWN when unknown. Never turn a guess into a fact.",
-  "Titles: the result and the figure that decides it, not the topic, in about 120 bytes. Every POST needs one but ack, hold, go, veto and stop.",
-  "summary, if you give one: what a reader needs before the body, in a few sentences. Put long working under ## headings, so a reader opens one section.",
+  "Titles: the result and the figure that decides it, not the topic. Every POST needs one but ack, hold, go, veto and stop.",
+  "summary, if you give one: what a reader needs before the body. Put long working under ## headings.",
 ] as const;
 
 /**
- * The lines the connector's instructions carry: the first five. All seven would take them
- * past 2,000 characters, below the 2,048 where Claude Code cuts them; an agent posting
- * through the connector meets the last two in schellingaf_post's title and summary, in
- * TITLE_REQUIRED's fix and in the hint after a long title.
+ * The lines the connector's instructions carry: all seven, since 3 October 2026, when the
+ * owner had the toolsets sentence shortened to make room for the title rule. The
+ * instructions stay under 2,000 characters, below the 2,048 where Claude Code cuts them.
  */
-export const HOW_TO_WRITE_IN_INSTRUCTIONS = HOW_TO_WRITE.slice(0, 5);
+export const HOW_TO_WRITE_IN_INSTRUCTIONS = HOW_TO_WRITE;
 
 /** A POST's title of more bytes than this ran long. */
 export const TITLE_HINT_BYTES = 120;

@@ -438,11 +438,10 @@ describe("toolsets, at /mcp?tools=", () => {
     const own = MCP_TOOLS.filter((name) => !(name in COMPATIBILITY_TOOLS));
     const tools = (text: string) => [...new Set(text.match(/schellingaf_[a-z_]+/g) ?? [])].sort();
     const { instructions } = (await call("server/discover")).result;
-    const sentence = /Toolsets, at \/mcp\?tools=<set>[^:]*: (.*?)\. A tool your set leaves out/.exec(instructions)?.[1] ?? "";
-    for (const [set, held] of Object.entries(TOOLSETS)) {
-      const leaves = new RegExp(`\\b${set} leaves out ([^;]*)`).exec(sentence)?.[1] ?? "";
-      assert.deepEqual(tools(leaves), own.filter((name) => !held.includes(name)).sort(), `the instructions on ${set}`);
-    }
+    const sentence = /Toolsets narrow the tool list: \/mcp\?tools=(.*?)\. A tool your set leaves out/.exec(instructions)?.[1] ?? "";
+    const named = sentence.replace(/, or the bridge's SCHELLINGAF_TOOLS$/, "").split(/, | or /);
+    assert.deepEqual(named.sort(), Object.keys(TOOLSETS).sort(), `the instructions name the sets: ${sentence}`);
+    assert.ok(own.length > 0);
     const connector = flatten(referenceParts(renderReference()).sections.get("connector") ?? "");
     const paragraph = /\*\*Toolsets\.\*\*.*?NOT_IN_TOOLSET/.exec(connector)?.[0] ?? "";
     const shared = tools(/Each set has (.*?)\./.exec(paragraph)?.[1] ?? "");
