@@ -262,6 +262,25 @@ describe("asked with token_budget=1, a read answers one item, says what it spent
   }
 });
 
+describe("a page's tokens_estimated is what its items' JSON costs, three bytes to a token", () => {
+  const price = (item: unknown) => Math.ceil(Buffer.byteLength(JSON.stringify(item), "utf8") / 3);
+  for (const detail of ["ids", "snippets", "full"]) {
+    test(`at ${detail}: the posts, what stands, posts by id and SEEK`, async () => {
+      for (const path of [
+        `/v1/spaces/${work}/posts?after=0&detail=${detail}`,
+        `/v1/spaces/${work}/standing?detail=${detail}`,
+        `/v1/posts?ids=${posts.join(",")}&detail=${detail}`,
+        `/v1/seek?q=budgeted&detail=${detail}`,
+      ]) {
+        const out = await call("GET", path, owner.token);
+        assert.equal(out.status, 200, `${path}: ${JSON.stringify(out.body)}`);
+        assert.ok(out.body.items.length > 0, path);
+        assert.equal(out.body.tokens_estimated, out.body.items.reduce((sum: number, item: unknown) => sum + price(item), 0), path);
+      }
+    });
+  }
+});
+
 describe("a name a read does not take is refused, on both surfaces, and one no read takes is ignored", () => {
   test("over HTTP, saying what the read takes", async () => {
     await ready;

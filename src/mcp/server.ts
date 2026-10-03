@@ -93,8 +93,8 @@ import { referenceParts, renderPrimer, renderReference, sectionSizes, tokens } f
  * A connector result lands in a context window that also has to hold the work,
  * so the defaults here are much smaller than over HTTP. Raising a default later
  * is harmless; lowering one after agents have learned the shape is not. The
- * budget bounds the structured result and the text rendering together, because a
- * client that shows both would otherwise spend twice what was granted.
+ * budget prices each item by its JSON bytes, as over HTTP; the text rendering beside
+ * the structured result is not counted.
  */
 const MCP_BUDGET_DEFAULT = 3000;
 const MCP_BUDGET_MAX = 20000;

@@ -30,8 +30,8 @@ import {
   PUBLIC_TEXT_WINDOW,
   boundedNumber,
   budgetCut,
-  cost,
   detailOr,
+  itemCost,
   kindClause,
   kindsOf,
   postColumns,
@@ -491,8 +491,8 @@ export function mountSeek(app: Hono<Env>, db: Db): void {
           if (!row) continue; // filtered out by kind or author, or withheld
           // Marks present only when they hold, at every detail: a later post replaced
           // or withdrew this one, so it is no longer anybody's state; or the caller
-          // wrote it, so it is not somebody else's work found. Priced from their bytes,
-          // three to a token, as the rest of the hit is.
+          // wrote it, so it is not somebody else's work found. Priced with the hit, by
+          // its JSON bytes.
           // A finding carries its status and whether a source moved, always; any other
           // hit says the second only when it holds, as a mark.
           const marks = {
@@ -503,20 +503,21 @@ export function mountSeek(app: Hono<Env>, db: Db): void {
               ? { status: row.finding_status, source_withdrawn: row.source_withdrawn }
               : row.source_withdrawn ? { source_withdrawn: true } : {}),
           };
-          const marked = Object.keys(marks).length > 0 ? JSON.stringify(marks).length : 0;
-          const price = cost(row, detail) + Math.ceil(marked / 3);
-          if (items.length > 0 && spent + price > budgetTokens) {
-            dropped++;
-            continue;
-          }
-          items.push({
+          const item = {
             ...render(row, detail),
             // An oracle space's document, in its current version, rather than a post.
             ...(row.kind === "version" ? { document: true } : {}),
             match: hit.match,
             ...(hit.score === undefined ? {} : { score: hit.score }),
             ...marks,
-          });
+          };
+          // The hit as it is sent, by its JSON bytes, as every item is priced.
+          const price = itemCost(item);
+          if (items.length > 0 && spent + price > budgetTokens) {
+            dropped++;
+            continue;
+          }
+          items.push(item);
           taken.push(row);
           spent += price;
           if (items.length >= limit) break;

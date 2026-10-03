@@ -354,59 +354,13 @@ export function postColumns(sql: Sql, detail: Detail, proof = false) {
 }
 
 /**
- * What this row costs at this detail, in tokens, from the bytes actually
- * rendered. Three bytes to a token, published in `capabilities` as
- * `bytes/3` so an agent can predict a page instead of discovering it.
+ * What this row costs at this detail, in tokens: its JSON item's bytes over three, as
+ * render() makes it for this reader, published in `capabilities` as `bytes/3` so an agent
+ * can predict a page instead of discovering it. Exact, so a page's tokens_estimated is
+ * what its items carry; the text a connector renders beside them is not counted.
  */
 export function cost(row: PostRow, detail: Detail, proof = false): number {
-  if (detail === "ids") return 40;
-  return costOf(row, detail, proof) + (row.no_role ? 5 : 0);
-}
-
-function costOf(row: PostRow, detail: Detail, proof: boolean): number {
-  // A sealed post costs what is served of it: its size alone as a snippet, and its
-  // header and ciphertext in base64url in full, with the proof on top of that.
-  if (row.sealed_generation !== null && !(proof && detail === "full")) {
-    if (detail === "snippets") return 60;
-    const parts = (row.sealed_header?.length ?? 0) + (row.ciphertext?.length ?? 0);
-    return 120 + Math.ceil((parts * 4) / 3 / 3);
-  }
-  if (proof && detail === "full") {
-    // The proof block as render() writes it: the bytes in base64url, the private
-    // part for a member, the signature and its key, and six fixed-size hashes.
-    const b64 = (b: Buffer | null) => (b ? Math.ceil((b.length * 4) / 3) : 0);
-    const envelope = row.webauthn ? byteLength(JSON.stringify(row.webauthn)) : 0;
-    // A connection signature's key, and the statement and envelope it came with.
-    const delegation =
-      (row.connection_key ? 64 : 0) + b64(row.delegation_statement) +
-      (row.delegation_signature ? byteLength(JSON.stringify(row.delegation_signature)) : 0);
-    const extra =
-      b64(row.canonical) + (row.outside ? 0 : b64(row.private)) + b64(row.signature) +
-      b64(row.signer_key_passkey) + (row.signer_key_ed25519 ? 64 : 0) + envelope + delegation + 520;
-    return costOf(row, detail, false) + Math.ceil(extra / 3);
-  }
-  const title = byteLength(row.title ?? "");
-  // A field render() leaves out for a reader outside the SPACE costs that reader
-  // nothing, and the budget is priced from the bytes actually rendered.
-  const budget = row.budget && !row.outside ? byteLength(JSON.stringify(row.budget)) : 0;
-  // A post's files, by the bytes their fields add: the count and the bytes, and at full
-  // the list. Never the files themselves, which no read of a post carries.
-  const files = row.attachment_count
-    ? byteLength(JSON.stringify({ attachment_count: row.attachment_count, attachment_bytes: row.attachment_bytes })) +
-      (detail === "full" && row.attachments ? byteLength(JSON.stringify(row.attachments)) : 0)
-    : 0;
-  if (detail === "snippets") {
-    const finding = row.finding ? byteLength(JSON.stringify(row.finding)) : 0;
-    return (
-      60 +
-      Math.ceil(
-        (title + byteLength(row.snippet ?? "") + budget + finding + files + 24 * Math.min(row.fingerprint_count, 8)) / 3,
-      )
-    );
-  }
-  const body = byteLength(row.body ?? "");
-  const data = row.data && !row.outside ? byteLength(JSON.stringify(row.data)) : 0;
-  return 120 + Math.ceil((title + body + data + budget + files + 24 * row.fingerprint_count) / 3);
+  return itemCost(render(row, detail, proof));
 }
 
 /**
@@ -612,12 +566,13 @@ export function withinBudget(
   let cut = rows.length;
   for (let i = 0; i < rows.length; i++) {
     const row = rows[i]!;
-    const price = cost(row, detail, proof);
+    const item = render(row, detail, proof);
+    const price = itemCost(item);
     if (items.length > 0 && spent + price > budgetTokens) {
       cut = i;
       break;
     }
-    items.push(render(row, detail, proof));
+    items.push(item);
     spent += price;
   }
   return { items, spent, dropped: rows.slice(cut), taken: rows.slice(0, cut) };

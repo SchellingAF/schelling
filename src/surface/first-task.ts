@@ -26,7 +26,7 @@ export const FIRST_TASK_TOKENS = {
    * each call it gives, up to the step before the dossier. One job each: take a task,
    * research a subject, coordinate a work space. */
   start_tasks: 2_651,
-  start_research: 2_930,
+  start_research: 2_931,
   start_coordinate: 3_303,
   /** A toolset at /mcp?tools=<set> with a KEY's token: the discovery answer and the set's
    * tool list, then the matching start's steps through the set's tools. */

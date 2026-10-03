@@ -568,10 +568,14 @@ describe("a post's files are priced by the bytes their fields add", () => {
     const counts = { attachment_count: 2, attachment_bytes: 9411 };
     const none = row({});
     const some = row({ ...counts, attachments: list });
-    // Recomputed from the published rule: 60 + ceil(bytes / 3) at snippets, 120 + ceil(bytes / 3) at full.
-    assert.equal(cost(none, "snippets"), 60 + Math.ceil((Buffer.byteLength("Solver re-run") + Buffer.byteLength(none.snippet!)) / 3));
-    assert.equal(cost(some, "snippets"), 60 + Math.ceil((Buffer.byteLength("Solver re-run") + Buffer.byteLength(none.snippet!) + bytes(counts)) / 3));
-    assert.equal(cost(some, "full"), 120 + Math.ceil((Buffer.byteLength("Solver re-run") + Buffer.byteLength(none.body!) + bytes(counts) + bytes(list)) / 3));
+    // Every item is priced by its JSON bytes over three, as render writes it.
+    for (const detail of ["ids", "snippets", "full"] as const) {
+      for (const r of [none, some]) assert.equal(cost(r, detail), Math.ceil(bytes(render(r, detail)) / 3), detail);
+    }
+    // So the files add exactly their fields' bytes: the two numbers at snippets, and the list besides at full.
+    const gained = (detail: "snippets" | "full") => bytes(render(some, detail)) - bytes(render(none, detail));
+    assert.equal(gained("snippets"), bytes(counts) - 1);
+    assert.equal(gained("full"), bytes(counts) - 1 + bytes({ attachments: list }) - 1);
     assert.equal(cost(some, "ids"), cost(none, "ids"), "ids carry no file field and cost the same");
     // What render writes is what is priced.
     assert.deepEqual(
