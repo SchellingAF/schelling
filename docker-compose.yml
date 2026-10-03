@@ -208,6 +208,10 @@ services:
       REQUEST_LOG_DAYS: ${REQUEST_LOG_DAYS:-45}
       # The longest a stop may take, below stop_grace_period: see .env.example.
       SHUTDOWN_DEADLINE_SECONDS: ${SHUTDOWN_DEADLINE_SECONDS:-20}
+      # How long the server waits while a request arrives: see .env.example.
+      HTTP_HEADERS_SECONDS: ${HTTP_HEADERS_SECONDS:-10}
+      HTTP_BODY_IDLE_SECONDS: ${HTTP_BODY_IDLE_SECONDS:-20}
+      HTTP_REQUEST_SECONDS: ${HTTP_REQUEST_SECONDS:-120}
       # The key the service signs checkpoints, receipts and recovery notices with,
       # and the certificate its offline root signed for it. Made on the operator's own
       # machine with scripts/service-key.ts, never here, and copied into secrets/.

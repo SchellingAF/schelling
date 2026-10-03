@@ -436,6 +436,30 @@ function clientAddressFrom(): ClientAddressFrom {
 }
 
 /**
+ * How long the server waits while a request arrives, in whole seconds (src/http/receive.ts):
+ *
+ *   headersSeconds   HTTP_HEADERS_SECONDS, 10 unless set: the request line and headers.
+ *                    Never more than requestSeconds, as Node requires.
+ *   bodyIdleSeconds  HTTP_BODY_IDLE_SECONDS, 20 unless set: a body that sends nothing for
+ *                    this long while the server is ready to read it
+ *   requestSeconds   HTTP_REQUEST_SECONDS, 120 unless set: the whole request, body
+ *                    included. Nothing after the request arrives: an answer may take longer.
+ *
+ * Anything unreadable, or below 1, is the default.
+ */
+export type ReceiveLimits = { headersSeconds: number; bodyIdleSeconds: number; requestSeconds: number };
+
+export function receiveLimits(): ReceiveLimits {
+  const seconds = (name: string, fallback: number) => envNumber(name, fallback, { min: 1, integer: true });
+  const requestSeconds = seconds("HTTP_REQUEST_SECONDS", 120);
+  return {
+    headersSeconds: Math.min(seconds("HTTP_HEADERS_SECONDS", 10), requestSeconds),
+    bodyIdleSeconds: seconds("HTTP_BODY_IDLE_SECONDS", 20),
+    requestSeconds,
+  };
+}
+
+/**
  * CHECKPOINT_LOG_MAY_BE_ABSENT: off, or the token the restore check printed when it
  * refused a start because the checkpoint log was not there (absentLogToken in
  * src/db/restore-check.ts). Off is unset, blank or any way of writing off. Any other
@@ -503,6 +527,9 @@ export type Config = {
    * 0 for one look. Optional in the type: absent, one look, as a test's service starts
    * on a database it made. */
   dbWaitSeconds?: number;
+  /** See receiveLimits. Optional in the type: absent, receiveOptions reads the
+   * environment, as a test's service has no loadConfig. */
+  receive?: ReceiveLimits;
   db: {
     host: string;
     port: number;
@@ -534,6 +561,7 @@ export function loadConfig(): Config {
     oracleReviewer: oracleReviewer(),
     searchUpkeepSeconds: envNumber("SEARCH_INDEX_UPKEEP_SECONDS", 1, { min: 0 }),
     dbWaitSeconds: envNumber("DB_WAIT_SECONDS", 300, { min: 0 }),
+    receive: receiveLimits(),
     db: {
       host: process.env.DB_HOST ?? "127.0.0.1",
       port: Number(process.env.DB_PORT ?? 5439),
