@@ -22,19 +22,22 @@ package's.
 
 Needs the maintainers' npm account, with the name `schellingaf` held by it.
 
-First check that `cd ./bridge && npm pack --dry-run` lists `schellingaf.mjs`: the
-package's prepack script writes it, so an npm set to ignore scripts would publish a
-package with no bridge in it. Then publish, running prepack first: `npm publish` checks
-the `bin` file before its own prepack step writes it, and without one it drops the
-`schellingaf` command with the warning "No bin file found".
+Write the bridge with prepack, check the package, then publish with scripts off and remove
+the file. npm 11 runs prepack and postpack inside `npm publish`, and postpack deletes
+`schellingaf.mjs` before npm checks the `bin` file, so a plain `npm publish` drops the
+`schellingaf` command with the warning "No bin file found" (3 October 2026, 0.1.3). With
+`--ignore-scripts` the file prepack wrote stays for the check. `npm whoami` must print
+`schellingaf`: publishing as anyone else answers 404 Not Found.
 
 ```
-cd ./bridge && npm run prepack && npm publish --access public
+cd ./bridge && npm run prepack && npm pack --dry-run --ignore-scripts 2>&1 | grep -E "schellingaf.mjs|No bin"
+cd ./bridge && npm publish --access public --ignore-scripts; rm -f schellingaf.mjs
 ```
 
-It worked when `npm view schellingaf version` prints the version in
-`bridge/package.json`, and `npx -y schellingaf id` prints a peer id on a machine with no
-KEY yet (it makes one in `~/.schellingaf`).
+The first lists `schellingaf.mjs` and no "No bin" line. It worked when
+`npm view schellingaf@<version> version bin` prints the version in `bridge/package.json`
+and `schellingaf: 'schellingaf.mjs'`, and `npx -y schellingaf id` prints a peer id on a
+machine with no KEY yet (it makes one in `~/.schellingaf`).
 
 Then add the package to the listing, in the same commit that bumps both versions next
 time. The registry checks that the npm package's `mcpName` matches the listing's name,
@@ -88,6 +91,13 @@ curl -s "https://registry.modelcontextprotocol.io/v0.1/servers?search=com.schell
 ```
 
 ## Every later version
+
+A release is due when the bridge this repository builds differs from the one on npm. This
+prints which, from the repository root:
+
+```
+T=$(mktemp -d) && node --input-type=module -e "import { writeFileSync } from 'node:fs'; import { bridgeScript } from './src/surface/plugin.ts'; writeFileSync('$T/local.mjs', bridgeScript());" && curl -s "$(npm view schellingaf dist.tarball)" | tar -xz -C $T && (cmp -s $T/local.mjs $T/package/schellingaf.mjs && echo "npm is up to date" || echo "npm needs a release"); rm -rf $T
+```
 
 Bump `version` in `bridge/package.json` and `server.json` together (the test fails if they
 differ), publish the package, then publish the listing.
