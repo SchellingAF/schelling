@@ -7,7 +7,7 @@ import { test, describe, after } from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { readFileSync, rmSync } from "node:fs";
-import { BRIDGE as BRIDGE_SOURCE, everyLine, fakeService, healthy, json, makeKey, runBridge, type Fake, type Handler, type Running } from "./lib/fake-service.ts";
+import { BRIDGE as BRIDGE_SOURCE, everyLine, fakeService, healthy, json, makeKey, runBridge, until, type Fake, type Handler, type Running } from "./lib/fake-service.ts";
 
 /** Every time limit at a fiftieth: a call's 90 seconds is 1.8 here. */
 const SCALE = 0.02;
@@ -764,6 +764,198 @@ describe("a write whose answer was lost is sent once more, under the same key", 
       for (const m of bridge.out.filter((o) => o.id !== 4)) {
         assert.ok(!/\b(posted|done|ok)\b/.test(textOf(m)), `a NO_ANSWER reads as a result: ${textOf(m)}`);
       }
+    } finally {
+      await done();
+    }
+  });
+});
+
+/** The bridge's `call` against a fake service, run to its end: its exit code, stdout and
+ *  stderr, and how long it took. `input` is written to its stdin, which is otherwise left
+ *  open, so a call that read stdin when it should not would never end. */
+async function callAgainst(routes: Record<string, Handler>, args: string[], env: Record<string, string> = {}, input?: string) {
+  const fake = await fakeService({ ...healthy(key.peerId), ...routes });
+  const bridge = runBridge({
+    HOME: key.dir, SCHELLINGAF_API: fake.origin, SCHELLINGAF_KEY_FILE: key.file,
+    SCHELLINGAF_TOKEN: "fake-token-for-a-local-fake-service", SCHELLINGAF_UNSIGNED: "1",
+    SCHELLINGAF_TIME_SCALE: String(SCALE), ...env,
+  }, ["call", ...args], key.dir);
+  const from = Date.now();
+  let out = "";
+  bridge.child.stdout.removeAllListeners("data");
+  bridge.child.stdout.on("data", (d: string) => (out += d));
+  if (input !== undefined) bridge.child.stdin.end(input);
+  const code = await Promise.race([bridge.exited, new Promise<"held">((ok) => setTimeout(() => ok("held"), 5000))]);
+  const took = Date.now() - from;
+  await bridge.stop();
+  await fake.close();
+  return { code, out, err: bridge.err(), took, fake };
+}
+
+describe("call, the help and the start", () => {
+  test("call prints the answer's text and exits 0", async () => {
+    const r = await callAgainst({}, ["schellingaf_read_space", '{"space":"fake-space"}']);
+    assert.equal(r.code, 0, r.err);
+    assert.equal(r.out, "ok\n");
+    const sent = JSON.parse(r.fake.bodies.find((b) => b.route === "POST /mcp")!.body);
+    assert.deepEqual(sent.params, { name: "schellingaf_read_space", arguments: { space: "fake-space" } });
+  });
+
+  test("call exits 1 on a refusal, 2 on NO_ANSWER, 2 on BRIDGE_FAILED, 64 on each usage error, mapped by structuredContent.code", async () => {
+    const refused = await callAgainst({ "POST /mcp": (_req, res, body) => json(res, 200, { jsonrpc: "2.0", id: JSON.parse(body).id, result: { content: [{ type: "text", text: "SPACE_NOT_FOUND. No such SPACE." }], isError: true } }) }, ["schellingaf_read_space", '{"space":"fake-space"}']);
+    assert.equal(refused.code, 1, refused.err);
+    assert.equal(refused.out, "SPACE_NOT_FOUND. No such SPACE.\n");
+    const lost = await callAgainst({ "POST /mcp": status(202) }, ["schellingaf_read_space", '{"space":"fake-space"}']);
+    assert.equal(lost.code, 2, lost.err);
+    assert.match(lost.out, /^NO_ANSWER\. The service accepted the request and sent no answer to it\./);
+    const failed = await callAgainst({ "GET /v1/spaces/*": (_req, res) => void res.writeHead(200, { "content-type": "application/json" }).end("not json") }, ["schellingaf_post", JSON.stringify(POST.arguments)]);
+    assert.equal(failed.code, 2, failed.err);
+    assert.match(failed.out, /^BRIDGE_FAILED\. The bridge could not send this: /);
+    const ownRefusal = await callAgainst({}, ["schellingaf_read_space", '{"space":"fake-space","dry_run":true}']);
+    assert.equal(ownRefusal.code, 1, ownRefusal.err);
+    for (const [args, said] of [
+      [[], /call <tool> \[json \| -\]: name the tool to run/],
+      [["schellingaf_read_space", "{not json"], /the arguments are not JSON/],
+      [["schellingaf_read_space", "[1,2]"], /the arguments are a JSON object/],
+      [["schellingaf_read_space", "7"], /the arguments are a JSON object/],
+    ] as const) {
+      const usage = await callAgainst({}, [...args]);
+      assert.equal(usage.code, 64, `${args.join(" ")}: ${usage.err}`);
+      assert.match(usage.err, said);
+      assert.equal(usage.fake.seen.filter((s) => s.startsWith("POST /mcp")).length, 0);
+    }
+  });
+
+  test("call reads its arguments from stdin with -, sends {} with none and never reads stdin then, sends MCP-Protocol-Version and no initialize, and exits as soon as it printed", async () => {
+    const piped = await callAgainst({}, ["schellingaf_read_space", "-"], {}, '{"space":"from-stdin"}');
+    assert.equal(piped.code, 0, piped.err);
+    assert.deepEqual(JSON.parse(piped.fake.bodies.find((b) => b.route === "POST /mcp")!.body).params.arguments, { space: "from-stdin" });
+    const empty = await callAgainst({}, ["schellingaf_whoami", "-"], {}, "");
+    assert.deepEqual(JSON.parse(empty.fake.bodies.find((b) => b.route === "POST /mcp")!.body).params.arguments, {});
+    // stdin left open: a call that waited for it would be held.
+    const bare = await callAgainst({}, ["schellingaf_whoami"]);
+    assert.equal(bare.code, 0, bare.err);
+    assert.ok(bare.took < 2000, `held for ${bare.took} ms`);
+    const sent = bare.fake.bodies.filter((b) => b.route === "POST /mcp");
+    assert.equal(sent.length, 1, "more than the call was sent");
+    assert.deepEqual(JSON.parse(sent[0]!.body).params, { name: "schellingaf_whoami", arguments: {} });
+    assert.equal(sent[0]!.headers["mcp-protocol-version"], "2025-11-25");
+    assert.ok(!bare.fake.seen.some((s) => s.includes("initialize")));
+    // A result with no text is printed as its structured content.
+    const structured = await callAgainst({ "POST /mcp": (_req, res, body) => json(res, 200, { jsonrpc: "2.0", id: JSON.parse(body).id, result: { content: [], structuredContent: { n: 1 } } }) }, ["schellingaf_whoami"]);
+    assert.equal(structured.out, '{"n":1}\n');
+  });
+
+  test("--help, -h and help list every command once, one line each; an unknown command points at --help and exits 64", async () => {
+    const commands = ["serve", "call <tool> [json | -]", "id", "token", "me", "keeper <space>", "keepers <space>", "stamp <peer id>", "help"];
+    for (const flag of ["--help", "-h", "help"]) {
+      const r = runBridge({ HOME: key.dir }, [flag]);
+      let out = "";
+      r.child.stdout.removeAllListeners("data");
+      r.child.stdout.on("data", (d: string) => (out += d));
+      assert.equal(await r.exited, 0);
+      const lines = out.trimEnd().split("\n");
+      for (const c of commands) assert.equal(lines.filter((l) => l.startsWith(`  ${c} `)).length, 1, `${flag}: ${c}`);
+      assert.equal(lines.length, 13);
+    }
+    const unknown = runBridge({ HOME: key.dir }, ["nosuch"]);
+    assert.equal(await unknown.exited, 64);
+    assert.match(unknown.err(), /unknown command nosuch: node bridge\.mjs --help lists the commands\./);
+  });
+
+  for (const set of ["tasks", "research", "coordinate"]) {
+    test(`a start under the ${set} toolset writes nothing and reads no /v1/me`, async () => {
+      const { bridge, fake, done } = await against({}, { SCHELLINGAF_TOOLS: set, SCHELLINGAF_UNSIGNED: "" });
+      try {
+        bridge.send({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} });
+        assert.ok(await bridge.answerTo(1));
+        await new Promise((ok) => setTimeout(ok, 300));
+        assert.deepEqual(fake.seen.filter((s) => !s.startsWith("POST /mcp")), []);
+        assert.doesNotMatch(bridge.err(), /published/);
+      } finally {
+        await done();
+      }
+    });
+  }
+
+  test("a start with no toolset publishes only when the service holds no encryption key for this KEY, and prints the line only then; call never publishes at start", async () => {
+    const none = await against({}, { SCHELLINGAF_UNSIGNED: "" });
+    try {
+      assert.ok(await until(() => none.fake.seen.includes("PUT /v1/me/encryption-key")), "no publish");
+      assert.ok(await until(() => /published this KEY's encryption key, fingerprint/.test(none.bridge.err())));
+    } finally {
+      await none.done();
+    }
+    const held = await against({ "GET /v1/me": (_req, res) => json(res, 200, { peer_id: key.peerId, encryption_key: { public_key: key.encryptionKeyHex } }) }, { SCHELLINGAF_UNSIGNED: "" });
+    try {
+      assert.ok(await until(() => held.fake.seen.includes("GET /v1/me")));
+      await new Promise((ok) => setTimeout(ok, 300));
+      assert.ok(!held.fake.seen.includes("PUT /v1/me/encryption-key"), "published over a key the service holds");
+      assert.equal(held.bridge.err(), "");
+    } finally {
+      await held.done();
+    }
+    const called = await callAgainst({}, ["schellingaf_read_space", '{"space":"fake-space"}'], { SCHELLINGAF_UNSIGNED: "" });
+    assert.equal(called.code, 0, called.err);
+    assert.deepEqual(called.fake.seen.filter((s) => s.includes("/v1/me")), []);
+  });
+
+  test("joining a sealed SPACE under a toolset publishes the encryption key before the join, by name and by link, and only when the service holds none", async () => {
+    // A SPACE of its own: a KEY remembers a SPACE it saw sealed, beside its KEY file.
+    for (const join of [{ action: "join", name: "a-sealed-space" }, { action: "join", link: "https://schellingaf.com/join/abc" }]) {
+      const { bridge, fake, done } = await against({
+        "GET /v1/spaces/*": (_req, res) => json(res, 200, { name: "a-sealed-space", visibility: "sealed", space_id: "11111111-1111-4111-8111-111111111111" }),
+      }, { SCHELLINGAF_TOOLS: "coordinate", SCHELLINGAF_UNSIGNED: "" });
+      try {
+        bridge.send(call(1, { name: "schellingaf_join", arguments: join }));
+        assert.ok(await bridge.answerTo(1, 4000));
+        const put = fake.seen.indexOf("PUT /v1/me/encryption-key");
+        assert.ok(put >= 0, `${JSON.stringify(join)}: no publish; ${fake.seen.join(", ")}`);
+        assert.ok(put < fake.seen.indexOf("POST /mcp tools/call"), "published after the join");
+      } finally {
+        await done();
+      }
+    }
+    // A KEY whose encryption key the service holds writes none, and a key the service holds
+    // that is not this KEY's is said on stderr, and the join still goes.
+    for (const [publicKey, said] of [[key.encryptionKeyHex, ""], ["00".repeat(32), "SEALED_KEY_MISMATCH"]] as const) {
+      const { bridge, fake, done } = await against({
+        "GET /v1/me": (_req, res) => json(res, 200, { peer_id: key.peerId, encryption_key: { public_key: publicKey } }),
+      }, { SCHELLINGAF_TOOLS: "coordinate", SCHELLINGAF_UNSIGNED: "" });
+      try {
+        bridge.send(call(1, { name: "schellingaf_join", arguments: { action: "join", link: "https://schellingaf.com/join/abc" } }));
+        assert.equal(textOf(await bridge.answerTo(1, 4000)), "ok");
+        assert.ok(!fake.seen.includes("PUT /v1/me/encryption-key"));
+        if (said) assert.match(bridge.err(), new RegExp(said));
+        else assert.equal(bridge.err(), "");
+      } finally {
+        await done();
+      }
+    }
+  });
+
+  test("a signed post under a toolset reads /v1/me once and never PUTs the encryption key", async () => {
+    const { bridge, fake, done } = await against({}, { SCHELLINGAF_TOOLS: "coordinate", SCHELLINGAF_UNSIGNED: "" });
+    try {
+      for (const id of [1, 2]) {
+        bridge.send(call(id, { ...POST, arguments: { ...POST.arguments, body: `post ${id}` } }));
+        assert.equal(textOf(await bridge.answerTo(id, 4000)), "ok");
+      }
+      assert.equal(fake.seen.filter((s) => s === "GET /v1/me").length, 1);
+      assert.ok(!fake.seen.includes("PUT /v1/me/encryption-key"));
+      assert.ok(canonicalOf(callsSent(fake)[0]!.body).author_id === key.peerId, "the post was not signed");
+    } finally {
+      await done();
+    }
+  });
+
+  test("a plain post that fails to sign says sign, not seal", async () => {
+    const { bridge, done } = await against({ "GET /v1/me": (_req, res) => void res.writeHead(200, { "content-type": "application/json" }).end("not json") }, { SCHELLINGAF_UNSIGNED: "" });
+    try {
+      bridge.send(call(1, POST));
+      const answer = await bridge.answerTo(1, 4000);
+      assert.match(textOf(answer), /^BRIDGE_FAILED\. The bridge could not sign this: .*\. Nothing was sent\.$/);
+      assert.deepEqual(answer.result.structuredContent, { code: "BRIDGE_FAILED" });
     } finally {
       await done();
     }

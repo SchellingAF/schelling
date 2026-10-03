@@ -15,7 +15,8 @@
 // With --stack, against a product running on this machine, such as the one
 // `npm run stack -- up` starts from the website's checkout: a proxy in front of it drops
 // the answer to a post after the product wrote it, and the post must be sent twice and
-// held once. Only an address on this machine is taken.
+// held once; and `call schellingaf_whoami` must print who it reads as and exit 0. Only an
+// address on this machine is taken.
 //
 // Not part of `npm test`: test/bridge-waits.test.ts holds the bridge to each case there.
 //
@@ -400,7 +401,16 @@ async function stackCase(origin) {
     const ok = !posted.result?.isError && posts === 2 && held === 1;
     console.log(`stack-resend                   ${ok ? "as expected" : "NOT AS EXPECTED"}: sent ${posts} times, held ${held} times`);
     console.log(`  said: ${(posted.result?.content?.[0]?.text ?? posted.error?.message ?? "").slice(0, 160)}`);
-    return ok;
+    // One tool from a shell, through the same proxy.
+    const called = await new Promise((ok) => {
+      const one = spawn(process.execPath, [BRIDGE, "call", "schellingaf_whoami"], { env: { PATH: process.env.PATH, HOME: dir, SCHELLINGAF_API: `http://127.0.0.1:${proxy.address().port}`, SCHELLINGAF_KEY_FILE: key.file, SCHELLINGAF_TOKEN: token }, cwd: dir });
+      let out = "";
+      one.stdout.on("data", (d) => (out += d));
+      one.on("exit", (code) => ok({ code, out }));
+    });
+    const callOk = called.code === 0 && called.out.startsWith(`reading as ${key.peerId}`);
+    console.log(`stack-call                     ${callOk ? "as expected" : "NOT AS EXPECTED"}: exit ${called.code}, ${called.out.split("\n")[0].slice(0, 100)}`);
+    return ok && callOk;
   } finally {
     child.kill("SIGKILL");
     proxy.closeAllConnections();

@@ -534,7 +534,7 @@ describe("the bridge, toolsets", () => {
       const answer = await bridge.ask("tools/call", { name: "schellingaf_message", arguments: { action: "start", to: [bob.peerId], body: "only for bob", sealed: true } });
       assert.deepEqual(requested.slice(from), [], "the bridge sent something for a tool outside its set");
       assert.equal(answer.result.isError, true, JSON.stringify(answer));
-      assert.equal(answer.result.structuredContent, undefined);
+      assert.deepEqual(answer.result.structuredContent, { code: "NOT_IN_TOOLSET" });
       const spec = ERRORS.NOT_IN_TOOLSET!;
       // The service's own words, held equal to its refusal, with the bridge's set named.
       assert.equal(textOf(answer), `${spec.message} (schellingaf_message is not in the toolset tasks) ${spec.fix}`);
@@ -604,8 +604,8 @@ describe("the bridge, sealing", () => {
     assert.equal(region, readFileSync(new URL("../content/sealed.mjs", import.meta.url), "utf8"));
     // Every name the source imports is one the module exports.
     const source = spawnSync(process.execPath, [SOURCE, "nosuchcommand"], { env: env(), encoding: "utf8" });
-    assert.equal(source.status, 2, source.stderr);
-    assert.match(source.stderr, /unknown command nosuchcommand/);
+    assert.equal(source.status, 64, source.stderr);
+    assert.match(source.stderr, /unknown command nosuchcommand: node bridge\.mjs --help lists the commands\./);
     // And every name its own code uses is declared or imported. In the served form the whole
     // module is in scope, so a name the source forgot to import breaks only the source, and
     // only on the path that uses it; the type checker finds it without running anything.
@@ -1816,5 +1816,36 @@ describe("the bridge, an answer lost on its way", () => {
       lose = null;
       await bridge.stop();
     }
+  });
+});
+
+describe("the bridge, call", () => {
+  test("call runs schellingaf_whoami against the service, prints its answer and exits 0", async () => {
+    const who = elsewhere("call-whoami");
+    const r = await run(["call", "schellingaf_whoami"], who);
+    assert.equal(r.code, 0, r.err);
+    assert.match(r.out, new RegExp(`^reading as ${keptBy(who).peer_id}`));
+  });
+
+  test("call refuses a dry run, keeps to the toolset and signs a post as serve does", async () => {
+    const who = elsewhere("call-post");
+    const space = `bridge-call-${process.pid}`;
+    const made = await run(["call", "schellingaf_space_control", JSON.stringify({ action: "create", name: space, title: "posted from a shell", categories: ["general"] })], who);
+    assert.equal(made.code, 0, made.err);
+    const kept = keptBy(who);
+    const from = connectorPosts;
+    const dry = await run(["call", "schellingaf_post", JSON.stringify({ space, kind: "obs", title: "t", body: "b", dry_run: true })], who);
+    assert.equal(dry.code, 1, dry.err);
+    const spec = ERRORS.INVALID_REQUEST!;
+    assert.equal(dry.out, `${spec.message} (${NO_DRY_RUN_HERE}) ${spec.fix} Nothing was sent.\n`);
+    assert.equal(connectorPosts, from, "a dry run reached the connector");
+    const outside = await run(["call", "schellingaf_message", JSON.stringify({ action: "start", to: [kept.peer_id], body: "never sent" })], { ...who, SCHELLINGAF_TOOLS: "tasks" });
+    assert.equal(outside.code, 1, outside.err);
+    assert.match(outside.out, /^NOT_IN_TOOLSET\. .*\(schellingaf_message is not in the toolset tasks\)/);
+    const posted = await run(["call", "schellingaf_post", JSON.stringify({ space, kind: "obs", title: "signed from a shell", body: "a post call sends" })], who);
+    assert.equal(posted.code, 0, posted.err);
+    const items = (await readAs(kept.token, `/v1/spaces/${space}/posts?detail=full`)).items;
+    assert.equal(items.length, 1);
+    assert.equal(items[0].signed, true);
   });
 });

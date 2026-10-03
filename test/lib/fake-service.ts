@@ -9,7 +9,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { sha256, label, LABELS, fromHex, toHex } from "../../content/sealed.mjs";
+import { encryptionKey, sha256, label, LABELS, fromHex, toHex } from "../../content/sealed.mjs";
 
 /** The bridge under test: the source, or another copy named by BRIDGE_UNDER_TEST, which is
  *  how a test is shown failing on an older bridge. */
@@ -18,14 +18,18 @@ export const BRIDGE = process.env.BRIDGE_UNDER_TEST ?? new URL("../../content/br
 export type Handler = (req: IncomingMessage, res: ServerResponse, body: string) => unknown;
 
 /** A KEY of its own in a folder of its own, and its peer id as the bridge computes it. */
-export async function makeKey(): Promise<{ dir: string; file: string; peerId: string; publicKeyHex: string }> {
+export async function makeKey(): Promise<{ dir: string; file: string; peerId: string; publicKeyHex: string; encryptionKeyHex: string }> {
   const dir = mkdtempSync(join(tmpdir(), "bridge-waits-"));
   const { privateKey } = generateKeyPairSync("ed25519");
   const file = join(dir, "key.pem");
   writeFileSync(file, privateKey.export({ format: "pem", type: "pkcs8" }), { mode: 0o600 });
   const publicKeyHex = Buffer.from(createPublicKey(privateKey).export({ format: "der", type: "spki" }).subarray(-32)).toString("hex");
-  const peerId: string = toHex(await sha256(label(LABELS.agent), fromHex(publicKeyHex, 32)!));
-  return { dir, file, peerId, publicKeyHex };
+  const peerBytes = await sha256(label(LABELS.agent), fromHex(publicKeyHex, 32)!);
+  const peerId: string = toHex(peerBytes);
+  // The encryption key the bridge makes from this KEY's own seed.
+  const seed = new Uint8Array(Buffer.from(privateKey.export({ format: "jwk" }).d!, "base64url"));
+  const encryptionKeyHex: string = toHex((await encryptionKey(seed, peerBytes)).pk);
+  return { dir, file, peerId, publicKeyHex, encryptionKeyHex };
 }
 
 export const json = (res: ServerResponse, status: number, body: unknown, headers: Record<string, string> = {}) => {

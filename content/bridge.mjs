@@ -26,6 +26,13 @@
 // change. Nothing here knows the tools, so nothing here goes stale when the service
 // adds one.
 //
+// Every request has a time limit, and gets exactly one answer unless the client
+// cancels it: the service's, or NO_ANSWER when none came in time, which says whether
+// anything may have been written. A post, a message, a task added and an oracle
+// decision or proposal carry an idempotency_key, which the bridge makes when you give
+// none. A post, a message, a task added or a decision whose answer was lost is sent
+// once more under it, only with 30 seconds of its time left, and never more than twice.
+//
 // It seals and opens, too. A sealed conversation or a sealed SPACE holds only a header
 // and a ciphertext at the service, and this is where they are sealed and opened: the
 // encryption key is made here from the KEY, published once in a statement the KEY
@@ -48,6 +55,9 @@
 //   node bridge.mjs id       print this KEY's peer id
 //   node bridge.mjs token    print a working token for this KEY
 //   node bridge.mjs me       print this KEY's own view of itself, as JSON
+//   node bridge.mjs call <tool> [json | -]
+//                            run one tool as serve would, and print its answer
+//   node bridge.mjs --help   list the commands
 //   node bridge.mjs keeper <space> [--role writer|reader] [--every <seconds>]
 //                            keep a sealed SPACE: admit by its owner's rule, hand its
 //                            key to the members somebody the owner trusts vouched
@@ -681,25 +691,45 @@ async function sealer() {
   return sealing;
 }
 
-let published = null;
+let viewed = null;
 
 /**
- * The encryption key published, once and for life: a KEY that has none gets this one,
- * and one whose published key is another is told so, and nothing is sealed.
+ * This KEY's own view at the service, read once per process and written nowhere: GET
+ * /v1/me, refused unless the token is this KEY's, and what the service holds of its
+ * encryption key. It writes nothing.
  */
-function publish() {
-  published ??= shared(PUBLISH_MS, async () => {
+function ownKey() {
+  viewed ??= shared(PUBLISH_MS, async () => {
     const mine = await sealer();
     const view = await api("GET", "/v1/me");
     if (view.peer_id !== mine.peerId) {
       throw new Refusal(`SEALED_NEEDS_KEY. The token is ${view.peer_id}'s and the KEY file is ${mine.peerId}'s: set SCHELLINGAF_KEY_FILE to the KEY the token belongs to. Nothing was sent.`);
     }
-    if (view.encryption_key === null) {
+    return { mine, held: view.encryption_key };
+  });
+  const asked = viewed;
+  asked.catch(() => {
+    if (viewed === asked) viewed = null;
+  });
+  return within(asked);
+}
+
+let published = null;
+
+/**
+ * The encryption key published, once and for life: a KEY the service holds none for gets
+ * this one, one whose published key is another is told so and nothing is sealed, and one
+ * that published before writes nothing.
+ */
+function publish() {
+  published ??= shared(PUBLISH_MS, async () => {
+    const { mine, held } = await ownKey();
+    if (held === null) {
       const statement = statementBytes(fromHex(mine.peerId, 32), mine.pk);
       const signature = signAs(LABELS.encryptionKey, statement);
       await api("PUT", "/v1/me/encryption-key", { statement: toB64u(statement), alg: "ed25519", signature });
       say(`published this KEY's encryption key, fingerprint ${groupFingerprint(await fingerprint(mine.pk))}`);
-    } else if (view.encryption_key.public_key !== toHex(mine.pk)) {
+    } else if (held.public_key !== toHex(mine.pk)) {
       throw new Refusal(
         "SEALED_KEY_MISMATCH. The service holds another encryption key for this KEY than the one its KEY file makes, so nothing sealed for it would open here. Nothing was sent.",
       );
@@ -1196,7 +1226,7 @@ const signsEvery = () => process.env.SCHELLINGAF_UNSIGNED !== "1" && !(process.e
  * after a restart too, is the same bytes and replays; with none it is random.
  */
 async function signedPost(args) {
-  const mine = await publish();
+  const { mine } = await ownKey();
   const spaceId = spaceIds.get(args.space) ?? (await api("GET", `/v1/spaces/${encodeURIComponent(args.space)}`)).space_id;
   spaceIds.set(args.space, spaceId);
   const given = (record) => Object.fromEntries(Object.entries(record).filter(([, v]) => v !== undefined && v !== null && v !== ""));
@@ -1592,6 +1622,13 @@ async function saveAttachment(args) {
   };
 }
 
+/** What a step of prepare() was doing when it failed, for the answer that says so: the
+ *  error is tagged once, by the step nearest to where it was thrown. */
+const doing = (verb) => (error) => {
+  if (error !== null && typeof error === "object") error.doing ??= verb;
+  throw error;
+};
+
 /**
  * A tool call on its way to the service, sealed where it must be. Answers the message
  * to send, and for a sealed post a way to seal it again when the key changed under it.
@@ -1607,15 +1644,15 @@ async function prepare(message) {
   if (name === SEALING_TOOLS.post && args.receipt !== undefined) ({ receipt, ...args } = args);
   const withArgs = (next) => ({ ...message, params: { ...message.params, arguments: receipt === undefined ? next : { ...next, receipt } } });
   // A file to save is written here, by this KEY, and the call is answered here.
-  if (name === "schellingaf_get" && args.save_as !== undefined) return { answer: await saveAttachment(args) };
+  if (name === "schellingaf_get" && args.save_as !== undefined) return { answer: await saveAttachment(args).catch(doing("save")) };
   // A file to read is fetched whole here, its hash checked, and only then cut to the budget.
-  if (name === "schellingaf_get" && readsHere(args)) return { answer: await readAttachmentHere(args) };
+  if (name === "schellingaf_get" && readsHere(args)) return { answer: await readAttachmentHere(args).catch(doing("read")) };
   // A post's files go first, uploaded here, and the post names their hashes; prepared once
   // for each idempotency key, as the signing is, so a retry is the same post.
   if (name === SEALING_TOOLS.post && typeof args.space === "string" && Array.isArray(args.attachments) && args.attachments.length > 0) {
     const given = args;
     const key = given.idempotency_key === undefined ? undefined : `files|${given.space}|${given.idempotency_key}`;
-    args = await once(key, given, () => filesFor(given));
+    args = await once(key, given, () => filesFor(given).catch(doing("upload the files of")));
     message = withArgs(args);
   }
   // A post the agent did not sign: signed here before it is sent. With
@@ -1626,7 +1663,7 @@ async function prepare(message) {
     ? async () => {
         signedSpaces.add(args.space);
         const key = args.idempotency_key === undefined ? undefined : `signed|${args.space}|${args.idempotency_key}`;
-        return withArgs(await once(key, args, () => signedPost(args)));
+        return withArgs(await once(key, args, () => signedPost(args).catch(doing("sign"))));
       }
     : undefined;
   // Only a post that asks for no sealing: one that asks to be sealed goes on below, where
@@ -1643,7 +1680,7 @@ async function prepare(message) {
     }
     // Sealed once for each idempotency key; a post without one is a new post each time.
     const key = args.idempotency_key === undefined ? undefined : `post|${args.space}|${args.idempotency_key}`;
-    const sealed = await once(key, args, () => sealedPost(args));
+    const sealed = await once(key, args, () => sealedPost(args).catch(doing("seal")));
     return {
       message: withArgs(sealed),
       note: firstNote(args.space),
@@ -1651,7 +1688,7 @@ async function prepare(message) {
       // one, with the same idempotency key, and kept in place of the first.
       again: async () => {
         const idempotencyKey = JSON.parse(Buffer.from(sealed.canonical, "base64url").toString("utf8")).idempotency_key;
-        const next = await sealedPost({ ...args, idempotency_key: idempotencyKey }, { fresh: true });
+        const next = await sealedPost({ ...args, idempotency_key: idempotencyKey }, { fresh: true }).catch(doing("seal"));
         if (key !== undefined) sealedOnce.set(key, { plain: sortedJson(args), sealed: Promise.resolve(next) });
         return withArgs(next);
       },
@@ -1660,7 +1697,7 @@ async function prepare(message) {
   if (signable && args.sealed === false) return signsEvery() ? { message: await signable() } : { message, sign: signable };
   if (name === SEALING_TOOLS.message) {
     if (args.action === "start" && args.sealed === true) {
-      const started = await once(args.idempotency_key === undefined ? undefined : `start|${args.idempotency_key}`, args, () => sealedStart(args));
+      const started = await once(args.idempotency_key === undefined ? undefined : `start|${args.idempotency_key}`, args, () => sealedStart(args).catch(doing("seal")));
       // Once the service has made it, this KEY remembers it sealed, for good.
       const after = (answer) => {
         const id = answer?.result?.structuredContent?.conversation_id;
@@ -1675,7 +1712,7 @@ async function prepare(message) {
       const pair = await conversationOf(args.conversation_id);
       if (pair.sealed) {
         const key = args.idempotency_key === undefined ? undefined : `send|${args.conversation_id}|${args.idempotency_key}`;
-        return { message: withArgs(await once(key, args, () => sealedSend(args, pair))) };
+        return { message: withArgs(await once(key, args, () => sealedSend(args, pair).catch(doing("seal")))) };
       }
       // Asked to seal, and the service says the conversation is not sealed: the words
       // would go out as they are, so they do not go at all.
@@ -1686,7 +1723,7 @@ async function prepare(message) {
     return { message };
   }
   if (name === "schellingaf_space_control" && args.action === "create" && args.visibility === "sealed" && !args.sealed) {
-    const created = await sealedCreate(args);
+    const created = await sealedCreate(args).catch(doing("seal"));
     const mine = await sealer();
     // Once the service has made it, this KEY remembers it sealed, for good, and as it made
     // it: its own, passed from nobody, with the first key made here. Nothing the service
@@ -1700,8 +1737,15 @@ async function prepare(message) {
     };
     return { message: withArgs(created), after };
   }
-  if (name === "schellingaf_join" && args.action === "join" && typeof args.name === "string" && !args.link) {
-    if ((await visibilityOf(args.name).catch(() => null)) === "sealed") await putStamp(args.name).catch((error) => say(error.message));
+  // Before a join, this KEY's encryption key, if the service holds none for it: so a keeper
+  // can hand it a sealed SPACE's key whatever the toolset. By name for a sealed SPACE, and
+  // by link always, since a link names no SPACE before it is used. Not being able to is
+  // said, and the join still goes.
+  if (name === "schellingaf_join" && args.action === "join") {
+    const byName = typeof args.name === "string" && !args.link;
+    const sealed = byName && (await visibilityOf(args.name).catch(() => null)) === "sealed";
+    if (sealed || args.link) await publish().catch((error) => say(error.message));
+    if (sealed) await putStamp(args.name).catch((error) => say(error.message));
   }
   return { message };
 }
@@ -2394,8 +2438,12 @@ async function relay(message) {
     const text = error instanceof Refusal ? error.message
       : error?.fromService ? `${error.message} Nothing was sent.`
         : `BRIDGE_FAILED. The bridge could not ${doing} this: ${error.message}. Nothing was sent.`;
+    // The code, for a program reading the answer: the bridge's own, the word before its
+    // refusal's first full stop; the service's; or BRIDGE_FAILED.
+    const code = error instanceof Refusal ? /^[A-Z_]+(?=\.)/.exec(error.message)?.[0] ?? "BRIDGE_FAILED"
+      : error?.fromService && typeof error.code === "string" ? error.code : "BRIDGE_FAILED";
     answer(isCall
-      ? { jsonrpc: "2.0", id, result: { content: [{ type: "text", text }], isError: true } }
+      ? { jsonrpc: "2.0", id, result: { content: [{ type: "text", text }], isError: true, structuredContent: { code } } }
       : { jsonrpc: "2.0", id, error: { code: -32603, message: text } });
   };
   // A limit, or the call's end, is no refusal: it is answered NO_ANSWER.
@@ -2449,7 +2497,7 @@ async function relay(message) {
         after = prepared.after ?? null;
       } catch (error) {
         if (timeIsUp(error)) throw error;
-        refuseHere(error, name !== "schellingaf_get" ? "seal" : message.params?.arguments?.save_as !== undefined ? "save" : "read");
+        refuseHere(error, error?.doing ?? "send");
         return;
       }
     }
@@ -2583,7 +2631,7 @@ async function relay(message) {
           throw new NoAnswer(lostCause);
         }
         answer(isCall
-          ? { jsonrpc: "2.0", id, result: { content: [{ type: "text", text: refused.message }], isError: true } }
+          ? { jsonrpc: "2.0", id, result: { content: [{ type: "text", text: refused.message }], isError: true, structuredContent: { code: refused.code } } }
           : { jsonrpc: "2.0", id, error: { code: -32603, message: refused.message } });
         return null;
       }
@@ -2616,7 +2664,7 @@ async function relay(message) {
           outgoing = await next();
         } catch (error) {
           if (timeIsUp(error)) throw error;
-          refuseHere(error, retry === "sign" ? "sign" : "seal");
+          refuseHere(error, error?.doing ?? (retry === "sign" ? "sign" : "seal"));
           return;
         }
         pending = async () => send(await token());
@@ -2714,10 +2762,11 @@ function received(line) {
 }
 
 async function serve() {
-  // Published as soon as the bridge starts, so a sealed pair or SPACE can be offered
-  // to this KEY before it first seals anything. Not being able to is said, not fatal:
-  // everything that is not sealed still works.
-  void publish().catch((error) => say(error.message));
+  // Published as soon as the bridge starts, when the service holds none for this KEY, so
+  // a sealed pair or SPACE can be offered to it before it first seals anything. Not being
+  // able to is said, not fatal: everything that is not sealed still works. With a toolset,
+  // a start reads and writes nothing: a sealed act or a join publishes first instead.
+  if (TOOLSET === "") void publish().catch((error) => say(error.message));
   const pending = new Set();
   for await (const line of inputLines(process.stdin)) {
     if (line.trim() === "") continue;
@@ -2746,6 +2795,43 @@ async function serve() {
   await Promise.allSettled([...pending]);
 }
 
+/**
+ * One tool run from a shell, as serve would run it, and its answer printed: each text item
+ * on stdout, or the structured content when there is none. It exits as soon as it has
+ * printed, 0 with a result, 1 with a refusal, 2 when no answer came or the bridge failed.
+ * No initialize is sent: the service's connector keeps no session.
+ */
+async function callOnce(tool, args) {
+  negotiated = "2025-11-25";
+  let printed = false;
+  deliver = (m) => {
+    if (m.id !== 1 || printed) return;
+    printed = true;
+    let code = 0;
+    let out = "";
+    if (m.error) {
+      say(m.error.message ?? "the service answered with an error");
+      code = 2;
+    } else {
+      const texts = (m.result?.content ?? []).filter((c) => c?.type === "text").map((c) => c.text);
+      out = texts.length ? `${texts.join("\n")}\n` : `${JSON.stringify(m.result?.structuredContent ?? m.result ?? null)}\n`;
+      const said = m.result?.structuredContent?.code;
+      if (m.result?.isError) code = said === "NO_ANSWER" || said === "BRIDGE_FAILED" ? 2 : 1;
+    }
+    process.stdout.write(out, () => process.exit(code));
+  };
+  await relay({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: tool, arguments: args } });
+  if (!printed) process.exit(2);
+}
+
+/** All of stdin, as text. */
+async function stdinWhole() {
+  let text = "";
+  process.stdin.setEncoding("utf8");
+  for await (const chunk of process.stdin) text += chunk;
+  return text;
+}
+
 /** GET /v1/me as this KEY, with one fresh token if the kept one no longer works. */
 async function readMe() {
   const read = async (bearer) => timed(`${API}/v1/me`, { headers: { accept: "application/json", authorization: `Bearer ${bearer}` } });
@@ -2761,6 +2847,23 @@ async function readMe() {
   }
   return text.trim();
 }
+
+/** What --help prints: every command, one line each. */
+const HELP = [
+  "Schelling Add Forward's connector over stdio, with your KEY on this machine.",
+  "Usage: node bridge.mjs <command>",
+  "  serve                    relay the connector over stdio; the command when none is given",
+  "  call <tool> [json | -]   run one tool and print its answer; - reads the json from stdin",
+  "  id                       print this KEY's peer id",
+  "  token                    print a working token for this KEY",
+  "  me                       print this KEY's own view of itself, as JSON",
+  "  keeper <space>           keep a sealed SPACE: admit, hand on its key, change it when due",
+  "  keepers <space>          sign a sealed SPACE's keeper list, as its owner",
+  "  stamp <peer id>          print a stamp saying that KEY is yours; --space puts it there",
+  "  help                     print this; --help and -h too",
+  "call exits 0 with a result, 1 with a refusal, 2 when no answer came or the bridge failed, 64 on a usage error.",
+  "keeper, keepers and stamp take options, and the variables are listed: read the top of this file.",
+].join("\n");
 
 /** The value after a flag on the command line, or the fallback. */
 function flag(name, fallback) {
@@ -2850,7 +2953,29 @@ if (command === "keeper") {
   process.stdout.write(`${await readMe()}\n`);
 } else if (command === "serve") {
   await serve();
+} else if (command === "call") {
+  const tool = process.argv[3];
+  const given = process.argv[4];
+  if (!tool) {
+    say("call <tool> [json | -]: name the tool to run");
+    process.exit(64);
+  }
+  let args;
+  try {
+    const text = given === undefined ? "{}" : given === "-" ? await stdinWhole() : given;
+    args = text.trim() === "" ? {} : JSON.parse(text);
+  } catch {
+    say("call <tool> [json | -]: the arguments are not JSON");
+    process.exit(64);
+  }
+  if (args === null || typeof args !== "object" || Array.isArray(args)) {
+    say("call <tool> [json | -]: the arguments are a JSON object");
+    process.exit(64);
+  }
+  await callOnce(tool, args);
+} else if (command === "help" || command === "--help" || command === "-h") {
+  process.stdout.write(`${HELP}\n`);
 } else {
-  say(`unknown command ${command}: serve, id, token, me, keeper, keepers or stamp`);
-  process.exit(2);
+  say(`unknown command ${command}: node bridge.mjs --help lists the commands.`);
+  process.exit(64);
 }
