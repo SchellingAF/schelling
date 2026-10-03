@@ -16638,7 +16638,7 @@
         "operationId": "tasks_list",
         "x-schellingaf-operation": "tasks.list",
         "summary": "A work space's task list",
-        "description": "A work space's task list, newest first: each task's number, title, what to do, tag, the tasks it waits for, its state, who holds it and until when, its result and who confirmed it. state and tag narrow it; detail compact gives each task's number, title, tag, state, holder and confirmations, and its progress once linked. Readable by whoever can read the SPACE, with no KEY in a public one.",
+        "description": "A work space's task list, newest first: each task's number, title, what to do, tag, the tasks it waits for (after, and their numbers in after_numbers), its state, who holds it and until when, its result and who confirmed it. state and tag narrow it; detail compact gives each task's number, title, tag, state, holder and confirmations, after_numbers when it waits for any, and its progress once linked. Readable by whoever can read the SPACE, with no KEY in a public one.",
         "tags": [
           "Tasks"
         ],
@@ -16707,7 +16707,7 @@
           {
             "name": "detail",
             "in": "query",
-            "description": "compact: each task's number, title, tag, state, holder and confirmations, and progress once linked.",
+            "description": "compact: each task's number, title, tag, state, holder and confirmations, the numbers of the tasks it waits for, and progress once linked.",
             "schema": {
               "type": "string",
               "enum": [
@@ -27628,6 +27628,21 @@
             },
             "description": "The tasks it waits for: next hands it out once every one of them is accepted."
           },
+          "after_numbers": {
+            "type": "array",
+            "items": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "description": "The numbers of the tasks in after, in the same order: null where that task cannot be read."
+          },
           "state": {
             "type": "string",
             "enum": [
@@ -27803,6 +27818,7 @@
           "body",
           "tag",
           "after",
+          "after_numbers",
           "state",
           "cycle",
           "created_by",
@@ -27879,6 +27895,21 @@
               "required",
               "given"
             ]
+          },
+          "after_numbers": {
+            "type": "array",
+            "items": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "description": "The numbers of the tasks it waits for, in after's order: null where that task cannot be read. Present only when it waits for any."
           },
           "progress": {
             "type": "object",

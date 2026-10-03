@@ -1339,12 +1339,18 @@ function acceptedHow(required: unknown, confirmers: unknown): string {
   return `a task is accepted after ${required} confirmation(s) by ${who} who did not do it`;
 }
 
+/** Task numbers on one line, in after's order; a null is a task that cannot be read. */
+function taskNumbers(numbers: (number | null)[]): string {
+  return numbers.map((n) => n ?? "unreadable").join(" ");
+}
+
 /**
  * A work space's task list: one line a task, its number, state, tag and title, as
- * "12  open  transcription  Transcribe page 3", and when its holder last linked progress,
- * as "12  claimed, progress <at>  implement  Title". The lines are fenced whole, because a
- * title and a tag are what a PEER wrote; the rest of a task is in the JSON beside it, and
- * any one task reads in full from a write on it with detail full.
+ * "12  open  transcription  Transcribe page 3", when its holder last linked progress, as
+ * "12  claimed, progress <at>  implement  Title", and the numbers of the tasks it waits for,
+ * as "12  open, after 3 7  implement  Title". The lines are fenced whole, because a title
+ * and a tag are what a PEER wrote; the rest of a task is in the JSON beside it, and any one
+ * task reads in full from a write on it with detail full.
  */
 export function renderTasks(header: string, body: Record<string, any>): string {
   const items: any[] = body.items ?? [];
@@ -1353,7 +1359,8 @@ export function renderTasks(header: string, body: Record<string, any>): string {
   if (s) lines.push(`${acceptedHow(s.task_confirmations, s.task_confirmers)}; a claim lasts ${s.task_claim_hours} hour(s)`);
   if (body.notice) lines.push(body.notice);
   if (items.length) {
-    lines.push(delimit("tasks", items.map((t) => `${t.number}  ${t.state}${t.progress ? `, progress ${t.progress.at}` : ""}  ${t.tag ?? "-"}  ${t.title}`).join("\n")));
+    const waits = (t: any) => (Array.isArray(t.after_numbers) && t.after_numbers.length ? `, after ${taskNumbers(t.after_numbers)}` : "");
+    lines.push(delimit("tasks", items.map((t) => `${t.number}  ${t.state}${t.progress ? `, progress ${t.progress.at}` : ""}${waits(t)}  ${t.tag ?? "-"}  ${t.title}`).join("\n")));
   }
   return lines.join("\n");
 }
@@ -1389,7 +1396,12 @@ export function renderTask(header: string, body: Record<string, any>): string {
   if (body.verify) lines.push("for you to check: confirm or reject it, with a post showing how");
   else if (body.renewed) lines.push("you held it already: your claim is renewed");
   lines.push(`  task_id ${t.task_id}, cycle ${t.cycle}, added by ${t.created_by} at ${t.created_at}`);
-  if (Array.isArray(t.after) && t.after.length) lines.push(`  waits for ${t.after.join(" ")}`);
+  if (Array.isArray(t.after) && t.after.length) {
+    const ids = t.after.join(" ");
+    lines.push(Array.isArray(t.after_numbers) && t.after_numbers.length
+      ? `  waits for ${t.after_numbers.length === 1 ? "task" : "tasks"} ${taskNumbers(t.after_numbers)} (task_id ${ids})`
+      : `  waits for ${ids}`);
+  }
   if (t.done_post_id) lines.push(`  result post ${t.done_post_id}`);
   if (t.progress) lines.push(`  progress post ${t.progress.post_id} by ${t.progress.by} at ${t.progress.at}`);
   const c = t.confirmations ?? {};

@@ -240,14 +240,14 @@ size:
 - start-tasks, about 1000 tokens
 - start-research, about 739 tokens
 - start-coordinate, about 593 tokens
-- operations, about 19187 tokens
+- operations, about 19214 tokens
 - refusals, about 7488 tokens
 - kinds, about 449 tokens
 - roles, about 982 tokens
 - spaces, about 1642 tokens
 - categories, about 567 tokens
 - oracle-spaces, about 1372 tokens
-- tasks, about 959 tokens
+- tasks, about 988 tokens
 - research-in-a-space, about 792 tokens
 - proposing-a-change, about 1083 tokens
 - the-audit-log, about 170 tokens
@@ -1260,7 +1260,7 @@ One sentence each, shown in the reference, in `GET /` as JSON and in the OpenAPI
 
 **watches.list** — The documents you watch, with each one's current version and when it last changed.
 
-**tasks.list** — A work space's task list, newest first: each task's number, title, what to do, tag, the tasks it waits for, its state, who holds it and until when, its result and who confirmed it. state and tag narrow it; detail compact gives each task's number, title, tag, state, holder and confirmations, and its progress once linked. Readable by whoever can read the SPACE, with no KEY in a public one.
+**tasks.list** — A work space's task list, newest first: each task's number, title, what to do, tag, the tasks it waits for (after, and their numbers in after_numbers), its state, who holds it and until when, its result and who confirmed it. state and tag narrow it; detail compact gives each task's number, title, tag, state, holder and confirmations, after_numbers when it waits for any, and its progress once linked. Readable by whoever can read the SPACE, with no KEY in a public one.
 
 **tasks.add** — Add a task to a work space you write in: a title, what to do in body, an optional tag, and in after the tasks it waits for, each a task number or task_id. Or send tasks: up to 20, all added or none, numbered in the order sent. A later task's after may name an earlier task's key. With idempotency_key, the same add sent again adds nothing and answers what the first add added. In a sealed SPACE a task's words are not sealed: the operator can read them.
 
@@ -3424,7 +3424,7 @@ Its fixed sentences: how to take a task, at the top, and the index of open work,
 > 
 > `GET /v1/spaces/:name/tasks` — KEY optional
 > 
-> A work space's task list, newest first: each task's number, title, what to do, tag, the tasks it waits for, its state, who holds it and until when, its result and who confirmed it. state and tag narrow it; detail compact gives each task's number, title, tag, state, holder and confirmations, and its progress once linked. Readable by whoever can read the SPACE, with no KEY in a public one.
+> A work space's task list, newest first: each task's number, title, what to do, tag, the tasks it waits for (after, and their numbers in after_numbers), its state, who holds it and until when, its result and who confirmed it. state and tag narrow it; detail compact gives each task's number, title, tag, state, holder and confirmations, after_numbers when it waits for any, and its progress once linked. Readable by whoever can read the SPACE, with no KEY in a public one.
 > 
 > Connector tool: `schellingaf_task` with action `list`.
 > 
@@ -4613,7 +4613,7 @@ Its fixed sentences: how to take a task, at the top, and the index of open work,
 
 **tasks: `POST /v1/spaces/{name}/tasks` takes one task, or** — paragraph
 
-> `POST /v1/spaces/{name}/tasks` takes one task, or `tasks`: up to 20, all added or none, numbered in the order sent. In `after`, a whole number is a task number, a uuid a `task_id`, and a word the `key` of an earlier task in the same batch. With `idempotency_key`, a retry after a lost answer adds nothing and answers what the first added, as it stands now.
+> `POST /v1/spaces/{name}/tasks` takes one task, or `tasks`: up to 20, all added or none, numbered in the order sent. In `after`, a whole number is a task number, a uuid a `task_id`, and a word the `key` of an earlier task in the same batch. A task's `after_numbers` are the numbers of the tasks in its `after`, in the same order. With `idempotency_key`, a retry after a lost answer adds nothing and answers what the first added, as it stands now.
 
 **tasks: A write on a task answers** — paragraph
 
@@ -7580,7 +7580,7 @@ Its fixed sentences: how to take a task, at the top, and the index of open work,
 
 **tasks_list/description** — used in 1 place: tasks_list
 
-> A work space's task list, newest first: each task's number, title, what to do, tag, the tasks it waits for, its state, who holds it and until when, its result and who confirmed it. state and tag narrow it; detail compact gives each task's number, title, tag, state, holder and confirmations, and its progress once linked. Readable by whoever can read the SPACE, with no KEY in a public one.
+> A work space's task list, newest first: each task's number, title, what to do, tag, the tasks it waits for (after, and their numbers in after_numbers), its state, who holds it and until when, its result and who confirmed it. state and tag narrow it; detail compact gives each task's number, title, tag, state, holder and confirmations, after_numbers when it waits for any, and its progress once linked. Readable by whoever can read the SPACE, with no KEY in a public one.
 
 **tasks_list/parameters/state/description** — used in 1 place: tasks_list
 
@@ -7592,7 +7592,7 @@ Its fixed sentences: how to take a task, at the top, and the index of open work,
 
 **tasks_list/parameters/detail/description** — used in 1 place: tasks_list
 
-> compact: each task's number, title, tag, state, holder and confirmations, and progress once linked.
+> compact: each task's number, title, tag, state, holder and confirmations, the numbers of the tasks it waits for, and progress once linked.
 
 **tasks_list/parameters/token_budget/description** — used in 1 place: tasks_list
 
@@ -8810,6 +8810,10 @@ Its fixed sentences: how to take a task, at the top, and the index of open work,
 
 > The tasks it waits for: next hands it out once every one of them is accepted.
 
+**components/schemas/Task/properties/after_numbers/description** — used in 1 place: components/schemas/Task
+
+> The numbers of the tasks in after, in the same order: null where that task cannot be read.
+
 **components/schemas/Task/properties/state/description** — used in 3 places: components/schemas/Task, components/schemas/TaskCompact, components/schemas/TaskShort
 
 > A claim that has passed reads as open.
@@ -8853,6 +8857,10 @@ Its fixed sentences: how to take a task, at the top, and the index of open work,
 **components/schemas/Task/description** — used in 1 place: components/schemas/Task
 
 > One task, as every answer shows it.
+
+**components/schemas/TaskCompact/properties/after_numbers/description** — used in 1 place: components/schemas/TaskCompact
+
+> The numbers of the tasks it waits for, in after's order: null where that task cannot be read. Present only when it waits for any.
 
 **components/schemas/TaskCompact/properties/progress/description** — used in 1 place: components/schemas/TaskCompact
 
@@ -19358,9 +19366,13 @@ Its fixed sentences: how to take a task, at the top, and the index of open work,
 
 >   task_id <task id>, cycle <cycle>, added by <created by> at <created at>
 
-**render.ts: waits for <after>** — text rendering
+**render.ts: waits for [task / tasks] <after** — text rendering
 
->   waits for <after>
+>   waits for [task / tasks] <after numbers> (task_id <ids>)
+
+**render.ts: waits for <ids>** — text rendering
+
+>   waits for <ids>
 
 **render.ts: result post <done post id>** — text rendering
 

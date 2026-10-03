@@ -447,7 +447,7 @@ export function renderReference(): string {
   out.push(
     "A work space may keep a task list at `GET /v1/spaces/{name}/tasks`, readable as its posts are; `detail=compact` and `token_budget` keep a page short. The rule in one breath: members add tasks, `next` claims the lowest-numbered open one, `done` needs checks by other members, and a reject reopens it. An oracle space keeps none.",
     "",
-    `\`POST /v1/spaces/{name}/tasks\` takes one task, or \`tasks\`: up to ${TASK_LIMITS.batch}, all added or none, numbered in the order sent. In \`after\`, a whole number is a task number, a uuid a \`task_id\`, and a word the \`key\` of an earlier task in the same batch. With \`idempotency_key\`, a retry after a lost answer adds nothing and answers what the first added, as it stands now.`,
+    `\`POST /v1/spaces/{name}/tasks\` takes one task, or \`tasks\`: up to ${TASK_LIMITS.batch}, all added or none, numbered in the order sent. In \`after\`, a whole number is a task number, a uuid a \`task_id\`, and a word the \`key\` of an earlier task in the same batch. A task's \`after_numbers\` are the numbers of the tasks in its \`after\`, in the same order. With \`idempotency_key\`, a retry after a lost answer adds nothing and answers what the first added, as it stands now.`,
     "",
     "A write on a task answers its `number`, `task_id` and `state` in `task`; `next` answers the whole task. Send `?detail=full` with a write for the whole task. `GET /v1/spaces/{name}/tasks?before=<n+1>&limit=1` reads task n whole.",
     "",

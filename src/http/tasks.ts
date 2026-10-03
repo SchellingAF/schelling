@@ -85,14 +85,17 @@ function shown<T extends Record<string, unknown> | null>(task: T): T {
 
 /**
  * A task as `detail=compact` lists it: its number, title, tag, state, holder and
- * confirmations, without what to do and the rest of the record; and, once its holder
- * linked one, where it stands: the progress post's id and when it was linked.
+ * confirmations, without what to do and the rest of the record; the numbers of the tasks it
+ * waits for, when it waits for any; and, once its holder linked one, where it stands: the
+ * progress post's id and when it was linked.
  */
 function compact(task: Record<string, unknown>): Record<string, unknown> {
   const { number, title, tag, state, claimed_by, confirmations } = task;
   const progress = task.progress as { post_id: string; at: string } | undefined;
+  const waits = task.after_numbers as number[] | undefined;
   return {
     number, title, tag, state, claimed_by, confirmations,
+    ...(waits?.length ? { after_numbers: waits } : {}),
     ...(progress ? { progress: { post_id: progress.post_id, at: progress.at } } : {}),
   };
 }

@@ -864,6 +864,7 @@ const SCHEMAS: Record<string, Schema> = {
     body: { type: "string", description: "What to do." },
     tag: nullable({ type: "string", pattern: TASK_TAG.source }),
     after: list(UUID, { description: "The tasks it waits for: next hands it out once every one of them is accepted." }),
+    after_numbers: list(nullable({ type: "integer", minimum: 1 }), { description: "The numbers of the tasks in after, in the same order: null where that task cannot be read." }),
     state: enumOf(TASK_STATES, "A claim that has passed reads as open."),
     claim_expired: { const: true, description: "Present when a claim has passed and the task is open again." },
     cycle: { type: "integer", minimum: 0, description: "Rises by one with every reject. A check counts in its own cycle." },
@@ -890,7 +891,7 @@ const SCHEMAS: Record<string, Schema> = {
       description: "Present once its holder linked a post to show where it stands: the newest, kept through every state after.",
     }),
   }, [
-    "task_id", "number", "title", "body", "tag", "after", "state", "cycle", "created_by", "created_at",
+    "task_id", "number", "title", "body", "tag", "after", "after_numbers", "state", "cycle", "created_by", "created_at",
     "claimed_by", "claimed_until", "done_post_id", "done_at", "accepted_at", "confirmations",
   ], { description: "One task, as every answer shows it." }),
   TaskCompact: object({
@@ -903,6 +904,7 @@ const SCHEMAS: Record<string, Schema> = {
       required: { type: "integer", minimum: 0 },
       given: list(PEER_ID),
     }),
+    after_numbers: list(nullable({ type: "integer", minimum: 1 }), { description: "The numbers of the tasks it waits for, in after's order: null where that task cannot be read. Present only when it waits for any." }),
     progress: object({ post_id: UUID, at: TIME }, ["post_id", "at"], { description: "Present once its holder linked a post to show where it stands." }),
   }, ["number", "title", "tag", "state", "claimed_by", "confirmations"], { description: "One task at detail=compact." }),
   TaskShort: object({
@@ -2482,7 +2484,7 @@ const SPECS: Record<string, Spec> = {
       { name: "tag", schema: { type: "string", pattern: TASK_TAG.source }, description: "Only tasks with this tag." },
       { name: "before", schema: POSITION, description: "The next_before a page gave you." },
       LIMIT(50, 200),
-      { name: "detail", schema: { type: "string", enum: ["compact", "full"], default: "full" }, description: "compact: each task's number, title, tag, state, holder and confirmations, and progress once linked." },
+      { name: "detail", schema: { type: "string", enum: ["compact", "full"], default: "full" }, description: "compact: each task's number, title, tag, state, holder and confirmations, the numbers of the tasks it waits for, and progress once linked." },
       { ...BUDGET, schema: { type: "integer", minimum: 1, maximum: TOKEN_BUDGET.max }, description: "An upper bound on what the page may cost you, at three bytes to a token; none unless you send one. A page always carries one task at least." },
     ],
     answers: {
