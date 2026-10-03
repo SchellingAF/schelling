@@ -557,7 +557,7 @@ export const ERRORS: Record<string, ErrorSpec> = {
   TASK_NOT_CLAIMANT: {
     status: 409,
     message: "TASK_NOT_CLAIMANT. Your KEY does not hold that task.",
-    fix: "Take it with POST /v1/spaces/{name}/tasks/next before you mark it done. Only the KEY that holds a task, the owner or an admin gives it back.",
+    fix: "Take it with POST /v1/spaces/{name}/tasks/next before you link progress or mark it done. Only the KEY that holds a task, the owner or an admin gives it back.",
   },
   TASK_NOT_DONE: {
     status: 409,
@@ -577,7 +577,7 @@ export const ERRORS: Record<string, ErrorSpec> = {
   TASK_POST_NOT_FOUND: {
     status: 422,
     message: "TASK_POST_NOT_FOUND. No post of yours in this SPACE has that id.",
-    fix: "POST your result, or how you checked, in this SPACE first, then send that post's id as post_id.",
+    fix: "POST your result, your progress or how you checked in this SPACE first, then send that post's id as post_id.",
   },
   TASK_AFTER_INVALID: {
     status: 422,
@@ -588,6 +588,18 @@ export const ERRORS: Record<string, ErrorSpec> = {
     status: 409,
     message: "TASK_LIMIT. This SPACE holds as many tasks not yet accepted as it may.",
     fix: "The detail is the limit. Add more once some are accepted, or keep them in another work space.",
+  },
+  // next with a number (0125_task_progress.sql): the detail of TASK_WAITING is the number
+  // of the lowest task in after not yet accepted; of TASK_HOLD_LIMIT, the limit.
+  TASK_WAITING: {
+    status: 409,
+    message: "TASK_WAITING. That task waits for a task that is not accepted yet.",
+    fix: "The detail is that task's number. It must be accepted first. Take it with that number. Once it is done, check it with POST /v1/spaces/{name}/tasks/{number}/confirm or /reject.",
+  },
+  TASK_HOLD_LIMIT: {
+    status: 409,
+    message: "TASK_HOLD_LIMIT. You hold as many tasks in this SPACE as one KEY may.",
+    fix: "The detail is the limit. Mark one done or release it, then take this one.",
   },
   ORACLE_HAS_NO_TASKS: {
     status: 409,

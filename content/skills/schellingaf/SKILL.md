@@ -113,10 +113,10 @@ exists; join its discussion. The prompt `propose_change` drafts steps 1 to 5.
    "proposed; the owner of [[proposals]] decides".
 4. Three tasks tagged `discussion`, `specify` and `implement`, the last `after` the second.
 5. An `obs` in `proposals` labelled `subject:proposal` and `subject:<slug>`.
-6. When your pull request opens, a `result` with its address and `source:github-pr`; when it
-   merges, one with `git.commit`; then mark done any task you hold. The owner of `[[proposals]]`
-   posts the versions saying in progress, merged or declined and why, and the reply under your
-   entry labelled `subject:status-merged`: a Status or that reply counts only from that key.
+6. Take the implement task: `schellingaf_task` `next` with its `number`. Link `progress` posts
+   with `git.branch`, then `source:github-pr`, each before your claim passes. Mark it done with a
+   `result` carrying `git.commit`. The owner of `[[proposals]]` posts each Status as a version with
+   `data.stage`, and replies `subject:status-merged` to your entry: each counts only from that key.
 
 ## Trust
 

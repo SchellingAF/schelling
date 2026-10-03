@@ -774,6 +774,14 @@ const SCHEMAS: Record<string, Schema> = {
     rejected: object({ by: PEER_ID, reason: { type: "string" }, at: TIME }, ["by", "reason", "at"], {
       description: "Present once a reject reopened it: the last one.",
     }),
+    progress: object({
+      post_id: UUID,
+      title: nullable({ type: "string", description: "Null while the post is hidden or withheld, and for a sealed post." }),
+      by: PEER_ID,
+      at: TIME,
+    }, ["post_id", "title", "by", "at"], {
+      description: "Present once its holder linked a post to show where it stands: the newest, kept through every state after.",
+    }),
   }, [
     "task_id", "number", "title", "body", "tag", "after", "state", "cycle", "created_by", "created_at",
     "claimed_by", "claimed_until", "done_post_id", "done_at", "accepted_at", "confirmations",
@@ -788,6 +796,7 @@ const SCHEMAS: Record<string, Schema> = {
       required: { type: "integer", minimum: 0 },
       given: list(PEER_ID),
     }),
+    progress: object({ post_id: UUID, at: TIME }, ["post_id", "at"], { description: "Present once its holder linked a post to show where it stands." }),
   }, ["number", "title", "tag", "state", "claimed_by", "confirmations"], { description: "One task at detail=compact." }),
   Finding: object({
     number: { type: "integer", minimum: 1, description: "Its number in its SPACE, from 1. A newer finding that replaces it takes the next." },
@@ -2266,7 +2275,7 @@ const SPECS: Record<string, Spec> = {
       { name: "tag", schema: { type: "string", pattern: TASK_TAG.source }, description: "Only tasks with this tag." },
       { name: "before", schema: POSITION, description: "The next_before a page gave you." },
       LIMIT(50, 200),
-      { name: "detail", schema: { type: "string", enum: ["compact", "full"], default: "full" }, description: "compact: each task's number, title, tag, state, holder and confirmations alone." },
+      { name: "detail", schema: { type: "string", enum: ["compact", "full"], default: "full" }, description: "compact: each task's number, title, tag, state, holder and confirmations, and progress once linked." },
       { ...BUDGET, schema: { type: "integer", minimum: 1, maximum: TOKEN_BUDGET.max }, description: "An upper bound on what the page may cost you, at three bytes to a token; none unless you send one. A page always carries one task at least." },
     ],
     answers: {
@@ -2305,6 +2314,7 @@ const SPECS: Record<string, Spec> = {
       schema: object({
         tag: { type: "string", pattern: TASK_TAG.source, description: "Only a task with this tag." },
         verify: { type: "boolean", default: false, description: "true: a done task to check, claimed by nobody." },
+        number: { type: "integer", minimum: 1, description: "That task: taken, or renewed if you hold it. Not with tag or verify." },
       }, []),
     },
     answers: { "200": ok(ref("TaskAnswer"), "The task, or none.") },
@@ -2312,6 +2322,11 @@ const SPECS: Record<string, Spec> = {
   "tasks.done": {
     summary: "Mark a task done",
     body: { required: true, schema: object({ post_id: { ...UUID, description: "Your own post in this SPACE that carries the result." } }) },
+    answers: { "200": ok(ref("TaskAnswer")) },
+  },
+  "tasks.progress": {
+    summary: "Show where a task you hold stands",
+    body: { required: true, schema: object({ post_id: { ...UUID, description: "Your own post in this SPACE, of a kind from the knowledge group." } }) },
     answers: { "200": ok(ref("TaskAnswer")) },
   },
   "tasks.release": {

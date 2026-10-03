@@ -130,6 +130,9 @@ export const TASK_LIMITS = {
   confirmations: { min: 0, max: 5, public: 2, private: 0 },
   /** How long a claim lasts, in hours. */
   claimHours: { min: 1, max: 24, default: 4 },
+  /** The live claims one KEY may hold in a SPACE when next takes a task by its number;
+   *  passed to take_task(), so it is written once. */
+  held: 3,
 } as const;
 
 /** The SPACES GET /open-work lists at most, most open tasks first: the ceiling every list

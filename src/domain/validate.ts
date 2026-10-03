@@ -704,6 +704,20 @@ export function taskNumber(raw: string | undefined): number {
 }
 
 /**
+ * A task's number, as a body names it to next, or null when it names none. A whole
+ * number from 1, read strictly: never "3" or 2.5. One past the largest a task can have
+ * names no task.
+ */
+export function optionalTaskNumber(value: unknown): number | null {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 1) {
+    throw new ApiError("INVALID_REQUEST", { detail: "number is a whole number from 1" });
+  }
+  if (value > 2147483647) throw new ApiError("TASK_NOT_FOUND");
+  return value;
+}
+
+/**
  * The three task settings a SPACE's settings route takes, each null when it is not sent:
  * how many confirmations accept a done task, who may confirm, and how many hours a claim
  * lasts. A whole number read strictly, never "2" or 2.5: a setting read leniently is one

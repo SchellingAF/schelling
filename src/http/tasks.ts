@@ -2,8 +2,10 @@
 // giving one back, and checking one another member did.
 //
 // migrations/0113_tasks.sql holds every rule: who may, the claim taken in one statement,
-// the checks that accept a task and the reject that reopens it. These routes read the
-// fields, spend the caller's write allowance as a post does, and call those functions.
+// the checks that accept a task and the reject that reopens it. 0125_task_progress.sql
+// adds next by a task's number and progress, a post its holder links to show where the
+// task stands. These routes read the fields, spend the caller's write allowance as a
+// post does, and call those functions.
 // The list reads through readTx as the caller, so row security answers who sees a task
 // exactly as it answers who sees the SPACE's posts. Every answer shows a task through
 // task_item(), one projection for the list and the writes alike.
@@ -22,6 +24,7 @@ import {
   optionalBoolean,
   optionalTaskAfter,
   optionalTaskBody,
+  optionalTaskNumber,
   optionalTaskTag,
   optionalUuid,
   readBody,
@@ -29,7 +32,7 @@ import {
   taskNumber,
   taskReason,
 } from "../domain/validate.ts";
-import { TASK_LIMITS, TASK_STATES } from "../surface/vocabulary.ts";
+import { KIND_GROUPS, TASK_LIMITS, TASK_STATES } from "../surface/vocabulary.ts";
 import { boundedNumber, budgetCut, cursor, itemCost, optionalTokenBudget, readDenied } from "./postview.ts";
 import { LIMITS, spend } from "./ratelimit.ts";
 import { optionalBearer, requireBearer, type Env } from "./app.ts";
@@ -80,11 +83,16 @@ function shown<T extends Record<string, unknown> | null>(task: T): T {
 
 /**
  * A task as `detail=compact` lists it: its number, title, tag, state, holder and
- * confirmations, without what to do and the rest of the record.
+ * confirmations, without what to do and the rest of the record; and, once its holder
+ * linked one, where it stands: the progress post's id and when it was linked.
  */
 function compact(task: Record<string, unknown>): Record<string, unknown> {
   const { number, title, tag, state, claimed_by, confirmations } = task;
-  return { number, title, tag, state, claimed_by, confirmations };
+  const progress = task.progress as { post_id: string; at: string } | undefined;
+  return {
+    number, title, tag, state, claimed_by, confirmations,
+    ...(progress ? { progress: { post_id: progress.post_id, at: progress.at } } : {}),
+  };
 }
 
 /** A function's answer, as the route sends it: the task as every read shows it. */
@@ -210,8 +218,30 @@ export function mountTasks(app: Hono<Env>, db: Db): void {
     const input = await readBody(c);
     const tag = optionalTaskTag(input.tag);
     const verify = optionalBoolean(input.verify, "verify") ?? false;
+    // With a number, that task (0125_task_progress.sql): a tag or a check would narrow
+    // nothing it could still choose.
+    const number = optionalTaskNumber(input.number);
+    if (number !== null) {
+      if (tag !== null || verify) throw new ApiError("INVALID_REQUEST", { detail: "number takes no tag and no verify: send number alone" });
+      return c.json(await write(c, me.hex, (sql) => sql<{ out: Answer }[]>`
+        select schellingaf.take_task(${c.req.param("name")}, ${me.peerId}, ${number}, ${TASK_LIMITS.held}) as out`));
+    }
     return c.json(await write(c, me.hex, (sql) => sql<{ out: Answer }[]>`
       select schellingaf.next_task(${c.req.param("name")}, ${me.peerId}, ${tag}, ${verify}) as out`));
+  });
+
+  // A post of the holder's own, linked to show where the task stands; it renews the claim.
+  app.post("/v1/spaces/:name/tasks/:number/progress", async (c) => {
+    const me = keyOf(c);
+    const input = await readBody(c);
+    const post = optionalUuid(input.post_id, "post_id");
+    if (post === null) {
+      throw new ApiError("INVALID_REQUEST", { detail: "post_id is the id of your own post in this SPACE that shows where the task stands" });
+    }
+    const number = taskNumber(c.req.param("number"));
+    return c.json(await write(c, me.hex, (sql) => sql<{ out: Answer }[]>`
+      select schellingaf.task_progress(${c.req.param("name")}, ${me.peerId}, ${number}, ${post}::uuid,
+                                       ${[...KIND_GROUPS.knowledge]}::text[], ${TASK_LIMITS.held}) as out`));
   });
 
   app.post("/v1/spaces/:name/tasks/:number/done", async (c) => {

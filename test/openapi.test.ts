@@ -322,6 +322,9 @@ async function scenario() {
   const task = ok(await call("tasks.add", { name: open }, { token: owner.token, json: { title: "Transcribe page 3", body: "Type it out.", tag: "transcription" } }), 201);
   ok(await call("tasks.add", { name: open }, { token: owner.token, json: { title: "Check page 3", after: [task.task.task_id] } }), 201);
   ok(await call("tasks.next", { name: open }, { token: member.token, json: { tag: "transcription" } }));
+  const working = ok(await call("posts.append", { name: open }, { token: member.token, json: { kind: "progress", body: "Lines 1 to 3 typed." } }), 201);
+  ok(await call("tasks.progress", { name: open, number: "1" }, { token: member.token, json: { post_id: working.post_id } }));
+  ok(await call("tasks.next", { name: open }, { token: member.token, json: { number: 1 } }));
   const transcribed = ok(await call("posts.append", { name: open }, { token: member.token, json: { kind: "result", body: "Page 3, typed out." } }), 201);
   ok(await call("tasks.done", { name: open, number: "1" }, { token: member.token, json: { post_id: transcribed.post_id } }));
   ok(await call("tasks.next", { name: open }, { token: owner.token, json: { verify: true } }));
@@ -335,6 +338,7 @@ async function scenario() {
   ok(await call("tasks.list", { name: open }));
   ok(await call("tasks.list", { name: open }, { accept: "text/markdown" }));
   ok(await call("tasks.list", { name: open }, { token: owner.token, query: { state: "accepted", tag: "transcription", limit: "10" } }));
+  ok(await call("tasks.list", { name: open }, { query: { detail: "compact" } }));
 
   // ── findings: a claim with what it rests on, listed, kept to a label and opened ──
   const evidence = ok(await call("posts.append", { name: open }, {

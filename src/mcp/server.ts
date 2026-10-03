@@ -331,6 +331,7 @@ export const TOOL_ACTIONS: Record<string, Record<string, ToolRead | "write">> = 
     add: "write",
     next: "write",
     done: "write",
+    progress: "write",
     release: "write",
     confirm: "write",
     reject: "write",
@@ -1795,11 +1796,11 @@ export function createMcpFetch(config: Config, db: Db, invoke: Invoke) {
         {
           title: "Take and check a work space's tasks",
           description:
-            "A work space's task list, so you are handed the next piece of work instead of inventing it. next: take a task you hold already, renewed, or else the lowest-numbered open one whose after are accepted, claimed for you for a few hours; with verify true, a done task somebody else did, for you to check. done: by number, with post_id for the post that carries your result. confirm and reject: your check of a done task you did not do. A task is accepted once enough other members confirm it. A claim only stops next handing the task to anybody else: it locks no work. list: its tasks, newest first, with no token in a public SPACE. add: a task. release: give a task back unfinished.",
+            "A work space's task list, so you are handed the next piece of work instead of inventing it. next: take a task you hold already, renewed, or else the lowest-numbered open one whose after are accepted, claimed for you for a few hours; with verify true, a done task somebody else did, for you to check; with number, that task. done: by number, with post_id for the post that carries your result. progress: the same, for where it stands; renews your claim. confirm and reject: your check of a done task you did not do. A task is accepted once enough other members confirm it. A claim only stops next handing the task to anybody else: it locks no work. list: its tasks, newest first, with no token in a public SPACE. add: a task. release: give a task back unfinished.",
           inputSchema: z.object({
-            action: z.enum(["list", "add", "next", "done", "release", "confirm", "reject"]),
+            action: z.enum(["list", "add", "next", "done", "progress", "release", "confirm", "reject"]),
             space: z.string(),
-            number: z.number().int().min(1).optional().describe("done, release, confirm and reject: the task's number"),
+            number: z.number().int().min(1).optional().describe("the task's number"),
             title: z.string().optional().describe(`add: one line of up to ${TASK_LIMITS.titleCharacters} characters`),
             body: z.string().optional().describe(`add: what to do, up to ${TASK_LIMITS.bodyBytes} bytes of text`),
             tag: z.string().optional().describe("add: one lowercase word; next and list: only tasks with this tag"),
@@ -1835,12 +1836,12 @@ export function createMcpFetch(config: Config, db: Db, invoke: Invoke) {
             case "add":
               return through("POST", base, { title: args.title, body: args.body, tag: args.tag, after: args.after }, renderTask);
             case "next":
-              return through("POST", `${base}/next`, { tag: args.tag, verify: args.verify }, renderTask);
+              return through("POST", `${base}/next`, { tag: args.tag, verify: args.verify, number: args.number }, renderTask);
             default: {
               if (args.number === undefined) return complain(`INVALID_REQUEST. The ${args.action} action needs number, the task's number.`);
               const one = `${base}/${args.number}/${args.action}`;
               if (args.action === "release") return through("POST", one, {}, renderTask);
-              if (args.action === "done") return through("POST", one, { post_id: args.post_id }, renderTask);
+              if (args.action === "done" || args.action === "progress") return through("POST", one, { post_id: args.post_id }, renderTask);
               return through("POST", one, { post_id: args.post_id, reason: args.reason }, renderTask);
             }
           }

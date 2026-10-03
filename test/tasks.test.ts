@@ -11,8 +11,9 @@ import { useService, app, db, fixture, config, call, agent, connector, type Agen
 import { PORT, SUPERUSER, MIGRATE_PASSWORD } from "./bootstrap.ts";
 import { publicKey } from "./helpers.ts";
 import { createApp } from "../src/http/app.ts";
-import { TASK_LIMITS } from "../src/surface/vocabulary.ts";
+import { KIND_GROUPS, TASK_LIMITS } from "../src/surface/vocabulary.ts";
 import { OPERATIONS } from "../src/surface/operations.ts";
+import { ERRORS } from "../src/db/errors.ts";
 
 before(() => {
   process.env.PUBLIC_SPACE_MIN_KEY_AGE_HOURS = "0";
@@ -52,6 +53,15 @@ async function next(who: Agent, name: string, fields: Record<string, unknown> = 
 async function result(who: Agent, name: string, body = "Page 3, transcribed.") {
   const out = await call("POST", `/v1/spaces/${name}/posts`, who.token, {
     kind: "result", body, fingerprints: [{ scheme: "task.reference", value: `${name}/${n++}` }],
+  });
+  assert.equal(out.status, 201, JSON.stringify(out.body));
+  return out.body.post_id as string;
+}
+
+/** A post of `who`'s own in the SPACE, of the kind given: a progress post with a branch, unless said. */
+async function posted(who: Agent, name: string, kind = "progress", title = "On branch many-tasks") {
+  const out = await call("POST", `/v1/spaces/${name}/posts`, who.token, {
+    kind, title, body: "Work in flight.", fingerprints: [{ scheme: "git.branch", value: `many-tasks-${n++}` }],
   });
   assert.equal(out.status, 201, JSON.stringify(out.body));
   return out.body.post_id as string;
@@ -1063,6 +1073,322 @@ describe("the list", () => {
   });
 });
 
+/** How many hours a task's claim still runs, as an answer gives it. */
+const hoursLeft = (task: Record<string, any>) => (Date.parse(task.claimed_until) - Date.now()) / 3_600_000;
+
+/** A scene a route cannot make: the claim on a task runs one minute more. */
+async function nearlyPassed(name: string, number: number) {
+  await fixture.owner`
+    update schellingaf.tasks t set claimed_until = now() + interval '1 minute'
+      from schellingaf.spaces s
+     where s.space_id = t.space_id and s.name = ${name} and t.number = ${number}`;
+}
+
+/** A refusal, by its status, code and detail when one is given. */
+function refused(out: { status: number; body: any }, status: number, code: string, detail?: string | RegExp) {
+  assert.equal(out.status, status, JSON.stringify(out.body));
+  assert.equal(out.body.error.code, code, JSON.stringify(out.body));
+  if (typeof detail === "string") assert.equal(out.body.error.detail, detail);
+  else if (detail) assert.match(out.body.error.detail, detail);
+}
+
+describe("progress", () => {
+  test("the holder links its own post: the task shows it in full and compact, and the claim is renewed", async () => {
+    const { owner, a, name } = await crew();
+    await added(owner, name);
+    await next(a, name);
+    assert.equal("progress" in (await list(null, name)).body.items[0], false, "none until one is linked");
+    await nearlyPassed(name, 1);
+    const post = await posted(a, name);
+    const out = await act(a, name, 1, "progress", { post_id: post });
+    assert.equal(out.status, 200, JSON.stringify(out.body));
+    assert.equal(out.body.changed, true);
+    assert.equal(out.body.task.state, "claimed");
+    const linked = out.body.task.progress;
+    assert.deepEqual(Object.keys(linked).sort(), ["at", "by", "post_id", "title"]);
+    assert.equal(linked.post_id, post);
+    assert.equal(linked.title, "On branch many-tasks");
+    assert.equal(linked.by, a.peerId);
+    assert.ok(hoursLeft(out.body.task) > 3.9, "the claim runs from now again");
+
+    // The same post again is a retry: no renewal, and the time it was linked stays.
+    await nearlyPassed(name, 1);
+    const again = await act(a, name, 1, "progress", { post_id: post });
+    assert.equal(again.status, 200, JSON.stringify(again.body));
+    assert.equal(again.body.changed, false);
+    assert.deepEqual(again.body.task.progress, linked);
+    assert.ok(hoursLeft(again.body.task) < 0.1, "the same post again renewed the claim");
+
+    assert.deepEqual((await list(null, name)).body.items[0].progress, linked);
+    const compact = (await list(null, name, "?detail=compact")).body.items[0];
+    assert.deepEqual(compact.progress, { post_id: post, at: linked.at });
+    assert.ok(JSON.stringify({ progress: compact.progress }).length < 110, "compact progress stays short");
+  });
+
+  test("a hidden progress post keeps its place on the task, without its title", async () => {
+    const { owner, a, name } = await crew();
+    await added(owner, name);
+    await next(a, name);
+    const post = await posted(a, name);
+    await act(a, name, 1, "progress", { post_id: post });
+    const hidden = await call("PUT", `/v1/posts/${post}/hidden`, owner.token);
+    assert.equal(hidden.status, 200, JSON.stringify(hidden.body));
+    const shown = (await list(null, name)).body.items[0].progress;
+    assert.equal(shown.post_id, post);
+    assert.equal(shown.title, null);
+    assert.equal(shown.by, a.peerId);
+  });
+
+  test("only the KEY that holds a task links progress, with its own post in the SPACE of a kind from the knowledge group", async () => {
+    const { owner, a, b, c, reader, name } = await crew();
+    const elsewhere = await workSpace(owner);
+    await grant(owner, elsewhere, a, "writer");
+    for (let i = 1; i <= 3; i++) await added(owner, name, { title: `Page ${i}` });
+    const mine = await posted(a, name);
+
+    refused(await act(a, name, 1, "progress", { post_id: mine }), 409, "TASK_NOT_CLAIMANT");
+    refused(await act(a, name, 9, "progress", { post_id: mine }), 404, "TASK_NOT_FOUND");
+    refused(await act(a, name, 1, "progress", {}), 400, "INVALID_REQUEST", /post_id/);
+    assert.equal((await next(a, name, { number: 1 })).status, 200);
+    refused(await act(b, name, 1, "progress", { post_id: await posted(b, name) }), 409, "TASK_NOT_OPEN", "claimed");
+    refused(await act(reader, name, 1, "progress", { post_id: mine }), 403, "TASK_DENIED");
+    const stranger = await agent();
+    refused(await act(stranger, name, 1, "progress", { post_id: mine }), 403, "TASK_DENIED");
+    for (const post of [await posted(b, name), await posted(a, elsewhere), "01890000-0000-7000-8000-000000000000"]) {
+      refused(await act(a, name, 1, "progress", { post_id: post }), 422, "TASK_POST_NOT_FOUND");
+    }
+    refused(await act(a, name, 1, "progress", { post_id: await posted(a, name, "summary") }), 400, "INVALID_REQUEST",
+      `post_id: a post of kind ${KIND_GROUPS.knowledge.join(", ")}`);
+
+    // A claim that passed still counts for its KEY while nobody took the task.
+    await expire(name, 1);
+    const late = await act(a, name, 1, "progress", { post_id: mine });
+    assert.equal(late.status, 200, JSON.stringify(late.body));
+    assert.equal(late.body.task.state, "claimed");
+    assert.equal(late.body.task.claim_expired, undefined);
+    // Once another KEY took it, it is that KEY's; once that claim passed, it is nobody's.
+    await expire(name, 1);
+    assert.equal((await next(b, name, { number: 1 })).status, 200);
+    refused(await act(a, name, 1, "progress", { post_id: await posted(a, name) }), 409, "TASK_NOT_OPEN", "claimed");
+    await expire(name, 1);
+    refused(await act(a, name, 1, "progress", { post_id: mine }), 409, "TASK_NOT_CLAIMANT");
+
+    // Done, then accepted.
+    await next(a, name, { number: 2 });
+    await act(a, name, 2, "done", { post_id: await result(a, name) });
+    refused(await act(a, name, 2, "progress", { post_id: mine }), 409, "TASK_NOT_OPEN", "done");
+    await act(b, name, 2, "confirm");
+    await act(c, name, 2, "confirm");
+    refused(await act(a, name, 2, "progress", { post_id: mine }), 409, "TASK_NOT_OPEN", "accepted");
+
+    // A KEY blocked from posting links nothing.
+    await next(a, name, { number: 3 });
+    assert.equal((await call("PUT", `/v1/spaces/${name}/blocks/${a.peerId}`, owner.token)).status, 200);
+    refused(await act(a, name, 3, "progress", { post_id: mine }), 403, "WRITE_BLOCKED");
+  });
+
+  test("progress is kept through every state after, and nothing clears it", async () => {
+    const { owner, a, b, c, name } = await crew();
+    await added(owner, name);
+    assert.equal((await next(a, name, { number: 1 })).status, 200);
+    const linked = (await act(a, name, 1, "progress", { post_id: await posted(a, name) })).body.task.progress;
+    assert.equal(linked.by, a.peerId);
+
+    const renewed = await next(a, name);
+    assert.equal(renewed.body.renewed, true, "next by its holder renews the claim");
+    assert.deepEqual(renewed.body.task.progress, linked);
+
+    await expire(name, 1);
+    const lapsed = (await list(null, name)).body.items[0];
+    assert.equal(lapsed.state, "open");
+    assert.equal(lapsed.claim_expired, true);
+    assert.deepEqual(lapsed.progress, linked, "the claim passed: progress stays, dated");
+
+    const taken = await next(b, name, { number: 1 });
+    assert.equal(taken.body.task.claimed_by, b.peerId);
+    assert.equal(taken.body.renewed, false);
+    assert.deepEqual(taken.body.task.progress, linked, "by the earlier holder, until the new one links");
+
+    const released = await act(b, name, 1, "release");
+    assert.equal(released.body.task.state, "open");
+    assert.deepEqual(released.body.task.progress, linked, "released: where work was left");
+
+    await next(b, name, { number: 1 });
+    const own = (await act(b, name, 1, "progress", { post_id: await posted(b, name) })).body.task.progress;
+    assert.equal(own.by, b.peerId);
+    const resultPost = await result(b, name);
+    const done = await act(b, name, 1, "done", { post_id: resultPost });
+    assert.equal(done.body.task.state, "done");
+    assert.equal(done.body.task.done_post_id, resultPost);
+    assert.deepEqual(done.body.task.progress, own, "kept beside the result");
+
+    const rejected = await act(c, name, 1, "reject", { reason: "Line 4 is missing." });
+    assert.equal(rejected.body.task.state, "open");
+    assert.equal(rejected.body.task.cycle, 1);
+    assert.deepEqual(rejected.body.task.progress, own);
+    assert.ok(Date.parse(own.at) < Date.parse(rejected.body.task.rejected.at), "progress comes before the reject");
+
+    await next(a, name, { number: 1 });
+    await act(a, name, 1, "done", { post_id: await result(a, name) });
+    await act(b, name, 1, "confirm");
+    const accepted = await act(c, name, 1, "confirm");
+    assert.equal(accepted.body.task.state, "accepted");
+    assert.deepEqual(accepted.body.task.progress, own);
+
+    await assert.rejects(
+      fixture.owner`
+        update schellingaf.tasks t set progress_post_id = null, progress_at = null
+          from schellingaf.spaces s where s.space_id = t.space_id and s.name = ${name}`,
+      /IMMUTABLE_RECORD/,
+    );
+    await assert.rejects(
+      fixture.owner`
+        update schellingaf.tasks t set progress_at = null
+          from schellingaf.spaces s where s.space_id = t.space_id and s.name = ${name}`,
+      /tasks_progress_shape|IMMUTABLE_RECORD/,
+    );
+  });
+});
+
+describe("next with a number", () => {
+  test("takes that task, or renews it for its holder, even while the caller holds another", async () => {
+    const { owner, a, b, name } = await crew();
+    for (let i = 1; i <= 3; i++) await added(owner, name, { title: `Page ${i}` });
+    const two = await next(a, name, { number: 2 });
+    assert.equal(two.status, 200, JSON.stringify(two.body));
+    assert.equal(two.body.task.number, 2);
+    assert.equal(two.body.task.claimed_by, a.peerId);
+    assert.equal(two.body.renewed, false);
+    assert.equal(two.body.verify, false);
+    const one = await next(a, name, { number: 1, verify: false });
+    assert.equal(one.body.task.number, 1, "taken while the caller holds task 2");
+    assert.equal(one.body.renewed, false);
+
+    await nearlyPassed(name, 2);
+    const again = await next(a, name, { number: 2 });
+    assert.equal(again.body.renewed, true);
+    assert.ok(hoursLeft(again.body.task) > 3.9, "the claim runs from now again");
+    await expire(name, 2);
+    const back = await next(a, name, { number: 2 });
+    assert.equal(back.body.renewed, true, "a claim that passed is still its holder's while nobody took it");
+    assert.equal(back.body.task.state, "claimed");
+
+    await expire(name, 1);
+    const took = await next(b, name, { number: 1 });
+    assert.equal(took.body.task.claimed_by, b.peerId, "another KEY's claim that passed is taken");
+    assert.equal(took.body.renewed, false);
+    // Without a number, next is as it was: the lowest task the caller holds, renewed.
+    const plain = await next(a, name);
+    assert.equal(plain.body.task.number, 2);
+    assert.equal(plain.body.renewed, true);
+  });
+
+  test("a missing, done, accepted, held or waiting task is refused, and so is a number that is not one", async () => {
+    const { owner, a, b, c, name } = await crew();
+    const first = await added(owner, name, { title: "Find the key table" });
+    const second = await added(owner, name, { title: "Find the dates" });
+    await added(owner, name, { title: "Decode page 1", after: [second.task_id, first.task_id] });
+    refused(await next(a, name, { number: 9 }), 404, "TASK_NOT_FOUND");
+    refused(await next(a, name, { number: 2147483648 }), 404, "TASK_NOT_FOUND");
+    refused(await next(a, name, { number: 3 }), 409, "TASK_WAITING", "1");
+
+    assert.equal((await next(b, name, { number: 1 })).status, 200);
+    refused(await next(a, name, { number: 1 }), 409, "TASK_NOT_OPEN", "claimed");
+    await act(b, name, 1, "done", { post_id: await result(b, name) });
+    refused(await next(a, name, { number: 1 }), 409, "TASK_NOT_OPEN", "done");
+    await act(a, name, 1, "confirm");
+    await act(c, name, 1, "confirm");
+    refused(await next(a, name, { number: 1 }), 409, "TASK_NOT_OPEN", "accepted");
+    refused(await next(a, name, { number: 3 }), 409, "TASK_WAITING", "2");
+
+    refused(await next(a, name, { number: 2, tag: "dates" }), 400, "INVALID_REQUEST", "number takes no tag and no verify: send number alone");
+    refused(await next(a, name, { number: 2, verify: true }), 400, "INVALID_REQUEST", "number takes no tag and no verify: send number alone");
+    for (const number of ["2", 2.5, 0, -1, true]) {
+      refused(await next(a, name, { number }), 400, "INVALID_REQUEST", "number is a whole number from 1");
+    }
+    assert.equal((await list(null, name, "?state=open")).body.items.length, 2, "nothing refused took a task");
+  });
+
+  test("one KEY that asks for every open task by number holds three, and the rest stay open to others", async () => {
+    // The privacy and abuse check's attempt 26: without a cap, one writer could take every
+    // open task and renew each before its claim passed.
+    const { owner, a, b, name } = await crew();
+    for (let i = 1; i <= 8; i++) await added(owner, name, { title: `Page ${i}` });
+    const answers = [];
+    for (let i = 1; i <= 8; i++) answers.push(await next(a, name, { number: i }));
+    assert.deepEqual(answers.map((r) => r.status), [200, 200, 200, 409, 409, 409, 409, 409]);
+    for (const r of answers.slice(3)) refused(r, 409, "TASK_HOLD_LIMIT", String(TASK_LIMITS.held));
+    assert.equal(TASK_LIMITS.held, 3);
+    assert.equal((await next(b, name)).body.task.number, 4, "the rest stay open to others");
+
+    // A renewal is never refused.
+    const renewed = await next(a, name, { number: 2 });
+    assert.equal(renewed.status, 200, JSON.stringify(renewed.body));
+    assert.equal(renewed.body.renewed, true);
+    // A place comes back when a task is done, given back, or its claim passes.
+    await act(a, name, 1, "done", { post_id: await result(a, name) });
+    assert.equal((await next(a, name, { number: 5 })).status, 200, "one done");
+    refused(await next(a, name, { number: 6 }), 409, "TASK_HOLD_LIMIT", "3");
+    await act(a, name, 2, "release");
+    assert.equal((await next(a, name, { number: 6 })).status, 200, "one given back");
+    refused(await next(a, name, { number: 7 }), 409, "TASK_HOLD_LIMIT", "3");
+    await expire(name, 3);
+    assert.equal((await next(a, name, { number: 7 })).status, 200, "one passed");
+  });
+
+  test("bringing back a claim of its own that passed counts as a take, by number and by progress, so waiting never beats the cap", async () => {
+    // The review's S-1: three taken, let pass, three more taken, then the first three
+    // brought back would make six live claims, and nine once those passed too.
+    const { owner, a, name } = await crew();
+    for (let i = 1; i <= 6; i++) await added(owner, name, { title: `Page ${i}` });
+    for (const i of [1, 2, 3]) assert.equal((await next(a, name, { number: i })).status, 200);
+    for (const i of [1, 2, 3]) await expire(name, i);
+    for (const i of [4, 5, 6]) assert.equal((await next(a, name, { number: i })).status, 200, `task ${i}: the three before passed`);
+    refused(await next(a, name, { number: 1 }), 409, "TASK_HOLD_LIMIT", "3");
+    refused(await act(a, name, 2, "progress", { post_id: await posted(a, name) }), 409, "TASK_HOLD_LIMIT", "3");
+    const rows = await fixture.owner<{ live: number }[]>`
+      select count(*)::int as live from schellingaf.tasks t join schellingaf.spaces s on s.space_id = t.space_id
+       where s.name = ${name} and t.state = 'claimed' and t.claimed_until > now()`;
+    assert.equal(rows[0]!.live, 3, "still three live claims");
+    // A live claim's renewal is never refused, by number or by progress.
+    assert.equal((await next(a, name, { number: 4 })).body.renewed, true);
+    assert.equal((await act(a, name, 5, "progress", { post_id: await posted(a, name) })).status, 200);
+    // With a place free, a passed claim of its own comes back.
+    await act(a, name, 6, "release");
+    const back = await next(a, name, { number: 1 });
+    assert.equal(back.status, 200, JSON.stringify(back.body));
+    assert.equal(back.body.renewed, true);
+    await act(a, name, 5, "release");
+    assert.equal((await act(a, name, 2, "progress", { post_id: await posted(a, name) })).status, 200);
+  });
+
+  test("the recipe for a proposal its decider's own keys build: no confirmation, done is accepted, and the implement task is taken by number in order", async () => {
+    const owner = await agent();
+    const name = await workSpace(owner);
+    const settings = await call("PATCH", `/v1/spaces/${name}`, owner.token, { task_confirmations: 0 });
+    assert.equal(settings.status, 200, JSON.stringify(settings.body));
+    const discussion = await added(owner, name, { title: "Discuss", tag: "discussion" });
+    const specify = await added(owner, name, { title: "Specify", tag: "specify", after: [discussion.task_id] });
+    await added(owner, name, { title: "Implement", tag: "implement", after: [specify.task_id] });
+    refused(await next(owner, name, { number: 3 }), 409, "TASK_WAITING", "2");
+    for (const number of [1, 2]) {
+      assert.equal((await next(owner, name)).body.task.number, number);
+      const done = await act(owner, name, number, "done", { post_id: await result(owner, name) });
+      assert.equal(done.body.task.state, "accepted", "done is accepted where no confirmation is asked");
+    }
+    const build = await next(owner, name, { number: 3 });
+    assert.equal(build.status, 200, JSON.stringify(build.body));
+    assert.equal(build.body.task.claimed_by, owner.peerId);
+    const branch = await posted(owner, name);
+    assert.equal((await act(owner, name, 3, "progress", { post_id: branch })).status, 200);
+    const pr = await posted(owner, name, "progress", "Pull request open");
+    assert.equal((await act(owner, name, 3, "progress", { post_id: pr })).body.task.progress.title, "Pull request open");
+    const merged = await act(owner, name, 3, "done", { post_id: await result(owner, name, "Merged.") });
+    assert.equal(merged.body.task.state, "accepted");
+    assert.equal(merged.body.task.progress.post_id, pr);
+  });
+});
+
 describe("the connector", () => {
   async function tool(args: Record<string, unknown>, who?: Agent | null) {
     const { message } = await connector("tools/call", { name: "schellingaf_task", arguments: args }, who?.token);
@@ -1111,6 +1437,31 @@ describe("the connector", () => {
     const noKey = await tool({ action: "next", space: name });
     assert.equal(noKey.isError, true);
     assert.match(noKey.text, /TOKEN_MISSING/);
+  });
+
+  test("next with number and progress, through schellingaf_task: the same routes and the same refusals", async () => {
+    const { owner, a, b, name } = await crew();
+    const first = await added(owner, name);
+    await added(owner, name, { title: "Build it", tag: "implement", after: [first.task_id] });
+    const waiting = await tool({ action: "next", space: name, number: 2 }, a);
+    assert.equal(waiting.isError, true);
+    assert.match(waiting.text, /^TASK_WAITING\. /);
+    const taken = await tool({ action: "next", space: name, number: 1 }, a);
+    assert.equal(taken.isError, false, taken.text);
+    assert.match(taken.text, new RegExp(`task 1 in "[^"]+": claimed by ${a.peerId} until `));
+    const post = await posted(a, name);
+    const linked = await tool({ action: "progress", space: name, number: 1, post_id: post }, a);
+    assert.equal(linked.isError, false, linked.text);
+    assert.match(linked.text, new RegExp(`progress post ${post} by ${a.peerId} at `));
+    assert.match(linked.text, /<<<peer progress title>>>\nOn branch many-tasks\n<<<end progress title>>>/);
+    assert.equal(linked.json.task.progress.post_id, post);
+    const other = await tool({ action: "progress", space: name, number: 1, post_id: await posted(b, name) }, b);
+    assert.equal(other.isError, true);
+    assert.match(other.text, /^TASK_NOT_OPEN\. /);
+    const unnumbered = await tool({ action: "progress", space: name, post_id: post }, a);
+    assert.match(unnumbered.text, /^INVALID_REQUEST\. The progress action needs number/);
+    const listed = await tool({ action: "list", space: name });
+    assert.match(listed.text, /<<<peer tasks>>>\n2  open  implement  Build it\n1  claimed, progress \S+  -  Transcribe page 3\n<<<end tasks>>>/);
   });
 
   test("schellingaf_space_control update changes the three task settings", async () => {
@@ -1216,6 +1567,14 @@ describe("the plans inside the task functions", () => {
       assert.ok(!scans.some((n) => n["Node Type"] === "Seq Scan"), `next walked every task:\n${shown}`);
       assert.ok(scans.some((n) => n["Index Name"] === (verify ? "tasks_done_idx" : "tasks_waiting_idx")), shown);
     }
+    // next with a number counts the caller's live claims the same way. Task 2994 is open.
+    const plans = await plansInside((tx) => tx`select schellingaf.take_task(${name}, ${key}, 2994, ${TASK_LIMITS.held})`);
+    const counted = plans.find((p) => /FROM tasks h/.test(p["Query Text"]));
+    assert.ok(counted, `auto_explain logged no statement of take_task:\n${plans.map((p) => p["Query Text"]).join("\n--\n")}`);
+    const scans = nodesOf(counted.Plan).filter((n) => n["Relation Name"] === "tasks" || /^tasks_/.test(n["Index Name"] ?? ""));
+    const shown = JSON.stringify(scans, ["Node Type", "Alias", "Index Name", "Index Cond", "Filter", "Actual Rows", "Actual Loops"], 1);
+    assert.ok(!scans.some((n) => n["Node Type"] === "Seq Scan"), `take_task counted every task:\n${shown}`);
+    assert.ok(scans.some((n) => n["Index Name"] === "tasks_waiting_idx"), shown);
   });
 });
 
@@ -1256,11 +1615,26 @@ describe("the documents", () => {
 
   test("every task call that answers with a task somebody else wrote declares its words a PEER's", () => {
     // tasks.add answers with the caller's own words. Every other call that answers with a
-    // task may hand back one another KEY added, or another KEY's reason for a reject.
-    for (const name of ["tasks.next", "tasks.done", "tasks.release", "tasks.confirm", "tasks.reject"]) {
+    // task may hand back one another KEY added, another KEY's reason for a reject, or the
+    // title of another KEY's progress post.
+    for (const name of ["tasks.next", "tasks.done", "tasks.progress", "tasks.release", "tasks.confirm", "tasks.reject"]) {
       const op = OPERATIONS.find((o) => o.name === name)!;
-      assert.deepEqual(op.peerAuthored, ["task.title", "task.body", "task.tag", "task.rejected.reason"], name);
+      assert.deepEqual(op.peerAuthored, ["task.title", "task.body", "task.tag", "task.rejected.reason", "task.progress.title"], name);
     }
+    assert.ok(OPERATIONS.find((o) => o.name === "tasks.list")!.peerAuthored!.includes("items[].progress.title"));
+  });
+
+  test("next with a number and progress are stated where an agent reads them, with their refusals", async () => {
+    for (const code of ["TASK_WAITING", "TASK_HOLD_LIMIT"]) assert.equal(ERRORS[code]!.status, 409, code);
+    const text = (await (await app.request("/reference?section=tasks")).text()).replace(/\s+/g, " ");
+    assert.match(text, /With `number`, `next` takes that task if it is open and its `after` are all accepted, or renews it if you hold it\./);
+    assert.ok(text.includes(`already holds ${TASK_LIMITS.held} live claims in the SPACE is refused another that way: \`TASK_HOLD_LIMIT\`. Bringing back a claim of its own that passed, with \`next\` or \`progress\`, counts as taking one.`), text);
+    assert.match(text, /`POST \/v1\/spaces\/\{name\}\/tasks\/\{number\}\/progress` with its `post_id`/);
+    assert.match(text, /The same post again changes nothing\./);
+    const whole = await (await app.request("/reference")).text();
+    for (const code of ["TASK_WAITING", "TASK_HOLD_LIMIT"]) assert.ok(whole.includes(code), `the reference does not name ${code}`);
+    const nextOp = OPERATIONS.find((o) => o.name === "tasks.next")!;
+    assert.ok(nextOp.describe.includes(`holds ${TASK_LIMITS.held} live claims`), nextOp.describe);
   });
 
   test("the description of claimed_by says who holds it, and a claim that passed names nobody", async () => {
