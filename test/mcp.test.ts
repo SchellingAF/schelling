@@ -7,7 +7,7 @@ import { test, before, describe } from "node:test";
 import assert from "node:assert/strict";
 import { createHash, sign } from "node:crypto";
 import { TEST_CATEGORY } from "./helpers.ts";
-import { useService, app, fixture, agent, call, connector, send, type Agent } from "./lib/service.ts";
+import { useService, app, fixture, agent, call, connector, send, requestsDuring, type Agent } from "./lib/service.ts";
 import { COMPATIBILITY_TOOLS, MCP_TOOLS, NO_DRY_RUN_HERE, serverIdentity } from "../src/mcp/server.ts";
 import { ERRORS } from "../src/db/errors.ts";
 import { buildPostObject, signaturePreimageOf } from "../src/domain/objects.ts";
@@ -827,12 +827,23 @@ describe("task and posts, over the connector", () => {
   test("a POST naming by fingerprint a task its author still holds, sent with no task, says the task is still theirs; nobody else is told", async () => {
     const a = await agent();
     const { name, number } = await heldTask(a, "hint", { visibility: "public", join_policy: "open" });
-    const progress = await tool("schellingaf_post", { space: name, kind: "obs", title: "Half done", body: "Halfway.", fingerprints: reference(name, number) }, a.token);
+    // The task list's reads while a call runs: the hint's one read, or none.
+    const taskReads = (during: () => Promise<unknown>) => requestsDuring((method, path) => method === "GET" && path === `/v1/spaces/${name}/tasks`, during);
+    let progress!: Awaited<ReturnType<typeof tool>>;
+    assert.equal(await taskReads(async () => {
+      progress = await tool("schellingaf_post", { space: name, kind: "obs", title: "Half done", body: "Halfway.", fingerprints: reference(name, number) }, a.token);
+    }), 1, "the hint reads the task once");
     assert.equal(progress.isError, false, progress.text);
     assert.ok(progress.text.split("\n").includes(STILL_YOURS(number)), progress.text);
-    // A KEY that does not hold it, posting in the same open SPACE: no line.
+    // With no fingerprint naming a task, nothing is read.
+    assert.equal(await taskReads(() => tool("schellingaf_post", { space: name, kind: "obs", title: "Aside", body: "Aside." }, a.token)), 0);
+    // A KEY that does not hold it, posting in the same open SPACE: no line. Whether it holds
+    // the task is known only from the task, so its one read is made, and says nothing.
     const b = await agent();
-    const other = await tool("schellingaf_post", { space: name, kind: "obs", title: "Seen it", body: "Me too.", fingerprints: reference(name, number) }, b.token);
+    let other!: Awaited<ReturnType<typeof tool>>;
+    assert.equal(await taskReads(async () => {
+      other = await tool("schellingaf_post", { space: name, kind: "obs", title: "Seen it", body: "Me too.", fingerprints: reference(name, number) }, b.token);
+    }), 1);
     assert.equal(other.isError, false, other.text);
     assert.ok(!other.text.includes("is still yours"), other.text);
     // Once the task is done, no line either.

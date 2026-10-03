@@ -205,8 +205,18 @@ describe("the connector's text says what its JSON says", () => {
     assert.ok(lines.some((line) => line.startsWith("posts[1]: not told in their mailbox") && line.includes(OTHER)), lines.join("\n"));
     assert.ok(lines.includes("posts[1]: marked no_role: your KEY holds no role in this SPACE"), lines.join("\n"));
     assert.ok(lines.includes("posts[2] (c): p3 at seq 6, signed by your KEY"), lines.join("\n"));
-    assert.ok(lines.includes("Readers pay about 30 tokens for its headline, 60 for its snippet and 300 to open it."), lines.join("\n"));
+    assert.ok(lines.includes("Readers pay about 30 tokens for their headlines, 60 for their snippets and 300 to open them all."), lines.join("\n"));
+    assert.ok(renderBatchReceipt("reading as x", body, true).includes("\nReaders pay about 30 tokens for their headlines, 60 for their summaries and 300 to open them all."));
     assert.equal(lines.at(-1), "the service signed a receipt for each: see posts[].receipt");
+  });
+
+  test("a sealed batch's readers pay for their headlines and to open them all, through their own software", () => {
+    const cost = { headline: 10, snippet: 0, full: 100 };
+    const text = renderBatchReceipt("reading as x", {
+      space: "sealed-space", space_id: "s", replayed: false,
+      posts: [{ post_id: "p1", seq: "4", signed: false, sealed: true, read_cost: cost }, { post_id: "p2", seq: "5", signed: false, sealed: true, read_cost: cost }],
+    }, true);
+    assert.ok(text.split("\n").includes("Readers pay about 20 tokens for their headlines and 200 to open them all, through their own software."), text);
   });
 
   test("a batch replayed says nothing new was written, and where each task stands", () => {

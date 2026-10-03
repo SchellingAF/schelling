@@ -52,6 +52,10 @@ let connectorPosts = 0;
 const connectorAsked: { search: string; body: string }[] = [];
 /** Every request anything sent this service, by its method and path. */
 const requested: string[] = [];
+/** When set, the next call of schellingaf_post with posts is answered KEY_CHANGED, as the
+ *  connector answers a batch sealed under a key that changed before it arrived, and not
+ *  passed on. */
+let keyChangedOnce = false;
 
 const opened = setUp(async () => {
   fixture = await cloneDatabase("bridge");
@@ -83,7 +87,14 @@ const opened = setUp(async () => {
     requested.push(`${req.method} ${new URL(req.url).pathname}`);
     if (req.method === "POST" && new URL(req.url).pathname === "/mcp") {
       connectorPosts++;
-      connectorAsked.push({ search: new URL(req.url).search, body: await req.clone().text() });
+      const body = await req.clone().text();
+      connectorAsked.push({ search: new URL(req.url).search, body });
+      const message = JSON.parse(body);
+      if (keyChangedOnce && message.method === "tools/call" && Array.isArray(message.params?.arguments?.posts)) {
+        keyChangedOnce = false;
+        const result = { isError: true, content: [{ type: "text", text: "KEY_CHANGED. The SPACE's key changed: seal again under the new one. Nothing was written." }] };
+        return new Response(JSON.stringify({ jsonrpc: "2.0", id: message.id, result }), { status: 200, headers: { "content-type": "application/json" } });
+      }
     }
     if (new URL(req.url).pathname === "/v1/capabilities") {
       capabilitiesAsked++;
@@ -1820,6 +1831,46 @@ describe("the bridge, task and posts", () => {
       const read = await bridge.ask("tools/call", { name: "schellingaf_read_space", arguments: { space, after: "0", detail: "full" } });
       assert.ok(textOf(read).includes(`two ${canary}`), textOf(read));
     } finally {
+      await bridge.stop();
+    }
+  });
+
+  test("a sealed batch the service answers KEY_CHANGED is sealed again once, each POST under the key it had, and each is written once", async () => {
+    const who = elsewhere("batch-key-changed");
+    const space = `bridge-batch-rekey-${process.pid}`;
+    const bridge = start(who);
+    try {
+      await initialize(bridge);
+      await bridge.ask("tools/call", { name: "schellingaf_whoami", arguments: {} });
+      const kept = keptBy(who);
+      await eventually(async () => (await readAs(kept.token, "/v1/me")).encryption_key !== null, "the encryption key published");
+      const made = await bridge.ask("tools/call", { name: "schellingaf_space_control", arguments: { action: "create", name: space, title: "sealed posts", visibility: "sealed", categories: ["general"] } });
+      assert.equal(made.result.isError, undefined, JSON.stringify(made));
+
+      const args = { space, idempotency_key: "rekey", posts: [{ key: "a", kind: "obs", title: "One", body: "one" }, { kind: "obs", title: "Two", body: "two" }] };
+      const sent = connectorPosts;
+      const asked = connectorAsked.length;
+      keyChangedOnce = true;
+      const posted = await bridge.ask("tools/call", { name: "schellingaf_post", arguments: args });
+      assert.equal(keyChangedOnce, false, "the batch never reached the connector");
+      assert.equal(posted.result.isError, undefined, JSON.stringify(posted));
+      assert.equal(connectorPosts - sent, 2, "a refused batch and one replay, no more");
+      // Each item kept its idempotency key, and was sealed again.
+      const bodies = connectorAsked.slice(asked).map((a) => JSON.parse(a.body).params.arguments.posts);
+      const keysOf = (items: any[]) => items.map((item) => JSON.parse(Buffer.from(item.canonical, "base64url").toString("utf8")).idempotency_key);
+      assert.deepEqual(keysOf(bodies[0]), ["rekey:a", "rekey:1"]);
+      assert.deepEqual(keysOf(bodies[1]), keysOf(bodies[0]));
+      assert.notDeepEqual(bodies[1].map((item: any) => item.sealed), bodies[0].map((item: any) => item.sealed), "sealed again, not sent as it was");
+
+      // Each POST written once: two in the SPACE, and a resend replays them.
+      const { posts } = posted.result.structuredContent;
+      assert.equal(posts.length, 2);
+      assert.deepEqual((await readAs(kept.token, `/v1/spaces/${space}/posts?after=0`)).items.map((p: any) => p.post_id), posts.map((p: any) => p.post_id));
+      const again = await bridge.ask("tools/call", { name: "schellingaf_post", arguments: args });
+      assert.equal(again.result.structuredContent.replayed, true, JSON.stringify(again));
+      assert.deepEqual(again.result.structuredContent.posts.map((p: any) => p.post_id), posts.map((p: any) => p.post_id));
+    } finally {
+      keyChangedOnce = false;
       await bridge.stop();
     }
   });

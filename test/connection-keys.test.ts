@@ -16,7 +16,7 @@ import { mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { useService, app, db, fixture, call, send, read, agent, passkey, passkeyAssertion, HOST, type Agent, type Passkey } from "./lib/service.ts";
+import { useService, app, db, fixture, call, send, read, agent, passkey, passkeyAssertion, requestsDuring, HOST, type Agent, type Passkey } from "./lib/service.ts";
 import { filedTool } from "./helpers.ts";
 import { sweep } from "./lib/sweep.ts";
 import { canonicalBytes } from "../src/domain/jcs.ts";
@@ -735,8 +735,13 @@ describe("a post through an app connection with a key", () => {
     assert.equal((await call("POST", `/v1/spaces/${work.name}/tasks`, person.token, { title: "Check it", body: "Say what failed." })).status, 201);
     const number = (await call("POST", `/v1/spaces/${work.name}/tasks/next`, person.token, {})).body.task.number as number;
     const reference = [{ scheme: "task.reference", value: `${work.name}/${number}` }];
-    // No task: it lands, and at /mcp/connect nothing is said of the task, which it never drops.
-    const progress = await postThrough(connection.appToken, { space: work.name, kind: "obs", title: "Halfway", body: "Half.", fingerprints: reference });
+    // No task: it lands, and at /mcp/connect nothing is said of the task, which it never
+    // drops, and the task list is not read.
+    let progress!: Awaited<ReturnType<typeof postThrough>>;
+    const reads = await requestsDuring((method, path) => method === "GET" && path === `/v1/spaces/${work.name}/tasks`, async () => {
+      progress = await postThrough(connection.appToken, { space: work.name, kind: "obs", title: "Halfway", body: "Half.", fingerprints: reference });
+    });
+    assert.equal(reads, 0, "a hint was read at /mcp/connect");
     assert.equal(progress.result.isError, undefined, JSON.stringify(progress.body));
     assert.ok(!progress.result.content[0].text.includes("is still yours"), progress.result.content[0].text);
     const out = await postThrough(connection.appToken, { space: work.name, kind: "result", title: "Done", body: "Done.", fingerprints: reference, task: { number } });

@@ -203,6 +203,27 @@ async function publishEncryptionKey(a: Agent, on: App): Promise<EncryptionKey> {
   return enc;
 }
 
+/**
+ * How many requests the app answered while `during` ran whose method and path match, its
+ * own in-process ones included: how a test sees a tool make a read, or make none.
+ */
+export async function requestsDuring(match: (method: string, path: string) => boolean, during: () => Promise<unknown>): Promise<number> {
+  const original = app.request;
+  let seen = 0;
+  app.request = ((input: string | Request | URL, init?: RequestInit, ...rest: unknown[]) => {
+    const method = init?.method ?? (input instanceof Request ? input.method : "GET");
+    const url = input instanceof Request ? input.url : String(input);
+    if (match(method.toUpperCase(), new URL(url, "http://localhost").pathname)) seen++;
+    return (original as (...args: unknown[]) => unknown).call(app, input, init, ...rest);
+  }) as typeof app.request;
+  try {
+    await during();
+  } finally {
+    app.request = original;
+  }
+  return seen;
+}
+
 let rpcId = 0;
 
 /**

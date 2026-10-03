@@ -1319,10 +1319,6 @@ async function saveAttachment(args) {
   };
 }
 
-/**
- * A tool call on its way to the service, sealed where it must be. Answers the message
- * to send, and for a sealed post a way to seal it again when the key changed under it.
- */
 /** A post id's shape: a reply_to of any other names the key of an earlier POST of the call. */
 const UUID_SHAPE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -1399,6 +1395,10 @@ async function batchPrepared(args, message, withArgs) {
   return { message, sign: signAll };
 }
 
+/**
+ * A tool call on its way to the service, sealed where it must be. Answers the message
+ * to send, and for a sealed post a way to seal it again when the key changed under it.
+ */
 async function prepare(message) {
   const name = message.params?.name;
   let args = message.params?.arguments;

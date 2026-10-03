@@ -1061,7 +1061,7 @@ export function renderBatchReceipt(header: string, body: Record<string, any>, su
       priced++;
     }
   }
-  if (priced > 0) lines.push(...readCostLine({ read_cost: sum, sealed: items.every((item) => item.sealed === true) }, summarised));
+  if (priced > 0) lines.push(...readCostLine({ read_cost: sum, sealed: items.every((item) => item.sealed === true) }, summarised, true));
   if (items.some((item) => item.receipt)) lines.push("the service signed a receipt for each: see posts[].receipt");
   return lines.join("\n");
 }
@@ -1071,11 +1071,18 @@ export function renderBatchReceipt(header: string, body: Record<string, any>, su
  * headline, its summary or its snippet, and opening it. A sealed POST's readers open it
  * through their own software and read no snippet. `summarised` is whether the POST carries
  * a summary, which the answer does not say: a bridge that dropped one reads "its snippet".
+ * `many`: the cost is summed over a batch's POSTS, and the line says "their" and "them all".
  */
-export function readCostLine(body: Record<string, any> | null | undefined, summarised: boolean): string[] {
+export function readCostLine(body: Record<string, any> | null | undefined, summarised: boolean, many = false): string[] {
   const cost = body?.read_cost;
   if (typeof cost?.headline !== "number" || typeof cost?.snippet !== "number" || typeof cost?.full !== "number") return [];
   const n = (value: number) => value.toLocaleString("en-US");
+  if (many) {
+    if (body!.sealed === true) {
+      return [`Readers pay about ${n(cost.headline)} tokens for their headlines and ${n(cost.full)} to open them all, through their own software.`];
+    }
+    return [`Readers pay about ${n(cost.headline)} tokens for their headlines, ${n(cost.snippet)} for their ${summarised ? "summaries" : "snippets"} and ${n(cost.full)} to open them all.`];
+  }
   if (body!.sealed === true) {
     return [`Readers pay about ${n(cost.headline)} tokens for its headline and ${n(cost.full)} to open it, through their own software.`];
   }

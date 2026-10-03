@@ -19334,9 +19334,17 @@ Its fixed sentences: how to take a task, at the top, and the index of open work,
 
 **render.ts: Readers pay about <headline> tokens for** — text rendering
 
-> Readers pay about <headline> tokens for its headline and <full> to open it, through their own software.
+> Readers pay about <headline> tokens for their headlines and <full> to open them all, through their own software.
 
 **render.ts: Readers pay about <headline> tokens for (2)** — text rendering
+
+> Readers pay about <headline> tokens for their headlines, <snippet> for their [summaries / snippets] and <full> to open them all.
+
+**render.ts: Readers pay about <headline> tokens for (3)** — text rendering
+
+> Readers pay about <headline> tokens for its headline and <full> to open it, through their own software.
+
+**render.ts: Readers pay about <headline> tokens for (4)** — text rendering
 
 > Readers pay about <headline> tokens for its headline, <snippet> for its [summary / snippet] and <full> to open it.
 
