@@ -3387,6 +3387,14 @@ function keyOf(name, args) {
   return typeof args.idempotency_key === "string" ? { keyed: true, key: args.idempotency_key } : { keyed: false };
 }
 
+/** Where a tool's error made here carries its code, for a program reading the answer: in
+ *  the result's _meta, never its structuredContent, which a client checks against the tool's
+ *  output schema even on an error, and then shows the agent its own failure instead. */
+const ANSWER_META = "schellingaf.com/answer";
+
+/** A tool's error made here: its words, and what a program reads, under ANSWER_META. */
+const toolError = (text, about) => ({ content: [{ type: "text", text }], isError: true, _meta: { [ANSWER_META]: about } });
+
 /**
  * The answer to a request no answer came for, in place of the service's: never a success.
  * A tools/call is answered as a tool's error that says whether anything may have been
@@ -3408,11 +3416,7 @@ function noAnswerFor(message, cause, { sent, key = null, given = true, twice = n
   return {
     jsonrpc: "2.0",
     id: message.id,
-    result: {
-      content: [{ type: "text", text: words }],
-      structuredContent: { code: "NO_ANSWER", written, cause, ...(sent && key !== null ? { idempotency_key: key } : {}) },
-      isError: true,
-    },
+    result: toolError(words, { code: "NO_ANSWER", written, cause, ...(sent && key !== null ? { idempotency_key: key } : {}) }),
   };
 }
 
@@ -3494,7 +3498,7 @@ async function relay(message) {
     const code = error instanceof Refusal ? /^[A-Z_]+(?=\.)/.exec(error.message)?.[0] ?? "BRIDGE_FAILED"
       : error?.fromService && typeof error.code === "string" ? error.code : "BRIDGE_FAILED";
     answer(isCall
-      ? { jsonrpc: "2.0", id, result: { content: [{ type: "text", text }], isError: true, structuredContent: { code } } }
+      ? { jsonrpc: "2.0", id, result: toolError(text, { code }) }
       : { jsonrpc: "2.0", id, error: { code: -32603, message: text } });
   };
   // A limit, or the call's end, is no refusal: it is answered NO_ANSWER.
@@ -3614,6 +3618,12 @@ async function relay(message) {
             envelope = m;
             continue;
           }
+          // A message that names no request, such as a gateway's own JSON, is no message
+          // for the id: a 502, 503 or 504 that holds only such is an answer lost.
+          if (m?.id === undefined) {
+            say("dropped a message from the service that names no request it answers");
+            continue;
+          }
           if (m?.id !== id) {
             other = true;
             say(`dropped an answer the service sent for another request than ${JSON.stringify(id)}`);
@@ -3682,31 +3692,48 @@ async function relay(message) {
           throw new NoAnswer(lostCause);
         }
         answer(isCall
-          ? { jsonrpc: "2.0", id, result: { content: [{ type: "text", text: refused.message }], isError: true, structuredContent: { code: refused.code } } }
+          ? { jsonrpc: "2.0", id, result: toolError(refused.message, { code: refused.code }) }
           : { jsonrpc: "2.0", id, error: { code: -32603, message: refused.message } });
         return null;
       }
+      // A gateway's 502, 503 or 504 holds no message for the id, whatever else it holds.
+      if ([502, 503, 504].includes(res.status)) throw new NoAnswer(`The service answered ${res.status} and no result.`, { lost: true });
       if (other) throw new NoAnswer("The service answered another request instead.");
-      if (res.status >= 400) throw new NoAnswer(`The service answered ${res.status} and no result.`, { lost: [502, 503, 504].includes(res.status) });
+      if (res.status >= 400) throw new NoAnswer(`The service answered ${res.status} and no result.`);
       if ((res.headers.get("content-type") ?? "").includes("text/event-stream")) throw new NoAnswer("The service's answer ended before its result.", { lost: true });
       throw new NoAnswer("The service sent an empty answer.");
     };
 
-    let pending = async () => send(await token());
+    // The next send: with a token got first, fresh when the service refused the last one,
+    // or, for a lost answer's resend, under the bearer the lost send went with.
+    let fresh = false;
+    let resend = false;
     for (;;) {
+      let given = bearer;
+      if (!resend) {
+        try {
+          given = await token({ fresh });
+        } catch (error) {
+          // No token is no lost answer, and nothing is sent without one. Every send this
+          // call made before it was refused, which is why a token is got again: so nothing
+          // this call sent was written.
+          sent = false;
+          throw error;
+        }
+      }
       let retry;
       try {
-        retry = await answered(await pending());
+        retry = await answered(await send(given));
       } catch (error) {
         if (!(error instanceof NoAnswer && error.lost && resends && sends < 2 && ctx.deadline - Date.now() >= RESEND_LEFT_MS)) throw error;
         lostCause = error.message;
-        pending = () => send(bearer);
+        resend = true;
         continue;
       }
       if (retry === null) return;
-      if (retry === "token") {
+      fresh = retry === "token";
+      if (fresh) {
         retriedToken = true;
-        pending = async () => send(await token({ fresh: true }));
       } else {
         const next = retry === "sign" ? resign : again;
         if (retry === "sign") resign = null;
@@ -3718,7 +3745,6 @@ async function relay(message) {
           refuseHere(error, error?.doing ?? (retry === "sign" ? "sign" : "seal"));
           return;
         }
-        pending = async () => send(await token());
       }
     }
   };
@@ -3790,14 +3816,16 @@ function received(line) {
   } catch {
     const named = idOf(line);
     if (named === undefined) say(`ignored a line of ${Buffer.byteLength(line)} bytes that is not JSON and names no id to answer`);
+    else if (inFlight.has(named)) say(`ignored a line of ${Buffer.byteLength(line)} bytes that is not JSON and names an id still in flight`);
     else emit({ jsonrpc: "2.0", id: named, error: { code: -32700, message: "Parse error: this line is not JSON, so it was not sent." } });
     return null;
   }
+  // An id still in flight keeps its one answer: the line or element naming it again gets none.
   if (Array.isArray(message)) {
     for (const each of message) {
-      if (isRequestMessage(each)) {
-        emit({ jsonrpc: "2.0", id: each.id, error: { code: -32600, message: "Batch requests are not supported: send each message on its own line." } });
-      }
+      if (!isRequestMessage(each)) continue;
+      if (inFlight.has(each.id)) say("ignored a batch element whose id is still in flight");
+      else emit({ jsonrpc: "2.0", id: each.id, error: { code: -32600, message: "Batch requests are not supported: send each message on its own line." } });
     }
     return null;
   }
@@ -3866,7 +3894,7 @@ async function callOnce(tool, args) {
     } else {
       const texts = (m.result?.content ?? []).filter((c) => c?.type === "text").map((c) => c.text);
       out = texts.length ? `${texts.join("\n")}\n` : `${JSON.stringify(m.result?.structuredContent ?? m.result ?? null)}\n`;
-      const said = m.result?.structuredContent?.code;
+      const said = m.result?._meta?.[ANSWER_META]?.code;
       if (m.result?.isError) code = said === "NO_ANSWER" || said === "BRIDGE_FAILED" ? 2 : 1;
     }
     process.stdout.write(out, () => process.exit(code));

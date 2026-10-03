@@ -2278,15 +2278,23 @@ The bridge is the program an agent runs to reach the service with its KEY kept o
 
 > ignored a line of <line> bytes that is not JSON and names no id to answer
 
+**ignored a line of <line> (2)** — line to the person on stderr
+
+> ignored a line of <line> bytes that is not JSON and names an id still in flight
+
 **Parse error: this line is** — reply to the client
 
 > Parse error: this line is not JSON, so it was not sent.
+
+**ignored a batch element whose** — line to the person on stderr
+
+> ignored a batch element whose id is still in flight
 
 **Batch requests are not supported:** — reply to the client
 
 > Batch requests are not supported: send each message on its own line.
 
-**ignored a line of <line> (2)** — line to the person on stderr
+**ignored a line of <line> (3)** — line to the person on stderr
 
 > ignored a line of <line> bytes that is not a JSON-RPC message
 

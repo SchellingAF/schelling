@@ -6,7 +6,10 @@
 import { test, describe, after } from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { readFileSync, rmSync } from "node:fs";
+import { readFileSync, rmSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { Client } from "@modelcontextprotocol/client";
+import { StdioClientTransport } from "@modelcontextprotocol/client/stdio";
 import { BRIDGE as BRIDGE_SOURCE, everyLine, fakeService, healthy, json, makeKey, runBridge, until, type Fake, type Handler, type Running } from "./lib/fake-service.ts";
 
 /** Every time limit at a fiftieth: a call's 90 seconds is 1.8 here. */
@@ -23,6 +26,12 @@ after(() => {
     assert.ok(
       typeof m.method === "string" || typeof m.id === "string" || typeof m.id === "number",
       `a line on stdout names no request a client can match: ${line}`,
+    );
+    // A client checks structuredContent against the tool's output schema even on an error,
+    // and shows the agent that failure in place of the error's words.
+    assert.ok(
+      !(m.result?.isError === true && m.result.structuredContent !== undefined),
+      `an error on stdout carries structuredContent: ${line}`,
     );
   }
 });
@@ -56,6 +65,9 @@ async function against(routes: Record<string, Handler>, env: Record<string, stri
 
 const posted = (fake: Fake) => fake.seen.filter((s) => s.startsWith("POST /mcp tools/call")).length;
 const textOf = (m: any) => m?.result?.content?.[0]?.text ?? m?.error?.message;
+/** What a program reads of a tool's error the bridge made: its code, and for NO_ANSWER what
+ *  is known, in the result's _meta. */
+const about = (m: any) => m?.result?._meta?.["schellingaf.com/answer"];
 
 describe("one answer for each request id", () => {
   test("a line that is not JSON but names its id is answered for that id, and nothing is written with id null", async () => {
@@ -154,7 +166,7 @@ describe("one answer for each request id", () => {
         const answer = await bridge.answerTo(6);
         assert.ok(answer, `no answer; stderr: ${bridge.err()}`);
         assert.equal(answer.result.isError, true);
-        assert.deepEqual(answer.result.structuredContent, { code: "NO_ANSWER", written: "UNKNOWN", cause });
+        assert.deepEqual(about(answer), { code: "NO_ANSWER", written: "UNKNOWN", cause });
         assert.ok(textOf(answer).startsWith(`NO_ANSWER. ${cause} `), textOf(answer));
         await new Promise((ok) => setTimeout(ok, 100));
         assert.equal(bridge.out.filter((m) => m.id === 6).length, 1, "answered more than once");
@@ -246,6 +258,26 @@ describe("one answer for each request id", () => {
       await done();
     }
   });
+
+  test("a line that is not JSON, or a batch element, naming an id still in flight is said on stderr; the id keeps its one answer", async () => {
+    const { bridge, fake, done } = await against({
+      "POST /mcp": (_req, res, body) => setTimeout(() => json(res, 200, { jsonrpc: "2.0", id: JSON.parse(body).id, result: { content: [{ type: "text", text: "the first" }] } }), 300),
+    });
+    try {
+      bridge.send(call(5, READ));
+      assert.ok(await until(() => posted(fake) === 1, 2000), "the call was not sent");
+      bridge.send('{"jsonrpc":"2.0","id":5,"method":"tools/call",');
+      bridge.send([{ jsonrpc: "2.0", id: 5, method: "ping" }, { jsonrpc: "2.0", id: 6, method: "ping" }]);
+      assert.equal(textOf(await bridge.answerTo(5)), "the first");
+      assert.equal((await bridge.answerTo(6))?.error?.code, -32600);
+      await new Promise((ok) => setTimeout(ok, 200));
+      assert.equal(bridge.out.filter((m) => m.id === 5).length, 1, "id 5 was answered more than once");
+      assert.match(bridge.err(), /ignored a line of \d+ bytes that is not JSON and names an id still in flight/);
+      assert.match(bridge.err(), /ignored a batch element whose id is still in flight/);
+    } finally {
+      await done();
+    }
+  });
 });
 
 /** Milliseconds since `from`. */
@@ -279,9 +311,9 @@ describe("no request waits without end", () => {
       const from = Date.now();
       bridge.send(call(1, READ));
       const answer = await bridge.answerTo(1, 4000);
-      assert.equal(answer?.result?.structuredContent?.code, "NO_ANSWER", JSON.stringify(answer));
+      assert.equal(about(answer)?.code, "NO_ANSWER", JSON.stringify(answer));
       assert.ok(since(from) <= at(90) + 300, `answered after ${since(from)} ms`);
-      assert.equal(answer.result.structuredContent.cause, `No answer came from the service within ${Math.ceil((at(20) + at(25)) / 1000)} seconds.`);
+      assert.equal(about(answer)?.cause, `No answer came from the service within ${Math.ceil((at(20) + at(25)) / 1000)} seconds.`);
     } finally {
       await done();
     }
@@ -294,7 +326,7 @@ describe("no request waits without end", () => {
       bridge.send(call(1, READ));
       const answer = await bridge.answerTo(1, 4000);
       assert.ok(since(from) <= at(90) + 300, `answered after ${since(from)} ms`);
-      assert.equal(answer?.result?.structuredContent?.cause, `The service's answer stopped arriving for ${Math.ceil((at(30) + at(25)) / 1000)} seconds.`);
+      assert.equal(about(answer)?.cause, `The service's answer stopped arriving for ${Math.ceil((at(30) + at(25)) / 1000)} seconds.`);
     } finally {
       await done();
     }
@@ -308,7 +340,7 @@ describe("no request waits without end", () => {
       const answer = await bridge.answerTo(1, 4000);
       const took = since(from);
       assert.ok(took >= at(90) - 100 && took <= at(90) + 400, `answered after ${took} ms`);
-      assert.equal(answer?.result?.structuredContent?.cause, `No answer came from the service within ${Math.ceil(at(90) / 1000)} seconds.`);
+      assert.equal(about(answer)?.cause, `No answer came from the service within ${Math.ceil(at(90) / 1000)} seconds.`);
     } finally {
       await done();
     }
@@ -319,7 +351,7 @@ describe("no request waits without end", () => {
     try {
       bridge.send(call(1, POST));
       const answer = await bridge.answerTo(1, 4000);
-      assert.equal(answer?.result?.structuredContent?.written, "no", JSON.stringify(answer));
+      assert.equal(about(answer)?.written, "no", JSON.stringify(answer));
       assert.match(textOf(answer), /^NO_ANSWER\. No answer came from the service within \d+ seconds\. The call was not sent to the service\. Call it again\.$/);
       assert.equal(fake.seen.filter((s) => s.startsWith("POST /mcp")).length, 0);
     } finally {
@@ -332,12 +364,14 @@ describe("no request waits without end", () => {
     try {
       bridge.send(call("kept", READ));
       bridge.send(call("cancelled", POST));
-      await new Promise((ok) => setTimeout(ok, at(5)));
+      // Cancelled only once the fake holds both open, the kept call's and the cancelled
+      // call's read, so the cancel has a read to close.
+      assert.ok(await until(() => fake.seen.includes("POST /mcp tools/call") && fake.seen.includes("GET /v1/spaces/fake-space"), 1000), `seen: ${JSON.stringify(fake.seen)}`);
       bridge.send({ jsonrpc: "2.0", method: "notifications/cancelled", params: { requestId: "cancelled" } });
       const cancelledAt = Date.now();
       while (!fake.closed.includes("GET /v1/spaces/fake-space") && since(cancelledAt) < 1000) await new Promise((ok) => setTimeout(ok, 10));
       assert.ok(since(cancelledAt) < at(20) - 100, `the cancelled call's read closed after ${since(cancelledAt)} ms`);
-      assert.equal((await bridge.answerTo("kept", 4000))?.result?.structuredContent?.code, "NO_ANSWER");
+      assert.equal(about(await bridge.answerTo("kept", 4000))?.code, "NO_ANSWER");
       await new Promise((ok) => setTimeout(ok, 200));
       assert.equal(bridge.out.filter((m) => m.id === "cancelled").length, 0, "a cancelled call was answered");
     } finally {
@@ -396,7 +430,7 @@ describe("no request waits without end", () => {
         const first = await bridge.answerTo(1, 4000);
         assert.ok(first, `no answer; stderr: ${bridge.err()}`);
         assert.ok(since(from) <= at(90) + 300, `answered after ${since(from)} ms`);
-        assert.equal(first.result?.structuredContent?.code ?? null, "NO_ANSWER", JSON.stringify(first));
+        assert.equal(about(first)?.code ?? null, "NO_ANSWER", JSON.stringify(first));
         const before = fake.seen.filter((s) => s === asked).length;
         silent = false;
         bridge.send(call(2, route === "POST /mcp" ? READ : POST));
@@ -459,7 +493,7 @@ describe("no request waits without end", () => {
       const answer = await bridge.answerTo(1, 6000);
       const ceiling = 600_000 * tiny;
       assert.ok(since(from) >= ceiling - 100 && since(from) <= ceiling + 500, `answered after ${since(from)} ms`);
-      assert.equal(answer?.result?.structuredContent?.cause, `No answer came from the service within ${ceiling / 1000} seconds.`);
+      assert.equal(about(answer)?.cause, `No answer came from the service within ${ceiling / 1000} seconds.`);
     } finally {
       await done();
     }
@@ -548,7 +582,7 @@ describe("no request waits without end", () => {
       upload.bridge.send(call(1, { ...POST, arguments: { ...POST.arguments, attachments: [{ text: "tiny" }] } }));
       const answer = await upload.bridge.answerTo(1, 4000);
       assert.ok(since(from) <= at(90) + 300, `answered after ${since(from)} ms`);
-      assert.equal(answer?.result?.structuredContent?.written, "no", JSON.stringify(answer));
+      assert.equal(about(answer)?.written, "no", JSON.stringify(answer));
       assert.equal(posted(upload.fake), 0);
     } finally {
       await upload.done();
@@ -564,7 +598,7 @@ describe("no request waits without end", () => {
       const answer = await site.bridge.answerTo(1, 4000);
       assert.ok(answer, `no answer; stderr: ${site.bridge.err()}`);
       assert.ok(since(from) <= at(90) + 300, `answered after ${since(from)} ms`);
-      assert.equal(answer.result?.structuredContent?.written, "no", JSON.stringify(answer));
+      assert.equal(about(answer)?.written, "no", JSON.stringify(answer));
       assert.ok(site.fake.seen.includes("GET /v1/capabilities"), "the passkey site was never asked");
     } finally {
       await site.done();
@@ -625,6 +659,62 @@ describe("a write whose answer was lost is sent once more, under the same key", 
     });
   }
 
+  test("a 503 whose body is JSON with no id, or a message for another id, is resent once, the same bytes, and answered", async () => {
+    for (const body of [{ error: "Service Unavailable" }, { message: "upstream connect error" }, { jsonrpc: "2.0", id: "not-this-one", result: { content: [] } }]) {
+      const { bridge, fake, done } = await against({ "POST /mcp": inTurn((_req, res) => json(res, 503, body), okAnswer) });
+      try {
+        bridge.send(call(1, POST));
+        assert.equal(textOf(await bridge.answerTo(1, 4000)), "ok", JSON.stringify(body));
+        const sent = callsSent(fake);
+        assert.equal(sent.length, 2, JSON.stringify(body));
+        assert.equal(sent[0]!.body, sent[1]!.body, "the resend was not the same bytes");
+        assert.equal(bridge.out.filter((m) => m.id === "not-this-one").length, 0, "another id's answer reached the client");
+      } finally {
+        await done();
+      }
+    }
+  });
+
+  test("a token mint that never answers is no lost answer: nothing is sent with Bearer null, and the call is answered as not sent", async () => {
+    const { bridge, fake, done } = await against({ "POST /v1/keys/challenge": () => {} }, { SCHELLINGAF_TOKEN: "" });
+    try {
+      bridge.send(call(1, { name: "schellingaf_task", arguments: { action: "add", space: "fake-space", title: "a task" } }));
+      const answer = await bridge.answerTo(1, 4000);
+      assert.ok(answer, `no answer; stderr: ${bridge.err()}`);
+      const bearers = fake.bodies.filter((b) => b.route === "POST /mcp").map((b) => b.headers.authorization);
+      assert.ok(!bearers.includes("Bearer null"), `sent with ${JSON.stringify(bearers)}`);
+      assert.equal(callsSent(fake).length, 0, "the call was sent with no token");
+      assert.equal(about(answer)?.written, "no", JSON.stringify(answer));
+      assert.match(textOf(answer), /^NO_ANSWER\. .+ The call was not sent to the service\. Call it again\.$/);
+    } finally {
+      await done();
+    }
+  });
+
+  test("a fresh token that cannot be had after the service refused the kept one is answered as not sent, and the refused token is never sent again", async () => {
+    const own = await makeKey();
+    const fake = await fakeService({
+      ...healthy(own.peerId),
+      "POST /mcp": inTurn((_req, res, body) => json(res, 200, { jsonrpc: "2.0", id: JSON.parse(body).id, result: { content: [{ type: "text", text: "TOKEN_REVOKED. This token was revoked." }], isError: true } }), okAnswer),
+      "POST /v1/keys/challenge": () => {},
+    });
+    writeFileSync(join(own.dir, "token.json"), JSON.stringify({ api: fake.origin, public_key: own.publicKeyHex, peer_id: own.peerId, token: "kept-token", expires_at: new Date(Date.now() + 30 * 86_400_000).toISOString() }));
+    const bridge = runBridge({ HOME: own.dir, SCHELLINGAF_API: fake.origin, SCHELLINGAF_KEY_FILE: own.file, SCHELLINGAF_UNSIGNED: "1", SCHELLINGAF_TIME_SCALE: String(SCALE) }, [], own.dir);
+    try {
+      bridge.send(call(1, { name: "schellingaf_task", arguments: { action: "add", space: "fake-space", title: "a task" } }));
+      const answer = await bridge.answerTo(1, 4000);
+      assert.ok(answer, `no answer; stderr: ${bridge.err()}`);
+      assert.deepEqual(callsSent(fake).map((b) => b.headers.authorization), ["Bearer kept-token"], "the refused token was sent again");
+      assert.ok(fake.seen.includes("POST /v1/keys/challenge"), "no fresh token was asked for");
+      assert.equal(about(answer)?.written, "no", JSON.stringify(answer));
+      assert.match(textOf(answer), /^NO_ANSWER\. .+ The call was not sent to the service\. Call it again\.$/);
+    } finally {
+      await bridge.stop();
+      await fake.close();
+      rmSync(own.dir, { recursive: true, force: true });
+    }
+  });
+
   test("a join whose answer is lost is never resent and is answered NO_ANSWER at once", async () => {
     const { bridge, fake, done } = await against({ "POST /mcp": inTurn(status(503)) });
     try {
@@ -633,7 +723,7 @@ describe("a write whose answer was lost is sent once more, under the same key", 
       const answer = await bridge.answerTo(1, 4000);
       assert.ok(since(from) < at(20), `answered after ${since(from)} ms`);
       assert.equal(textOf(answer), "NO_ANSWER. The service answered 503 and no result. Whether schellingaf_join changed anything is UNKNOWN, and this call carries no idempotency_key. If it only reads, call it again. If it writes, read what it would change first: a second call may do it twice.");
-      assert.deepEqual(answer.result.structuredContent, { code: "NO_ANSWER", written: "UNKNOWN", cause: "The service answered 503 and no result." });
+      assert.deepEqual(about(answer), { code: "NO_ANSWER", written: "UNKNOWN", cause: "The service answered 503 and no result." });
       assert.equal(callsSent(fake).length, 1);
       assert.equal(JSON.parse(callsSent(fake)[0]!.body).params.arguments.idempotency_key, undefined);
     } finally {
@@ -649,7 +739,7 @@ describe("a write whose answer was lost is sent once more, under the same key", 
       const made = JSON.parse(callsSent(fake)[0]!.body).params.arguments.idempotency_key;
       assert.match(made, /^[0-9a-f-]{36}$/);
       assert.equal(textOf(answer), `NO_ANSWER. The service answered 503 and no result. Whether schellingaf_oracle wrote anything is UNKNOWN. If its history shows your version, the first call landed. If not, call propose again with the same arguments, unchanged, plus idempotency_key "${made}".`);
-      assert.deepEqual(answer.result.structuredContent, { code: "NO_ANSWER", written: "UNKNOWN", cause: "The service answered 503 and no result.", idempotency_key: made });
+      assert.deepEqual(about(answer), { code: "NO_ANSWER", written: "UNKNOWN", cause: "The service answered 503 and no result.", idempotency_key: made });
       assert.equal(callsSent(fake).length, 1);
     } finally {
       await done();
@@ -671,7 +761,7 @@ describe("a write whose answer was lost is sent once more, under the same key", 
     try {
       bridge.send(call(1, POST));
       const answer = await bridge.answerTo(1, 4000);
-      assert.equal(answer?.result?.structuredContent?.cause, "The service's answer ended before its result.", JSON.stringify(answer));
+      assert.equal(about(answer)?.cause, "The service's answer ended before its result.", JSON.stringify(answer));
       assert.equal(callsSent(fake).length, 1);
     } finally {
       await done();
@@ -698,7 +788,7 @@ describe("a write whose answer was lost is sent once more, under the same key", 
     try {
       bridge.send(call(1, POST));
       const made = await bridge.answerTo(1, 4000);
-      const key1 = made?.result?.structuredContent?.idempotency_key;
+      const key1 = about(made)?.idempotency_key;
       assert.match(key1, /^[0-9a-f-]{36}$/, JSON.stringify(made));
       const [first, second] = callsSent(fake);
       assert.equal(canonicalOf(first!.body).idempotency_key, key1, "the signed object carries another key than the answer names");
@@ -707,7 +797,7 @@ describe("a write whose answer was lost is sent once more, under the same key", 
 
       bridge.send(call(2, { ...POST, arguments: { ...POST.arguments, idempotency_key: "mine-1" } }));
       const kept = await bridge.answerTo(2, 4000);
-      assert.equal(kept?.result?.structuredContent?.idempotency_key, "mine-1");
+      assert.equal(about(kept)?.idempotency_key, "mine-1");
       assert.equal(canonicalOf(callsSent(fake)[2]!.body).idempotency_key, "mine-1");
       assert.match(textOf(kept), /, with the idempotency_key "mine-1" you gave: the service writes it at most once/);
     } finally {
@@ -758,7 +848,7 @@ describe("a write whose answer was lost is sent once more, under the same key", 
       bridge.send(call(3, POST));
       const notSent = await bridge.answerTo(3, 4000);
       assert.equal(textOf(notSent), `NO_ANSWER. No answer came from the service within ${Math.ceil(at(20) / 1000)} seconds. The call was not sent to the service. Call it again.`);
-      assert.deepEqual(notSent.result.structuredContent, { code: "NO_ANSWER", written: "no", cause: `No answer came from the service within ${Math.ceil(at(20) / 1000)} seconds.` });
+      assert.deepEqual(about(notSent), { code: "NO_ANSWER", written: "no", cause: `No answer came from the service within ${Math.ceil(at(20) / 1000)} seconds.` });
       bridge.send({ jsonrpc: "2.0", id: 4, method: "prompts/list", params: {} });
       assert.deepEqual((await bridge.answerTo(4, 4000))?.error, { code: -32603, message: "NO_ANSWER. The service accepted the request and sent no answer to it. Send the request again." });
       for (const m of bridge.out.filter((o) => o.id !== 4)) {
@@ -792,6 +882,67 @@ async function callAgainst(routes: Record<string, Handler>, args: string[], env:
   return { code, out, err: bridge.err(), took, fake };
 }
 
+describe("a tool's error the bridge makes carries its code in _meta, never structuredContent", () => {
+  test("a client that checks output schemas, calling a post answered 503 twice, reads the UNKNOWN text and the key", async () => {
+    // The connector's post declares an output schema, which a client checks structuredContent
+    // against: an error carrying any is shown to the agent as the client's own failure.
+    const fake = await fakeService({
+      ...healthy(key.peerId),
+      "POST /mcp": (_req, res, body) => {
+        const m = JSON.parse(body);
+        if (m.id === undefined) return void res.writeHead(202).end();
+        if (m.method === "initialize") return json(res, 200, { jsonrpc: "2.0", id: m.id, result: { protocolVersion: "2025-06-18", capabilities: { tools: {} }, serverInfo: { name: "fake", version: "0" } } });
+        if (m.method === "tools/list") {
+          return json(res, 200, { jsonrpc: "2.0", id: m.id, result: { tools: [{ name: "schellingaf_post", inputSchema: { type: "object" }, outputSchema: { type: "object", properties: { post_id: { type: "string" } }, required: ["post_id"] } }] } });
+        }
+        res.writeHead(503).end();
+      },
+    });
+    const transport = new StdioClientTransport({
+      command: process.execPath,
+      args: [BRIDGE_SOURCE],
+      env: { HOME: key.dir, SCHELLINGAF_API: fake.origin, SCHELLINGAF_KEY_FILE: key.file, SCHELLINGAF_TOKEN: "fake-token-for-a-local-fake-service", SCHELLINGAF_UNSIGNED: "1", SCHELLINGAF_TIME_SCALE: String(SCALE) },
+      stderr: "ignore",
+    });
+    const client = new Client({ name: "bridge-waits", version: "0" });
+    try {
+      await client.connect(transport);
+      await client.listTools();
+      const result: any = await client.callTool({ name: "schellingaf_post", arguments: POST.arguments });
+      assert.equal(result.isError, true);
+      assert.equal(result.structuredContent, undefined);
+      assert.match(result.content[0].text, /^NO_ANSWER\. The service answered 503 and no result\. It was sent twice, under the same idempotency_key\. Whether schellingaf_post wrote anything is UNKNOWN\./);
+      const said = result._meta?.["schellingaf.com/answer"];
+      assert.equal(said?.code, "NO_ANSWER");
+      assert.equal(said?.written, "UNKNOWN");
+      assert.equal(said?.cause, "The service answered 503 and no result.");
+      assert.match(said?.idempotency_key ?? "", /^[0-9a-f-]{36}$/);
+      assert.ok(result.content[0].text.includes(`"${said.idempotency_key}"`), "the text names another key");
+    } finally {
+      await client.close();
+      await fake.close();
+    }
+  });
+
+  test("the dry-run refusal and the service's refusal before the connector carry their codes in _meta", async () => {
+    const { bridge, done } = await against({ "POST /mcp": (_req, res) => json(res, 429, { error: { code: "RATE_LIMITED", message: "RATE_LIMITED. Too many calls for now.", fix: "Wait." } }, { "retry-after": "3" }) });
+    try {
+      bridge.send(call(1, { ...READ, arguments: { ...READ.arguments, dry_run: true } }));
+      bridge.send(call(2, READ));
+      const dry = await bridge.answerTo(1);
+      const limited = await bridge.answerTo(2);
+      for (const m of [dry, limited]) {
+        assert.equal(m?.result?.isError, true, JSON.stringify(m));
+        assert.equal(m.result.structuredContent, undefined, JSON.stringify(m));
+      }
+      assert.deepEqual(about(dry), { code: "INVALID_REQUEST" });
+      assert.deepEqual(about(limited), { code: "RATE_LIMITED" });
+    } finally {
+      await done();
+    }
+  });
+});
+
 describe("call, the help and the start", () => {
   test("call prints the answer's text and exits 0", async () => {
     const r = await callAgainst({}, ["schellingaf_read_space", '{"space":"fake-space"}']);
@@ -801,7 +952,7 @@ describe("call, the help and the start", () => {
     assert.deepEqual(sent.params, { name: "schellingaf_read_space", arguments: { space: "fake-space" } });
   });
 
-  test("call exits 1 on a refusal, 2 on NO_ANSWER, 2 on BRIDGE_FAILED, 64 on each usage error, mapped by structuredContent.code", async () => {
+  test("call exits 1 on a refusal, 2 on NO_ANSWER, 2 on BRIDGE_FAILED, 64 on each usage error, mapped by the code in its _meta", async () => {
     const refused = await callAgainst({ "POST /mcp": (_req, res, body) => json(res, 200, { jsonrpc: "2.0", id: JSON.parse(body).id, result: { content: [{ type: "text", text: "SPACE_NOT_FOUND. No such SPACE." }], isError: true } }) }, ["schellingaf_read_space", '{"space":"fake-space"}']);
     assert.equal(refused.code, 1, refused.err);
     assert.equal(refused.out, "SPACE_NOT_FOUND. No such SPACE.\n");
@@ -955,7 +1106,7 @@ describe("call, the help and the start", () => {
       bridge.send(call(1, POST));
       const answer = await bridge.answerTo(1, 4000);
       assert.match(textOf(answer), /^BRIDGE_FAILED\. The bridge could not sign this: .*\. Nothing was sent\.$/);
-      assert.deepEqual(answer.result.structuredContent, { code: "BRIDGE_FAILED" });
+      assert.deepEqual(about(answer), { code: "BRIDGE_FAILED" });
     } finally {
       await done();
     }

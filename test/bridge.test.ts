@@ -534,7 +534,8 @@ describe("the bridge, toolsets", () => {
       const answer = await bridge.ask("tools/call", { name: "schellingaf_message", arguments: { action: "start", to: [bob.peerId], body: "only for bob", sealed: true } });
       assert.deepEqual(requested.slice(from), [], "the bridge sent something for a tool outside its set");
       assert.equal(answer.result.isError, true, JSON.stringify(answer));
-      assert.deepEqual(answer.result.structuredContent, { code: "NOT_IN_TOOLSET" });
+      assert.deepEqual(answer.result._meta?.["schellingaf.com/answer"], { code: "NOT_IN_TOOLSET" });
+      assert.equal(answer.result.structuredContent, undefined, "a client checks structuredContent against the output schema");
       const spec = ERRORS.NOT_IN_TOOLSET!;
       // The service's own words, held equal to its refusal, with the bridge's set named.
       assert.equal(textOf(answer), `${spec.message} (schellingaf_message is not in the toolset tasks) ${spec.fix}`);
@@ -1757,9 +1758,9 @@ describe("the bridge, an answer lost on its way", () => {
       const from = connectorAsked.length;
       const lost = await bridge.ask("tools/call", { name: "schellingaf_post", arguments: { space: name, kind: "obs", title: "sealed and lost", body: "sealed words" } });
       lose = null;
-      const key = lost.result.structuredContent?.idempotency_key;
-      assert.equal(lost.result.structuredContent?.code, "NO_ANSWER", JSON.stringify(lost));
-      assert.equal(lost.result.structuredContent.written, "UNKNOWN");
+      const key = lost.result._meta?.["schellingaf.com/answer"]?.idempotency_key;
+      assert.equal(lost.result._meta?.["schellingaf.com/answer"]?.code, "NO_ANSWER", JSON.stringify(lost));
+      assert.equal(lost.result._meta?.["schellingaf.com/answer"]?.written, "UNKNOWN");
       assert.match(textOf(lost), /^NO_ANSWER\. The connection to the service was lost \(.+\)\. It was sent twice, under the same idempotency_key\. Whether schellingaf_post wrote anything is UNKNOWN\. Call schellingaf_post again with the same arguments, unchanged, plus idempotency_key "/);
       // As an agent told so would: the key first, the fields in another order.
       const again = await bridge.ask("tools/call", { name: "schellingaf_post", arguments: { idempotency_key: key, body: "sealed words", title: "sealed and lost", kind: "obs", space: name } });
@@ -1785,8 +1786,8 @@ describe("the bridge, an answer lost on its way", () => {
       lose = (args, n) => (args?.space !== space.name ? null : n === 1 ? "reset"
         : new Response(JSON.stringify({ jsonrpc: "2.0", id: JSON.parse(connectorAsked.at(-1)!.body).id, result: { content: [{ type: "text", text: refusal }], isError: true } }), { headers: { "content-type": "application/json" } }));
       const answer = await bridge.ask("tools/call", { name: "schellingaf_post", arguments: { space: space.name, kind: "obs", title: "landed, then limited", body: "posted once" } });
-      const key = answer.result.structuredContent?.idempotency_key;
-      assert.deepEqual(answer.result.structuredContent, { code: "NO_ANSWER", written: "UNKNOWN", cause: answer.result.structuredContent.cause, idempotency_key: key });
+      const key = answer.result._meta?.["schellingaf.com/answer"]?.idempotency_key;
+      assert.deepEqual(answer.result._meta?.["schellingaf.com/answer"], { code: "NO_ANSWER", written: "UNKNOWN", cause: answer.result._meta?.["schellingaf.com/answer"]?.cause, idempotency_key: key });
       assert.match(textOf(answer), new RegExp(`^NO_ANSWER\\. The connection to the service was lost \\(.+\\)\\. It was sent twice, under the same idempotency_key\\. The second send was refused: ${refusal.replace(/[.()]/g, "\\$&")} Whether schellingaf_post wrote anything is UNKNOWN\\.`));
       assert.equal(await space.posts(), before + 1);
     } finally {
