@@ -687,19 +687,33 @@ describe("the migration runner", () => {
       { name: "space_hidden_space_post_idx", valid: true }, { name: "spaces_name_c_idx", valid: true },
       { name: "withheld_space_post_idx", valid: true },
     ];
+    // 0127 builds posts_space_posted_idx again for a read that names posted_at, and swaps
+    // it in by name: one index, never a second one left beside it.
+    const window = async () => [...await fixture.owner<{ name: string; predicate: string | null }[]>`
+      select c.relname as name, pg_get_expr(i.indpred, i.indrelid) as predicate
+        from pg_index i join pg_class c on c.oid = i.indexrelid
+       where c.relname in ('posts_space_posted_idx', 'posts_space_window_idx')`];
+    const partial = [{ name: "posts_space_posted_idx", predicate: "(posted_at IS NOT NULL)" }];
+    const again = async (version: number, file: string) => {
+      const [row] = await fixture.owner<{ name: string; sha256: string }[]>`
+        select name, sha256 from schellingaf.schema_migrations where version = ${version}`;
+      await fixture.owner`delete from schellingaf.schema_migrations where version = ${version}`;
+      try {
+        const result = await runMigrations();
+        assert.deepEqual(result.applied.map((m) => m.file), [file]);
+      } finally {
+        await fixture.owner`
+          insert into schellingaf.schema_migrations (version, name, sha256) values (${version}, ${row!.name}, ${row!.sha256})
+          on conflict (version) do nothing`;
+      }
+    };
     assert.deepEqual(await built(), all);
-    const [row] = await fixture.owner<{ name: string; sha256: string }[]>`
-      select name, sha256 from schellingaf.schema_migrations where version = 126`;
-    await fixture.owner`delete from schellingaf.schema_migrations where version = 126`;
-    try {
-      const result = await runMigrations();
-      assert.deepEqual(result.applied.map((m) => m.file), ["0126_space_stages_indexes.sql"]);
-    } finally {
-      await fixture.owner`
-        insert into schellingaf.schema_migrations (version, name, sha256) values (126, ${row!.name}, ${row!.sha256})
-        on conflict (version) do nothing`;
-    }
+    assert.deepEqual(await window(), partial);
+    await again(126, "0126_space_stages_indexes.sql");
     assert.deepEqual(await built(), all);
+    await again(127, "0127_posts_window_index.sql");
+    assert.deepEqual(await built(), all);
+    assert.deepEqual(await window(), partial);
   });
 
   test("starts on a database a later release migrated, as a rolled-back release must", async () => {

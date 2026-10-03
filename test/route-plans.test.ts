@@ -21,7 +21,7 @@ import { createHash } from "node:crypto";
 import postgres from "postgres";
 import { PORT, SUPERUSER } from "./bootstrap.ts";
 import { filed } from "./helpers.ts";
-import { useService, app, fixture, agent, send, read, type Agent } from "./lib/service.ts";
+import { useService, app, db, fixture, agent, send, read, type Agent } from "./lib/service.ts";
 import { allowReadQueryWatch, watchReadQueries } from "../src/db/sql.ts";
 import { refileAll } from "../src/db/refile.ts";
 
@@ -269,15 +269,33 @@ before(async () => {
   await fixture.owner`
     update schellingaf.spaces set last_seq = ${POSTS + POSTS / 20 + 1} where name = 'planned-work'`;
   await refileAll(fixture.owner);
-  await fixture.owner`analyze`;
+  // VACUUM as well as ANALYZE, here and wherever this file writes rows before it plans:
+  // the tables as autovacuum leaves them in production, all-visible. An index-only scan is
+  // priced by the pages VACUUM has marked all-visible, and ANALYZE alone marks none, so
+  // a plan measured after it alone flipped when autovacuum happened to get there first.
+  await fixture.owner`vacuum analyze`;
 });
 
 // ── capturing what the service sends ─────────────────────────────────────────
 
 type Sent = { sql: string; params: readonly unknown[] };
 
+/**
+ * One read finished on the read pool just before a capture, so the request runs on a
+ * connection already open, and the capture holds the route's statements and nothing
+ * else. postgres.js asks every NEW connection for the database's array types, a select
+ * on pg_catalog.pg_type, before its first statement, and the pool closes a connection
+ * idle for 30 s (`idle_timeout`, src/db/sql.ts). A capture after a fixture that ran
+ * longer, as the million posts below did on a slow CI runner, held that select as the
+ * route's first statement. The pool hands out an open connection before it opens one.
+ */
+async function onAnOpenConnection(): Promise<void> {
+  await db.read`select 1`;
+}
+
 /** Run a request and keep every statement the read pool sent while it ran. */
 async function sent(path: string, who: Agent | null): Promise<Sent[]> {
+  await onAnOpenConnection();
   const seen: Sent[] = [];
   watchReadQueries((sql, params) => seen.push({ sql, params }));
   const res = await app.request(path, {
@@ -292,6 +310,7 @@ async function sent(path: string, who: Agent | null): Promise<Sent[]> {
 /** A POST as the service takes it, keeping every statement the read pool sent while it
  * ran: the reads a write makes before it writes. */
 async function sentPost(path: string, who: Agent, body: unknown): Promise<Sent[]> {
+  await onAnOpenConnection();
   const seen: Sent[] = [];
   watchReadQueries((sql, params) => seen.push({ sql, params }));
   const res = await send(app, "POST", path, who, body, { "content-type": "application/json" });
@@ -481,7 +500,7 @@ describe("the reads the service actually issues", () => {
       insert into schellingaf.join_requests (space_id, peer_id)
       select s.space_id, pe.peer_id from schellingaf.spaces s, schellingaf.peers pe
        where s.name in ('planned-space', 'listed-space-1') and pe.peer_id <> decode(${owner.peerId}, 'hex')`;
-    await fixture.owner`analyze schellingaf.join_requests`;
+    await fixture.owner`vacuum analyze schellingaf.join_requests`;
     const plan = await planOf("/v1/spaces/planned-space", "join_requests pr");
     assert.match(plan, /Index (Only )?Scan using join_requests_/, plan);
     assert.doesNotMatch(plan, /Seq Scan on join_requests/, `the profile scanned every ask:\n${plan}`);
@@ -508,7 +527,7 @@ describe("the reads the service actually issues", () => {
        where s.space_id = m.space_id and s.name = 'planned-space'
          and m.peer_id in (select x.peer_id from schellingaf.memberships x
                             where x.space_id = s.space_id order by x.peer_id limit 2)`;
-    await fixture.owner`analyze schellingaf.memberships`;
+    await fixture.owner`vacuum analyze schellingaf.memberships`;
     for (const role of ["admin", "coordinator"]) {
       const plan = await planOf(`/v1/spaces/planned-space/members?role=${role}&limit=10`, "from schellingaf.memberships m");
       assert.match(plan, /memberships_governing_idx/, `the ${role}s of a SPACE were found among all its members:\n${plan}`);
@@ -708,7 +727,7 @@ describe("a file's fetch and attach_files() find their rows through an index", (
       select a.post_id, a.space_id, 'sha256.file', encode(a.sha256, 'hex')
         from schellingaf.post_attachments a join schellingaf.spaces s on s.space_id = a.space_id
        where s.name = 'planned-space'`;
-    await fixture.owner`analyze`;
+    await fixture.owner`vacuum analyze`;
   });
 
   test("a file's fetch probes the file by its key and the posts attaching it by their index", async () => {
@@ -807,7 +826,7 @@ describe("your own dossiers and one section of many documents find their rows th
        where s.name = 'planned-dossiers'
        order by g`;
     await fixture.owner`update schellingaf.spaces set last_seq = 7700 where name = 'planned-dossiers'`;
-    await fixture.owner`analyze`;
+    await fixture.owner`vacuum analyze`;
   });
 
   test("GET /v1/me finds your newest dossier through own_dossiers_pkey, backwards, at most 64 rows, and never sorts", async () => {
@@ -1001,7 +1020,7 @@ describe("the SPACE list with counts=true", () => {
       on conflict do nothing`;
     await refileAll(fixture.owner);
     for (const table of ["posts", "spaces", "space_hidden", "withheld", "findings", "space_finding_counts"]) {
-      await fixture.owner.unsafe(`analyze schellingaf.${table}`);
+      await fixture.owner.unsafe(`vacuum analyze schellingaf.${table}`);
     }
 
     const busy = await sent("/v1/spaces?prefix=busy-&counts=true&limit=200", null);
