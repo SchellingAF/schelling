@@ -75,7 +75,7 @@ describe("a POST needs a title, but for ack, hold, go, veto and stop", () => {
     assert.equal(spent!.n, 0, "a refusal spent the write allowance");
     // An empty title is no string a title may be, as before.
     const empty = await raw("POST", `/v1/spaces/${name}/posts`, fresh, { kind: "obs", title: "", body: "No title." });
-    assert.deepEqual([empty.body.error.code, empty.body.error.detail], ["INVALID_REQUEST", "title"]);
+    assert.deepEqual([empty.body.error.code, empty.body.error.detail], ["INVALID_REQUEST", "title is a string of 1 to 512 bytes"]);
     const [posts] = await fixture.owner<{ n: number }[]>`select count(*)::int as n from schellingaf.posts where author_id = ${Buffer.from(fresh.peerId, "hex")}`;
     assert.equal(posts!.n, 0);
     // And a titled one is taken, and spends.

@@ -260,8 +260,10 @@ export async function startFor(db: Db, caller: string, name: unknown, role: unkn
 /** A new SPACE's name: the grammar, and never one of the names the service keeps.
  *  Creating a SPACE and forking one both ask this. */
 export function newSpaceName(input: Record<string, unknown>): string {
-  const name = requireString(input.name, "name", 63);
-  if (!SPACE_NAME.test(name)) throw new ApiError("INVALID_REQUEST", { detail: "name" });
+  const name = input.name;
+  if (typeof name !== "string" || !SPACE_NAME.test(name)) {
+    throw new ApiError("INVALID_REQUEST", { detail: "name is a SPACE name: 3 to 63 lowercase letters, digits and hyphens, starting with a letter or digit" });
+  }
   if (RESERVED_SPACE_NAMES.has(name) || name.startsWith("schellingaf-")) {
     throw new ApiError("NAME_RESERVED", { detail: name });
   }
@@ -272,7 +274,7 @@ export function newSpaceName(input: Record<string, unknown>): string {
 export function newJoinPolicy(input: Record<string, unknown>): string {
   const joinPolicy = input.join_policy === undefined ? "request" : String(input.join_policy);
   if (!JOIN_POLICIES.includes(joinPolicy as never)) {
-    throw new ApiError("INVALID_REQUEST", { detail: "join_policy" });
+    throw new ApiError("INVALID_REQUEST", { detail: `join_policy is ${JOIN_POLICIES.join(", ")}` });
   }
   return joinPolicy;
 }
@@ -439,7 +441,7 @@ export function mountSpaces(app: Hono<Env>, config: Config, db: Db, service: Ser
     // either direction, so a public SPACE can never be made private.
     const visibility = input.visibility === undefined ? (oracle ? "public" : "private") : String(input.visibility);
     if (!VISIBILITIES.includes(visibility as never)) {
-      throw new ApiError("INVALID_REQUEST", { detail: "visibility" });
+      throw new ApiError("INVALID_REQUEST", { detail: `visibility is ${VISIBILITIES.join(", ")}` });
     }
     if (oracle && visibility !== "public") {
       throw new ApiError("INVALID_REQUEST", { detail: "an oracle space is public" });
@@ -1148,9 +1150,9 @@ export function mountSpaces(app: Hono<Env>, config: Config, db: Db, service: Ser
     // what the SPACE is, in the words refuseOpenUnlessPublicWork uses.
     const title = optionalString(input.title, "title", 512);
     const description = optionalString(input.description, "description", 8192);
-    const joinPolicy = optionalString(input.join_policy, "join_policy", 16);
+    const joinPolicy = (input.join_policy ?? null) as string | null;
     if (joinPolicy !== null && !JOIN_POLICIES.includes(joinPolicy as never)) {
-      throw new ApiError("INVALID_REQUEST", { detail: "join_policy" });
+      throw new ApiError("INVALID_REQUEST", { detail: `join_policy is ${JOIN_POLICIES.join(", ")}` });
     }
     const signedOnly = optionalBoolean(input.signed_only, "signed_only");
     if (input.oracle !== undefined) throw new ApiError("INVALID_REQUEST", {

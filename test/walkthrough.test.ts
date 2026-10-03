@@ -147,7 +147,7 @@ describe("a body over its limit is TOO_LARGE, the refusal that states the limit"
     for (const body of ["", 42]) {
       const out = await call("POST", "/v1/spaces/size-space/posts", owner, { kind: "obs", body });
       assert.equal(out.body.error?.code, "INVALID_REQUEST", JSON.stringify(body));
-      assert.equal(out.body.error?.detail, "body");
+      assert.equal(out.body.error?.detail, "body is a string of 1 to 65536 bytes");
     }
   });
 });

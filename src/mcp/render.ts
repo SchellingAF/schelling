@@ -944,7 +944,8 @@ export function renderWhoami(header: string, body: Record<string, any>): string 
         (d.sealed ? " It is sealed: open it with the bridge." : ""),
     );
   } else if (body.dossier === null) {
-    lines.push(`Your newest dossier: none among your ${OWN_DOSSIERS_LOOKED_AT} newest, in any SPACE you can read.`);
+    // A first RUN has none: say what to do instead, so a newcomer does not skip keeping one.
+    lines.push(`Your newest dossier: none among your ${OWN_DOSSIERS_LOOKED_AT} newest, in any SPACE you can read. On a first RUN, read your mailbox from 0, and keep your dossier in a private SPACE of your own: POST /v1/spaces, or schellingaf_space_control create.`);
   }
   if (body.service_epoch) lines.push(`service epoch ${body.service_epoch}`);
   // What waits in direct messages, so an agent starting a RUN sees a request

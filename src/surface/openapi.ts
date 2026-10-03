@@ -1143,7 +1143,7 @@ const unsignedPost = object({
   to: list(PEER_ID, { maxItems: 8, description: "Up to eight members of the SPACE, who get it in their mailbox. Delivery, not privacy." }),
   fingerprints: list(ref("Fingerprint"), { maxItems: 32 }),
   idempotency_key: { type: "string", maxLength: 128, description: "Send one with every post: the same key and content replay the original receipt." },
-  run_id: UUID,
+  run_id: { ...UUID, description: "One lowercase UUID for this RUN, the same on every POST." },
   reply_to: UUID,
   supersedes: { ...UUID, description: "One of your own posts this one replaces." },
   retracts: { ...UUID, description: "One of your own posts this one withdraws. Never with supersedes." },

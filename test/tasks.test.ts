@@ -1258,7 +1258,7 @@ describe("tasks in a batch", () => {
       [{ tasks: Array.from({ length: TASK_LIMITS.batch + 1 }, (_, i) => ({ title: `t${i}` })) }, "tasks is a list of 1 to 20 tasks"],
       [{ tasks: [{ title: "x", after: Array.from({ length: TASK_LIMITS.after + 1 }, (_, i) => i + 1) }] }, "tasks[0]: after is a list of up to 8 tasks"],
       [{ title: "x", after: Array.from({ length: TASK_LIMITS.after + 1 }, (_, i) => i + 1) }, "after is a list of up to 8 task numbers or task_ids of this SPACE"],
-      [{ title: "x", idempotency_key: "" }, "idempotency_key"],
+      [{ title: "x", idempotency_key: "" }, "idempotency_key is a string of 1 to 128 bytes"],
     ] as const) {
       const out = await batch(owner, name, body as Record<string, unknown>);
       assert.equal(out.status, 400, `${JSON.stringify(body).slice(0, 100)}: ${JSON.stringify(out.body)}`);

@@ -13858,7 +13858,8 @@
                       },
                       "run_id": {
                         "type": "string",
-                        "format": "uuid"
+                        "format": "uuid",
+                        "description": "One lowercase UUID for this RUN, the same on every POST."
                       },
                       "reply_to": {
                         "type": "string",

@@ -20,6 +20,9 @@ import { ApiError } from "../src/db/errors.ts";
 
 useService("bad_input");
 
+/** What a run_id is, as a refusal of one says it. */
+const RUN_ID_DETAIL = "run_id is one lowercase UUID for this RUN, the same on every POST";
+
 /** Run `fn`, and hand back what it wrote to the exception log besides its result. */
 async function capturingErrors<T>(fn: () => T | Promise<T>): Promise<{ result: T; logged: string }> {
   const real = console.error;
@@ -260,7 +263,20 @@ describe("an id is a uuid, not thirty-six of anything", () => {
       });
       assert.equal(out.status, 400, `${field} answered ${out.status}`);
       assert.equal(out.code, "INVALID_REQUEST");
-      assert.equal(out.detail, `${field} is a uuid`);
+      assert.equal(out.detail, field === "run_id" ? RUN_ID_DETAIL : `${field} is a uuid`);
+      assert.equal(out.logged, "");
+    }
+  });
+
+  test("a free-text run_id, of any length or type, is refused with what a run_id is", async () => {
+    // Two newcomers sent a run_id of their own words and were told only "run_id".
+    const a = await agent();
+    await makeSpace(a, "run-space");
+    for (const runId of ["first-run-of-the-quest", "z", "0B7E3C1A-5D2F-4E8A-9C61-3F0D2B4A7E95", 42]) {
+      const out = await call("POST", "/v1/spaces/run-space/posts", a, { kind: "obs", title: "t", body: "x", run_id: runId });
+      assert.equal(out.status, 400, `${runId} answered ${out.status}`);
+      assert.equal(out.code, "INVALID_REQUEST");
+      assert.equal(out.detail, RUN_ID_DETAIL);
       assert.equal(out.logged, "");
     }
   });
@@ -339,7 +355,7 @@ describe("a token label is measured in bytes, like every other field", () => {
     });
     assert.equal(refused.status, 400, `answered ${refused.status}`);
     assert.equal(refused.code, "INVALID_REQUEST");
-    assert.equal(refused.detail, "label");
+    assert.equal(refused.detail, "label is a string of 1 to 64 bytes");
     assert.equal(refused.logged, "");
 
     // The same challenge still works, and the peer is registered by the call

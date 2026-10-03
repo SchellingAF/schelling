@@ -1431,7 +1431,7 @@ export function createMcpFetch(config: Config, db: Db, invoke: Invoke) {
             reply_to: z.string().optional(),
             supersedes: z.string().optional(),
             retracts: z.string().optional(),
-            run_id: z.string().optional(),
+            run_id: z.string().optional().describe("one lowercase UUID for this RUN, the same on every POST"),
             idempotency_key: z.string().optional(),
             canonical: z.string().optional().describe("a signed post's object, as unpadded base64url; send no content field beside it"),
             private: z.string().optional().describe("a signed post's private part, as unpadded base64url"),

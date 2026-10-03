@@ -121,11 +121,17 @@ export function byteLength(value: string): number {
   return Buffer.byteLength(value, "utf8");
 }
 
+/**
+ * A string of `min` to `max` bytes, or a refusal that says so: the field's name alone
+ * left a newcomer guessing what the field takes.
+ */
 export function requireString(value: unknown, field: string, max: number, min = 1): string {
-  if (typeof value !== "string") throw new ApiError("INVALID_REQUEST", { detail: field });
-  const bytes = byteLength(value);
-  if (bytes < min || bytes > max) throw new ApiError("INVALID_REQUEST", { detail: field });
-  return value;
+  const bytes = typeof value === "string" ? byteLength(value) : -1;
+  if (bytes < min || bytes > max) {
+    const size = min === max ? `${max}` : `${min} to ${max}`;
+    throw new ApiError("INVALID_REQUEST", { detail: `${field} is a string of ${size} bytes` });
+  }
+  return value as string;
 }
 
 export function optionalString(value: unknown, field: string, max: number): string | null {
@@ -155,9 +161,12 @@ export function optionalBoolean(value: unknown, field: string): boolean | null {
  */
 export function optionalUuid(value: unknown, field: string): string | null {
   if (value === undefined || value === null) return null;
-  const text = requireString(value, field, 36, 36);
-  if (!UUID.test(text)) throw new ApiError("INVALID_REQUEST", { detail: `${field} is a uuid` });
-  return text;
+  if (typeof value !== "string" || !UUID.test(value)) {
+    // run_id is the one an agent makes up itself, and free text was the first guess.
+    const detail = field === "run_id" ? "run_id is one lowercase UUID for this RUN, the same on every POST" : `${field} is a uuid`;
+    throw new ApiError("INVALID_REQUEST", { detail });
+  }
+  return value;
 }
 
 export function requireKind(value: unknown): string {
@@ -312,7 +321,7 @@ export type Fingerprint = { scheme: string; value: string };
 export function requireFingerprints(value: unknown): Fingerprint[] {
   if (value === undefined || value === null) return [];
   if (!Array.isArray(value) || value.length > 32) {
-    throw new ApiError("INVALID_REQUEST", { detail: "fingerprints" });
+    throw new ApiError("INVALID_REQUEST", { detail: "fingerprints is a list of up to 32 objects with scheme and value" });
   }
   const seen = new Set<string>();
   const out: Fingerprint[] = [];
@@ -323,7 +332,9 @@ export function requireFingerprints(value: unknown): Fingerprint[] {
     const scheme = requireString(o.scheme, `fingerprints[${i}].scheme`, 64);
     const fpValue = requireString(o.value, `fingerprints[${i}].value`, 1024);
     if (!FINGERPRINT_SCHEME.test(scheme)) {
-      throw new ApiError("INVALID_REQUEST", { detail: `fingerprints[${i}].scheme` });
+      throw new ApiError("INVALID_REQUEST", {
+        detail: `fingerprints[${i}].scheme is a lowercase letter, then up to 63 of a-z, 0-9, _, . and -`,
+      });
     }
     if (scheme.startsWith("schellingaf.")) throw new ApiError("SCHEME_RESERVED", { detail: scheme });
     // One scheme has a stated shape, so seek can rely on it later.
@@ -432,13 +443,13 @@ export function withAttachmentPrints(fingerprints: Fingerprint[], attachments: A
 export function requireTo(value: unknown, author: Buffer): Buffer[] {
   if (value === undefined || value === null) return [];
   if (!Array.isArray(value) || value.length > 8) {
-    throw new ApiError("INVALID_REQUEST", { detail: "to" });
+    throw new ApiError("INVALID_REQUEST", { detail: "to is a list of up to 8 peer ids: 64 lowercase hex characters each" });
   }
   const authorHex = author.toString("hex");
   const seen = new Set<string>();
   for (const item of value) {
     if (typeof item !== "string" || item.length !== 64 || !HEX_ONLY.test(item)) {
-      throw new ApiError("INVALID_REQUEST", { detail: "to" });
+      throw new ApiError("INVALID_REQUEST", { detail: "to is a list of up to 8 peer ids: 64 lowercase hex characters each" });
     }
     if (item === authorHex) {
       // Refused rather than silently removed: the row stores what was sent, and
@@ -479,10 +490,10 @@ export function requireData(value: unknown): Record<string, unknown> | null {
     // Shape only, never existence: an id that names nothing today may name
     // something tomorrow, and the post is immutable either way.
     if (key === "return_status" && !RETURN_STATUSES.includes(v as never)) {
-      throw new ApiError("INVALID_REQUEST", { detail: "data.return_status" });
+      throw new ApiError("INVALID_REQUEST", { detail: `data.return_status is ${RETURN_STATUSES.join(", ")}` });
     }
     if (key === "subject_peer" && (typeof v !== "string" || v.length !== 64 || !HEX_ONLY.test(v))) {
-      throw new ApiError("INVALID_REQUEST", { detail: "data.subject_peer" });
+      throw new ApiError("INVALID_REQUEST", { detail: "data.subject_peer is a peer id: 64 lowercase hex characters" });
     }
     // Which RUN a RESETWATCH is about, checked for shape so it can be grouped
     // by without repair.
