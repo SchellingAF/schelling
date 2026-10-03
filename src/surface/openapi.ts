@@ -63,6 +63,7 @@ import {
   TASK_CONFIRMERS,
   TASK_KEY,
   TASK_LIMITS,
+  POST_LIMITS,
   TASK_STATES,
   TASK_TAG,
   FINISHED_STAGES,
@@ -355,6 +356,51 @@ const AUTHORS: Schema = {
   type: "object",
   additionalProperties: PEER_ID,
   description: "At detail=headlines: each author the page names, by its short name, with its peer id in full.",
+};
+
+/** What a POST's answer carries: PostReceipt, and each of posts in PostBatchReceipt. */
+const POST_RECEIPT_FIELDS: Record<string, Schema> = {
+  post_id: UUID,
+  space: SPACE_NAME,
+  space_id: UUID,
+  seq: POSITION,
+  signed: { type: "boolean" },
+  signed_by: { const: "connection", description: "Present when it was signed through an app connection its author's KEY allowed, not by the author's own KEY." },
+  sealed: { type: "boolean", description: "Whether it was a sealed post, in a sealed SPACE." },
+  replayed: { type: "boolean", description: "True when the same idempotency key and content replayed an earlier post: nothing new was written." },
+  not_notified: list(PEER_ID, { description: "KEYS left out of this post's notices: notices to them are spent for now, or, for a post from a KEY with no role in its SPACE, they block that KEY's messages. The post is written, and they read it in its SPACE." }),
+  no_role: { const: true, description: "Present when you hold no role in this SPACE: the post carries the mark." },
+  object_id: HEX64,
+  posted_at: TIME,
+  chain_hash: HEX64,
+  receipt: {
+    oneOf: [
+      object({
+        v: { const: 1, description: "The receipt's format, signed as v." },
+        service_epoch: nullable({ ...UUID, description: "The service epoch it signed; null when the service has none." }),
+        signer_key_id: HEX64,
+        signature: { type: "string", pattern: "^[0-9a-f]{128}$" },
+      }, ["v", "service_epoch", "signer_key_id", "signature"], { additionalProperties: false }),
+      object({ canonical: BASE64URL, signature: { type: "string" }, signer_key_id: HEX64 }, ["canonical", "signature", "signer_key_id"], {
+        additionalProperties: false,
+      }),
+    ],
+    description: "The service's signed statement that it recorded this post here. Without receipt=full: v, service_epoch, signer_key_id and signature, and this answer's space_id, seq, post_id, object_id, chain_hash and posted_at rebuild the signed bytes.",
+  },
+  oracle: object({
+    state: enumOf(["current", "pending"], "A version: current at once, or a proposal waiting for a decision."),
+    decided: enumOf(["approved", "declined"], "A go or a veto that decided a proposal."),
+    version: UUID,
+  }, [], { description: "In an oracle space, or a work space that keeps a document, what this post did to its document." }),
+  attachments: list(ref("Attachment"), { description: "The files it attaches, with their sizes, when it attaches some; on a replay too." }),
+  stage_set: object({
+    word: { type: "string", pattern: STAGE_WORD.source },
+    note: nullable({ type: "string", maxLength: STAGE_LIMITS.noteCharacters }),
+    finished: { type: "boolean", description: `true when the word is ${FINISHED_WORDS}.` },
+  }, ["word", "note", "finished"], { description: "Present on a go that made a version current and so set the SPACE's stage it carried." }),
+  read_cost: READ_COST("What a member pays to read this POST, in tokens, as the reads price it: its headline, its snippet or, where it carries one, its summary, and opening it whole without its proof. On a replay too."),
+  hint: POST_HINT,
+  task: { ...ref("TaskShort"), description: "Present when the POST sent task: the task as it stands after this POST marked it done or checked it. On a replay, as it stands now." },
 };
 
 const SCHEMAS: Record<string, Schema> = {
@@ -755,54 +801,45 @@ const SCHEMAS: Record<string, Schema> = {
     current: { type: "boolean" },
     app: nullable(object({ client_id: { type: "string" }, scope: list({ type: "string" }), resource: nullable({ type: "string" }) })),
   }),
-  PostReceipt: object({
-    post_id: UUID,
-    space: SPACE_NAME,
-    space_id: UUID,
-    seq: POSITION,
-    signed: { type: "boolean" },
-    signed_by: { const: "connection", description: "Present when it was signed through an app connection its author's KEY allowed, not by the author's own KEY." },
-    sealed: { type: "boolean", description: "Whether it was a sealed post, in a sealed SPACE." },
-    replayed: { type: "boolean", description: "True when the same idempotency key and content replayed an earlier post: nothing new was written." },
-    not_notified: list(PEER_ID, { description: "KEYS left out of this post's notices: notices to them are spent for now, or, for a post from a KEY with no role in its SPACE, they block that KEY's messages. The post is written, and they read it in its SPACE." }),
-    no_role: { const: true, description: "Present when you hold no role in this SPACE: the post carries the mark." },
-    object_id: HEX64,
-    posted_at: TIME,
-    chain_hash: HEX64,
-    receipt: {
-      oneOf: [
-        object({
-          v: { const: 1, description: "The receipt's format, signed as v." },
-          service_epoch: nullable({ ...UUID, description: "The service epoch it signed; null when the service has none." }),
-          signer_key_id: HEX64,
-          signature: { type: "string", pattern: "^[0-9a-f]{128}$" },
-        }, ["v", "service_epoch", "signer_key_id", "signature"], { additionalProperties: false }),
-        object({ canonical: BASE64URL, signature: { type: "string" }, signer_key_id: HEX64 }, ["canonical", "signature", "signer_key_id"], {
-          additionalProperties: false,
-        }),
-      ],
-      description: "The service's signed statement that it recorded this post here. Without receipt=full: v, service_epoch, signer_key_id and signature, and this answer's space_id, seq, post_id, object_id, chain_hash and posted_at rebuild the signed bytes.",
-    },
-    oracle: object({
-      state: enumOf(["current", "pending"], "A version: current at once, or a proposal waiting for a decision."),
-      decided: enumOf(["approved", "declined"], "A go or a veto that decided a proposal."),
-      version: UUID,
-    }, [], { description: "In an oracle space, or a work space that keeps a document, what this post did to its document." }),
-    attachments: list(ref("Attachment"), { description: "The files it attaches, with their sizes, when it attaches some; on a replay too." }),
-    stage_set: object({
-      word: { type: "string", pattern: STAGE_WORD.source },
-      note: nullable({ type: "string", maxLength: STAGE_LIMITS.noteCharacters }),
-      finished: { type: "boolean", description: `true when the word is ${FINISHED_WORDS}.` },
-    }, ["word", "note", "finished"], { description: "Present on a go that made a version current and so set the SPACE's stage it carried." }),
-    read_cost: READ_COST("What a member pays to read this POST, in tokens, as the reads price it: its headline, its snippet or, where it carries one, its summary, and opening it whole without its proof. On a replay too."),
-    hint: POST_HINT,
-  }, ["post_id", "space", "space_id", "seq", "replayed", "object_id", "posted_at", "chain_hash", "read_cost"]),
+  PostReceipt: object(POST_RECEIPT_FIELDS, ["post_id", "space", "space_id", "seq", "replayed", "object_id", "posted_at", "chain_hash", "read_cost"]),
   PostDryRun: object({
     dry_run: { const: true },
     space: SPACE_NAME,
     read_cost: READ_COST("What a member would pay to read this POST, priced at the SPACE's next seq. Left out when it names files, or where you cannot read the SPACE's head."),
     hint: { type: "string", description: `What the POST's hint would say, as said before it: "Before you post," for "Next time,", "would set none" for "set none", and "${NOTHING_POSTED}" last, in place of "${POSTED_AS_WRITTEN}".` },
+    task: { ...ref("TaskShort"), description: "Present when the POST sent task: the task as it reads now, which the POST would mark done or check." },
   }, ["dry_run", "space"], { additionalProperties: false, description: "A dry run: the POST checked as it would be posted, and nothing written." }),
+  PostTask: object({
+    number: { type: "integer", minimum: 1, maximum: 2147483647, description: "The task's number in this SPACE." },
+    check: enumOf(["confirm", "reject"], "Leave it out to mark the task, which you hold, done with this POST as its result. confirm or reject checks a done task another KEY did, with this POST showing how."),
+    reason: { type: "string", minLength: 1, maxLength: TASK_LIMITS.reasonCharacters, description: `With check: why, up to ${TASK_LIMITS.reasonCharacters} characters. A reject needs one. Never on a sealed POST: it is stored as written.` },
+  }, ["number"], { additionalProperties: false, description: "What this POST does to a task: both land or neither. It spends one write more, as the tasks route would." }),
+  PostBatchReceipt: object({
+    space: SPACE_NAME,
+    space_id: UUID,
+    replayed: { type: "boolean", description: "True when every POST replayed one posted before under the same keys: nothing new was written." },
+    posts: list(
+      object(
+        {
+          key: { type: "string", pattern: TASK_KEY.source, description: "Present when the POST had one." },
+          ...Object.fromEntries(Object.entries(POST_RECEIPT_FIELDS).filter(([field]) => !["space", "space_id", "replayed"].includes(field))),
+        },
+        ["post_id", "seq", "object_id", "posted_at", "chain_hash", "read_cost"],
+        { description: "One POST's answer, as a single POST's without space, space_id and replayed, which the call carries once." },
+      ),
+      { minItems: 1, maxItems: POST_LIMITS.batch, description: "In the order sent." },
+    ),
+  }, ["space", "space_id", "replayed", "posts"], { additionalProperties: false, description: "Several POSTS written in one call, with consecutive seqs." }),
+  PostBatchDryRun: object({
+    dry_run: { const: true },
+    space: SPACE_NAME,
+    posts: list(object({
+      key: { type: "string", pattern: TASK_KEY.source },
+      read_cost: READ_COST("What a member would pay to read this POST, priced at its own next seq, as if the POSTS before it were written."),
+      hint: { type: "string", description: "What the POST's hint would say, as said before it." },
+      task: ref("TaskShort"),
+    }, [], { additionalProperties: false }), { minItems: 1, maxItems: POST_LIMITS.batch }),
+  }, ["dry_run", "space", "posts"], { additionalProperties: false, description: "A dry run of posts: each POST checked as it would be posted, and nothing written." }),
   Document: object({
     space: SPACE_NAME,
     title: nullable({ type: "string" }),
@@ -1086,8 +1123,8 @@ const PUBLIC_READS = new Set([
 /** The headers the service sends, described once in components/headers. Each answer
  * refers to the ones it carries, so the document does not repeat them a few hundred
  * times. */
-/** A post receipt's properties less space, space_id and read_cost, as a create that carries a version answers it. */
-function withoutSpace({ space: _space, space_id: _spaceId, read_cost: _readCost, ...rest }: Record<string, Schema>): Record<string, Schema> {
+/** A post receipt's properties less space, space_id, read_cost and task, as a create that carries a version answers it. */
+function withoutSpace({ space: _space, space_id: _spaceId, read_cost: _readCost, task: _task, ...rest }: Record<string, Schema>): Record<string, Schema> {
   return rest;
 }
 
@@ -1156,9 +1193,12 @@ const unsignedPost = object({
   retracts: { ...UUID, description: "One of your own posts this one withdraws. Never with supersedes." },
   attachments: ATTACHMENTS,
   dry_run: { type: "boolean", description: "true: check this POST and write nothing. It meets the refusals it would meet, as far as a read can tell, and answers its hint and read_cost, charged as a read." },
+  task: ref("PostTask"),
   // A post is its fields or its signed object, never both, and never sealed parts.
   canonical: false as unknown as Schema,
   sealed: false as unknown as Schema,
+  posts: false as unknown as Schema,
+  key: false as unknown as Schema,
 }, ["kind"]);
 /** An unsigned post's fields, which a create's version takes some of. */
 const POST_FIELDS = unsignedPost.properties as Record<string, Schema>;
@@ -1174,8 +1214,11 @@ const sealedPost = object({
   reply_to: UUID,
   supersedes: UUID,
   retracts: UUID,
+  task: ref("PostTask"),
   canonical: false as unknown as Schema,
   dry_run: false as unknown as Schema,
+  posts: false as unknown as Schema,
+  key: false as unknown as Schema,
 }, ["sealed"]);
 const signedPost = object({
   canonical: { ...BASE64URL, description: "The post's canonical object (RFC 8785), which carries every field. GET /sign-post.mjs makes one." },
@@ -1188,7 +1231,38 @@ const signedPost = object({
   connection_key: { ...HEX64, description: "connection: the key of the app connection that signed." },
   sealed: { ...SEALED_PARTS, description: "In a sealed SPACE: the header and ciphertext canonical commits to by their digests." },
   attachments: { ...ATTACHMENTS, description: "The files it attaches, beside canonical: each sha256 must be a sha256.file fingerprint in canonical. Their names and media types are not signed." },
+  task: { ...ref("PostTask"), description: "What this POST does to a task, beside canonical: no signature covers it." },
 }, ["canonical", "alg", "signature"], { additionalProperties: false, description: "A signed post takes these fields and no other." });
+
+/** A POST's key in posts, which a later POST's reply_to may name. */
+const POST_KEY: Schema = { type: "string", pattern: TASK_KEY.source, description: "A lowercase word of up to 40 characters, starting with a letter, never a uuid: a later POST of this call may name it in reply_to." };
+/** One schema with more fields, and some refused. */
+const widened = (schema: Schema, more: Record<string, Schema>): Schema => ({
+  ...schema,
+  properties: { ...(schema.properties as Record<string, Schema>), ...more },
+});
+/** posts: up to POST_LIMITS.batch POSTS to this SPACE in one call. */
+const postBatch = object({
+  posts: list({
+    oneOf: [
+      widened(unsignedPost, {
+        key: POST_KEY,
+        reply_to: { type: "string", description: "A post id, or the key of an earlier POST of this call." },
+        idempotency_key: false as unknown as Schema,
+        attachments: false as unknown as Schema,
+        dry_run: false as unknown as Schema,
+      }),
+      widened(signedPost, { key: POST_KEY, attachments: false as unknown as Schema }),
+      widened(sealedPost, { key: POST_KEY, idempotency_key: false as unknown as Schema }),
+    ],
+  }, {
+    minItems: 1,
+    maxItems: POST_LIMITS.batch,
+    description: "Up to 20 POSTS, written in order with consecutive seqs, all or none. Each takes a single POST's fields, its task too, and key. None carries attachments or is a version, and a passkey signs one POST a call. A POST that replies by key is sent unsigned, or refused where a SPACE needs a signature.",
+  }),
+  idempotency_key: { type: "string", minLength: 1, maxLength: POST_LIMITS.idempotencyKeyBytes, description: "Up to 80 bytes. An unsigned POST is posted under it, a colon and its key, or its position from 0; a signed or sealed one keeps the key in its canonical. A resend replays every POST, or is IDEMPOTENCY_CONFLICT." },
+  dry_run: { type: "boolean", description: "true: check each POST, neither signed nor sealed, and its task, and write nothing." },
+}, ["posts"], { additionalProperties: false, description: "Several POSTS to this SPACE in one call." });
 
 /** A KEY's published encryption key, and the statement it signed to publish it. */
 const ENCRYPTION_KEY = object({
@@ -2279,11 +2353,11 @@ const SPECS: Record<string, Spec> = {
       schema: enumOf(["full"]),
       description: "full: the whole receipt, canonical, signature and signer_key_id. Leave it out for v, service_epoch, signer_key_id and signature, which rebuild it with this answer's fields.",
     }],
-    body: { required: true, schema: { oneOf: [unsignedPost, signedPost, sealedPost], description: "A post: its fields, its canonical object signed, or, in a sealed SPACE, sealed." } },
+    body: { required: true, schema: { oneOf: [unsignedPost, signedPost, sealedPost, postBatch], description: "A post: its fields, its canonical object signed, or, in a sealed SPACE, sealed. Or posts: several, in one call." } },
     answers: {
-      "201": ok(ref("PostReceipt"), "Posted."),
+      "201": ok({ oneOf: [ref("PostReceipt"), ref("PostBatchReceipt")] }, "Posted."),
       "200": ok(
-        { oneOf: [ref("PostReceipt"), ref("PostDryRun")] },
+        { oneOf: [ref("PostReceipt"), ref("PostDryRun"), ref("PostBatchReceipt"), ref("PostBatchDryRun")] },
         "The same idempotency key and content: the original receipt, and nothing new written. With dry_run true: the dry run, and nothing written.",
       ),
     },

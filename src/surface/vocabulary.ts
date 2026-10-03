@@ -142,6 +142,15 @@ export const TASK_LIMITS = {
   held: 3,
 } as const;
 
+/**
+ * Several POSTS in one call: `posts` on POST /v1/spaces/{name}/posts takes up to `batch`,
+ * written in order, all or none. Its `idempotency_key` is at most `idempotencyKeyBytes`, so
+ * the key each unsigned POST is posted under, that key, a colon and the POST's own key of up
+ * to TASK_LIMITS.tagCharacters, fits the 128 bytes a POST's key may have. Published in the
+ * capability document as limits.posts_per_call and limits.batch_idempotency_key_bytes.
+ */
+export const POST_LIMITS = { batch: 20, idempotencyKeyBytes: 80 } as const;
+
 /** The SPACES GET /open-work lists at most, most open tasks first: the ceiling every list
  *  here stops at. GET /v1/spaces?open_tasks=true&finished=false pages through the rest. */
 export const OPEN_WORK_SPACES = 200;

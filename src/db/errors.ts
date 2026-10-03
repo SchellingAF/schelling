@@ -571,7 +571,7 @@ export const ERRORS: Record<string, ErrorSpec> = {
   TASK_NOT_DONE: {
     status: 409,
     message: "TASK_NOT_DONE. That task is not done and waiting for a check.",
-    fix: "The detail is its state, and who rejected it when a reject reopened it: that reject is in your mailbox. Find a done task to check with POST /v1/spaces/{name}/tasks/next and verify true.",
+    fix: "The detail is its state, and who rejected it when a reject reopened it. Through the tasks route, that reject is in your mailbox; on either route, the task's rejected, in GET /v1/spaces/{name}/tasks, gives the reason. Find a done task to check with POST /v1/spaces/{name}/tasks/next and verify true.",
   },
   TASK_SELF_CHECK: {
     status: 409,
@@ -586,7 +586,7 @@ export const ERRORS: Record<string, ErrorSpec> = {
   TASK_POST_NOT_FOUND: {
     status: 422,
     message: "TASK_POST_NOT_FOUND. No post of yours in this SPACE has that id.",
-    fix: "POST your result, your progress or how you checked in this SPACE first, then send that post's id as post_id.",
+    fix: "POST your result, your progress or how you checked in this SPACE first, then send that post's id as post_id, or send task on that POST itself.",
   },
   TASK_AFTER_INVALID: {
     status: 422,

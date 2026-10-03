@@ -9,7 +9,7 @@ import { Hono, type Context } from "hono";
 import type { PendingQuery, Sql } from "postgres";
 import type { Config } from "../config.ts";
 import type { Db } from "../db/sql.ts";
-import { ApiError, renderableDetail } from "../db/errors.ts";
+import { ApiError, renderableDetail, toApiError } from "../db/errors.ts";
 import { toHex } from "../domain/keys.ts";
 import { checkAssertion, importPasskeyKey, isPasskeyAlgorithm } from "../domain/passkeys.ts";
 import { objectIdOf, passkeyChallengeOf, readPostObject, type PostFields } from "../domain/objects.ts";
@@ -17,6 +17,7 @@ import { ed25519SignedObject, readSignedPostRequest, type SignedPostRequest } fr
 import {
   UUID,
   asObject,
+  byteLength,
   queryFlag,
   optionalBody,
   optionalBoolean,
@@ -35,14 +36,18 @@ import {
   requireTo,
   requireAttachments,
   withAttachmentPrints,
+  readPostTask,
+  taskKey,
   type Attachment,
+  type PostTask,
 } from "../domain/validate.ts";
 import { authorClause, authorOf, boundedNumber, budgetCut, cursor, itemCost, postColumns, detailOr, hideOldVersions, kindClause, kindsOf, openPart, openParts, PAGE_DETAILS, PostPage, readCost, readDenied, render, tokenBudget, type Detail, type PostRow, type Written, withinBudget } from "./postview.ts";
-import { charge, CONCURRENT_READS_PER_CALLER, emptyOf, holdRead, limitRead, LIMITS, openPostsPerDay, OWN, READS_PER_MINUTE, readKey, SHARED, spend } from "./ratelimit.ts";
+import { charge, CONCURRENT_READS_PER_CALLER, holdRead, limitMoreReads, limitRead, LIMITS, openPostsPerDay, OWN, READS_PER_MINUTE, readKey, refilledOf, SHARED, spend } from "./ratelimit.ts";
 import { connectorSignedWith, floorPlace, optionalBearer, requireBearer, type Env } from "./app.ts";
 import { RANKS, receipt } from "./spaces.ts";
 import { firstDay } from "./auth.ts";
-import { ATTACHMENT_LIMITS, isFinishedStage, SUMMARY_MAX_BYTES } from "../surface/vocabulary.ts";
+import { ATTACHMENT_LIMITS, isFinishedStage, POST_LIMITS, SUMMARY_MAX_BYTES } from "../surface/vocabulary.ts";
+import { short, shown } from "./tasks.ts";
 import { headsOf, recordHeads, recordReturned } from "./log.ts";
 import { appendPost as append } from "./append.ts";
 import { readWaiting, spaceStream, waitSeconds } from "./wait.ts";
@@ -572,6 +577,58 @@ async function dryChecks(sql: Sql, name: string, author: Buffer, post: PostInput
 }
 
 /**
+ * A dry run's checks of a POST's `task`, after dryChecks, in the same read as the caller:
+ * the task of that number in this SPACE, one row, and only what that row says. No row is
+ * TASK_NOT_FOUND, an oracle space's too, which keeps none. To finish it, the caller holds
+ * it: done or accepted is TASK_NOT_OPEN, open TASK_NOT_CLAIMANT, held by another KEY
+ * TASK_NOT_OPEN claimed. To check it, it is done and the caller did not do it. The rank
+ * rules, a claim that passed, and an earlier check are task_done()'s and task_check()'s to
+ * say, at the write: nothing here copies them.
+ */
+async function dryTaskChecks(sql: Sql, spaceId: string, author: Buffer, task: PostTask): Promise<Record<string, unknown>> {
+  const [row] = await sql<{ item: Record<string, unknown> }[]>`
+    select schellingaf.task_item(t, s.task_confirmations) as item
+      from schellingaf.tasks t join schellingaf.spaces s on s.space_id = t.space_id
+     where t.space_id = ${spaceId}::uuid and t.number = ${task.number}::int`;
+  if (!row) throw new ApiError("TASK_NOT_FOUND");
+  const state = String(row.item.state);
+  const mine = row.item.claimed_by === toHex(author);
+  if (task.check === null) {
+    if (state === "done" || state === "accepted") throw new ApiError("TASK_NOT_OPEN", { detail: state });
+    // A claim that passed reads as open, and its holder may still finish it.
+    if (state === "open" && !(mine && row.item.claim_expired === true)) throw new ApiError("TASK_NOT_CLAIMANT");
+    if (state === "claimed" && !mine) throw new ApiError("TASK_NOT_OPEN", { detail: "claimed" });
+  } else {
+    if (state !== "done") throw new ApiError("TASK_NOT_DONE", { detail: state });
+    if (mine) throw new ApiError("TASK_SELF_CHECK");
+  }
+  return short(shown(row.item))!;
+}
+
+/** A post id's shape, priced in place of the id a POST that replies by key gets when written. */
+const SOME_POST_ID = "00000000-0000-0000-0000-000000000000";
+
+/** A dry run's price of a POST at a seq: what it costs if nothing is posted there first. */
+function dryPrice(name: string, author: Buffer, post: PostInput, found: DryRun, seq: bigint) {
+  return found.head === null
+    ? null
+    : readCost({
+        space: name, author, post, attachments: [], sealed: null,
+        receipt: {
+          // The shapes a receipt carries, at their lengths: a uuid, a hex object id.
+          post_id: SOME_POST_ID,
+          seq: String(seq),
+          space_id: found.spaceId,
+          posted_at: new Date().toISOString(),
+          object_id: "0".repeat(64),
+          signed: false,
+          no_role: found.noRole,
+          admitted_revision: found.head.revision,
+        },
+      });
+}
+
+/**
  * A dry run: an unsigned POST that is not sealed, checked as it would be posted, and
  * nothing written, so a writer hears its hint and its price before the words are
  * permanent. No post, seq, event, notice or claimed file; its idempotency key stays
@@ -580,36 +637,244 @@ async function dryChecks(sql: Sql, name: string, author: Buffer, post: PostInput
  * Its price is the POST's at the SPACE's next seq and present revision, which is what it
  * costs if nothing is posted there first. Left out where a file is named, since a file's
  * size is read only as it is attached, and where the caller cannot read the SPACE's head.
+ * With `task`, the task is checked as dryTaskChecks says and answered as a write answers it.
  */
-async function dryRunOf(c: Context<Env>, db: Db, name: string, author: Buffer, post: PostInput, attachments: Attachment[]) {
+async function dryRunOf(c: Context<Env>, db: Db, name: string, author: Buffer, item: Item) {
+  const { post, attachments } = item;
   const me = toHex(author);
   const who = readKey(c, me);
   limitRead(who, READS_PER_MINUTE);
   const release = holdRead(who, CONCURRENT_READS_PER_CALLER);
   let found: DryRun;
+  let task: Record<string, unknown> | null = null;
   try {
-    found = await db.readTx(me, (sql) => dryChecks(sql, name, author, post, attachments));
+    found = await db.readTx(me, async (sql) => {
+      const checked = await dryChecks(sql, name, author, post, attachments);
+      if (item.task !== null) task = await dryTaskChecks(sql, checked.spaceId, author, item.task);
+      return checked;
+    });
   } finally {
     release();
   }
-  const price = attachments.length === 0 && found.head !== null
-    ? readCost({
-        space: name, author, post, attachments: [], sealed: null,
-        receipt: {
-          // The shapes a receipt carries, at their lengths: a uuid, a hex object id.
-          post_id: "00000000-0000-0000-0000-000000000000",
-          seq: String(BigInt(found.head.seq) + 1n),
-          space_id: found.spaceId,
-          posted_at: new Date().toISOString(),
-          object_id: "0".repeat(64),
-          signed: false,
-          no_role: found.noRole,
-          admitted_revision: found.head.revision,
-        },
-      })
-    : null;
+  const price = attachments.length === 0 && found.head !== null ? dryPrice(name, author, post, found, BigInt(found.head.seq) + 1n) : null;
   const hint = hintOf(post, false, true);
-  return { dry_run: true, space: name, ...(price ? { read_cost: price } : {}), ...(hint ? { hint } : {}) };
+  return { dry_run: true, space: name, ...(price ? { read_cost: price } : {}), ...(hint ? { hint } : {}), ...(task ? { task } : {}) };
+}
+
+/**
+ * A dry run of posts: each POST checked as dryRunOf checks one, in order, in one read as
+ * the caller, counted as one read a POST. A POST that replies by key names an earlier one
+ * of the call, which is checked itself, so its parent is not looked for. Each is priced at
+ * its own next seq, as if the ones before it were written. A refusal names its POST.
+ */
+async function dryRunBatch(c: Context<Env>, db: Db, name: string, author: Buffer, items: Item[]) {
+  const me = toHex(author);
+  const who = readKey(c, me);
+  limitRead(who, READS_PER_MINUTE);
+  limitMoreReads(who, READS_PER_MINUTE, items.length - 1);
+  const release = holdRead(who, CONCURRENT_READS_PER_CALLER);
+  const answers: Record<string, unknown>[] = [];
+  try {
+    await db.readTx(me, async (sql) => {
+      for (const [i, item] of items.entries()) {
+        try {
+          const checked = await dryChecks(sql, name, author, item.post, []);
+          const task = item.task === null ? null : await dryTaskChecks(sql, checked.spaceId, author, item.task);
+          const priced = item.replyKey === null ? item.post : { ...item.post, replyTo: SOME_POST_ID };
+          const price = checked.head === null ? null : dryPrice(name, author, priced, checked, BigInt(checked.head.seq) + 1n + BigInt(i));
+          const hint = hintOf(item.post, false, true);
+          answers.push({
+            ...(item.key === null ? {} : { key: item.key }),
+            ...(price ? { read_cost: price } : {}), ...(hint ? { hint } : {}), ...(task ? { task } : {}),
+          });
+        } catch (error) {
+          throw atItem(i, item.key, error);
+        }
+      }
+    });
+  } finally {
+    release();
+  }
+  return { dry_run: true, space: name, posts: answers };
+}
+
+/** One POST of a call, as the route acts on it. A single POST is the one item of a call
+ * without posts. */
+type Item = {
+  /** Its key in posts, which a later item's reply_to may name; null when it has none. */
+  key: string | null;
+  post: PostInput;
+  /** The earlier item it replies to by key, whose post_id becomes its reply_to in the write. */
+  replyKey: number | null;
+  signed: SignedPostRequest | null;
+  sealed: SealedPost | null;
+  attachments: Attachment[];
+  /** What it does to a task, finish it or check it, with this POST as its post. */
+  task: PostTask | null;
+};
+
+/** What may sit beside posts, at the top of a call that sends several POSTS. */
+const BATCH_FIELDS = ["posts", "idempotency_key", "dry_run"];
+
+/**
+ * A refusal met while reading or writing item i of posts, as the same refusal naming it
+ * first: posts[i], with its key in brackets when it has one, then its own detail when the
+ * envelope would carry that and the whole fits 200 characters, else the name alone.
+ */
+function atItem(i: number, key: string | null, error: unknown): ApiError {
+  const refused = toApiError(error);
+  const at = `posts[${i}]${key === null ? "" : ` (${key})`}`;
+  const own = renderableDetail(refused.detail);
+  const detail = own !== undefined && `${at}: ${own}`.length <= 200 ? `${at}: ${own}` : at;
+  return new ApiError(refused.code, { detail, ...(refused.retryAfter === undefined ? {} : { retryAfter: refused.retryAfter }), shared: refused.shared });
+}
+
+/**
+ * One POST's fields, from its body: a single POST's whole body, or one item of posts with
+ * its key taken off, and its reply_to too when that names a key. In the order an agent meets
+ * the refusals: its sealed parts, its signed fields and its signature, its unsigned fields,
+ * the rules every POST meets, and its task last.
+ */
+async function readItem(
+  db: Db, config: Config, c: Context<Env>, name: string, author: Buffer, input: Record<string, unknown>, inPosts: boolean,
+): Promise<Omit<Item, "key" | "replyKey">> {
+  // A sealed SPACE takes no files, and a sealed post naming any is refused before any
+  // other field is read: plain bytes would sit beside its ciphertext.
+  const sealedAsked = input.sealed !== undefined && input.sealed !== null;
+  if (sealedAsked && Array.isArray(input.attachments) && input.attachments.length > 0) {
+    throw new ApiError("SEALED_NO_FILES");
+  }
+  // A sealed post, for a sealed SPACE: its words are in the ciphertext, and what the
+  // service acts on is what its header names (content/sealed.md, section 5).
+  const sealed = sealedAsked ? readSealedPost(input.sealed, toHex(author)) : null;
+  // A signed post carries its content in the bytes its author signed, and
+  // nowhere else: every field is derived from them, and the signature is
+  // checked before anything is spent, as a malformed field is. Its attachments ride
+  // beside them, each hash a sha256.file fingerprint inside them.
+  const signed = input.canonical !== undefined ? readSignedPostRequest(input) : null;
+  let attachments: Attachment[];
+  let post: PostInput;
+  if (signed !== null) {
+    post = await readSignedPost(db, config, name, author, signed, sealed, {
+      signedWith: connectorSignedWith(c),
+      tokenHash: requireBearer(c.get("bearer")).hash,
+    });
+    attachments = readSignedAttachments(input.attachments, post);
+  } else {
+    ({ attachments, ...post } = readUnsignedPost(input, author, sealed));
+  }
+  // A version changes a document alone, and is posted alone.
+  if (inPosts && post.kind === "version") throw new ApiError("INVALID_REQUEST", { detail: "a version is posted alone, not in posts" });
+  // A signed POST's data and budget are in the private part its author signed, beyond the
+  // reach of the rule every request's body meets in app.ts: held to it here, before
+  // anything is spent, so a dry run spelt there is never written either.
+  if (namesDryRunIn(post)) refuseDryRunHere();
+  // A signed finding's fields are in the private part its author signed, read whole by
+  // readSignedPost; held to the same rule as an unsigned one's, before anything is spent.
+  // Whether each of its sources is a post of this SPACE is append_post's to say, in the
+  // post's transaction (migrations/0114_findings.sql).
+  if (signed !== null && sealed === null) requireFinding(post.kind, post.data);
+  // And a version's data.stage, as an unsigned one's.
+  if (signed !== null && sealed === null) requireStage(post.kind, post.data);
+  // A title, on every kind but the coordination group's, signed or not: a signed POST's
+  // is the one its author signed. A sealed POST's is in its ciphertext, where the service
+  // reads nothing; its author's bridge checks it before sealing.
+  if (sealed === null) requireTitle(post.kind, post.title);
+  // A version's title says what changed, and is its summary in the document's history.
+  if (post.kind === "version" && (post.summary ?? null) !== null) {
+    throw new ApiError("INVALID_REQUEST", { detail: "a version carries no summary: its title says what changed" });
+  }
+  // What it does to a task. A reason is stored as written, and a sealed SPACE's words
+  // are never stored so: its rejects go through the tasks route, which says so.
+  const task = readPostTask(input.task);
+  if (task !== null && task.reason !== null && sealed !== null) {
+    throw new ApiError("INVALID_REQUEST", {
+      detail: "task.reason: a sealed POST takes none, since it would be stored as written. Reject with POST /v1/spaces/(name)/tasks/(number)/reject",
+    });
+  }
+  return { post, signed, sealed, attachments, task };
+}
+
+/**
+ * posts: up to POST_LIMITS.batch POSTS to this SPACE, each read as a single POST is, with
+ * its key and its task, every refusal naming its item, before anything is spent. A POST
+ * may reply by key to an earlier one only when it is neither signed nor sealed, since a
+ * signature binds its reply_to as a post id, which nobody knows before it is written.
+ * Unsigned POSTS are posted under the call's idempotency_key and their own key, or their
+ * position; a signed or sealed one keeps the key inside its canonical.
+ */
+async function readBatch(
+  db: Db, config: Config, c: Context<Env>, name: string, author: Buffer, input: Record<string, unknown>,
+): Promise<{ items: Item[]; dryRun: boolean }> {
+  if (Object.keys(input).some((field) => !BATCH_FIELDS.includes(field))) {
+    throw new ApiError("INVALID_REQUEST", { detail: "beside posts go only idempotency_key and dry_run: send the fields of each POST inside its item" });
+  }
+  const list = input.posts;
+  if (!Array.isArray(list) || list.length < 1 || list.length > POST_LIMITS.batch) {
+    throw new ApiError("INVALID_REQUEST", { detail: `posts is a list of 1 to ${POST_LIMITS.batch} POSTS to this SPACE` });
+  }
+  const callKey = input.idempotency_key ?? null;
+  if (callKey !== null && (typeof callKey !== "string" || callKey === "" || byteLength(callKey) > POST_LIMITS.idempotencyKeyBytes)) {
+    throw new ApiError("INVALID_REQUEST", { detail: `idempotency_key beside posts is 1 to ${POST_LIMITS.idempotencyKeyBytes} bytes` });
+  }
+  const isSignedOrSealed = (item: unknown) =>
+    typeof item === "object" && item !== null && ((item as Record<string, unknown>).canonical !== undefined ||
+      ((item as Record<string, unknown>).sealed !== undefined && (item as Record<string, unknown>).sealed !== null));
+  const dryRun = optionalBoolean(input.dry_run, "dry_run") === true;
+  if (input.dry_run !== undefined && list.some(isSignedOrSealed)) {
+    throw new ApiError("INVALID_REQUEST", { detail: "dry_run checks POSTS neither signed nor sealed: send their fields, without canonical or sealed" });
+  }
+
+  const items: Item[] = [];
+  const keys = new Map<string, number>();
+  const tasks = new Set<number>();
+  for (const [i, value] of list.entries()) {
+    if (typeof value !== "object" || value === null || Array.isArray(value)) throw atItem(i, null, new ApiError("INVALID_REQUEST"));
+    const { key: rawKey, ...fields } = value as Record<string, unknown>;
+    const key = taskKey(rawKey, `posts[${i}]`) ?? null;
+    if (key !== null && keys.has(key)) {
+      throw new ApiError("INVALID_REQUEST", { detail: `posts[${i}] (${key}): key is used by an earlier POST of this call` });
+    }
+    try {
+      if (namesDryRunIn(fields) || namesDryRunIn(fields.task)) refuseDryRunHere();
+      if (fields.attachments !== undefined && fields.attachments !== null) {
+        throw new ApiError("INVALID_REQUEST", { detail: "a POST with attachments is sent alone, not in posts" });
+      }
+      if (fields.alg === "webauthn") throw new ApiError("INVALID_REQUEST", { detail: "a passkey signs one POST a call: send it alone" });
+      if (fields.canonical === undefined && fields.idempotency_key !== undefined) {
+        throw new ApiError("INVALID_REQUEST", { detail: "idempotency_key goes once, beside posts" });
+      }
+      // A reply by key: to an earlier POST of this call, from a POST neither signed nor sealed.
+      const byKey = fields.reply_to !== undefined && fields.reply_to !== null
+        && !(typeof fields.reply_to === "string" && UUID.test(fields.reply_to));
+      if ((fields.canonical !== undefined && fields.reply_to !== undefined) || (byKey && isSignedOrSealed(fields))) {
+        throw new ApiError("INVALID_REQUEST", { detail: "a signed or sealed POST replies by post id inside canonical: post its parent in an earlier call" });
+      }
+      let replyKey: number | null = null;
+      if (byKey) {
+        const earlier = typeof fields.reply_to === "string" ? keys.get(fields.reply_to) : undefined;
+        if (earlier === undefined) {
+          throw new ApiError("INVALID_REQUEST", { detail: "reply_to is a post id or the key of an earlier POST of this call" });
+        }
+        replyKey = earlier;
+        delete fields.reply_to;
+      }
+      const read = await readItem(db, config, c, name, author, fields, true);
+      if (read.task !== null) {
+        if (tasks.has(read.task.number)) {
+          throw new ApiError("INVALID_REQUEST", { detail: `task ${read.task.number} is named by an earlier POST of this call` });
+        }
+        tasks.add(read.task.number);
+      }
+      // The key it is posted under: the call's and its own, or its position.
+      if (read.signed === null && callKey !== null) read.post = { ...read.post, idempotencyKey: `${callKey}:${key ?? i}` };
+      items.push({ key, replyKey, ...read });
+    } catch (error) {
+      throw atItem(i, key, error);
+    }
+    if (key !== null) keys.set(key, i);
+  }
+  return { items, dryRun };
 }
 
 export function mountPosts(app: Hono<Env>, config: Config, db: Db, service: ServiceState): void {
@@ -629,72 +894,80 @@ export function mountPosts(app: Hono<Env>, config: Config, db: Db, service: Serv
       throw new ApiError("INVALID_REQUEST");
     });
     const input = asObject(parseStrictJson(text));
+    const name = c.req.param("name");
+    const me = toHex(bearer.peerId);
 
-    // A dry run checks this POST and writes nothing. It is no field of a signed or sealed
-    // POST, beside or inside canonical, so no signature ever covers it, and a signed POST
-    // that carries it is refused here rather than written.
-    const dryRun = optionalBoolean(input.dry_run, "dry_run") === true;
-    if (input.dry_run !== undefined && (input.canonical !== undefined || (input.sealed !== undefined && input.sealed !== null))) {
-      throw new ApiError("INVALID_REQUEST", { detail: "dry_run checks a POST that is neither signed nor sealed: send its fields, without canonical or sealed" });
-    }
-
-    // A sealed SPACE takes no files, and a sealed post naming any is refused before any
-    // other field is read: plain bytes would sit beside its ciphertext.
-    const sealedAsked = input.sealed !== undefined && input.sealed !== null;
-    if (sealedAsked && Array.isArray(input.attachments) && input.attachments.length > 0) {
-      throw new ApiError("SEALED_NO_FILES");
-    }
-    // A sealed post, for a sealed SPACE: its words are in the ciphertext, and what the
-    // service acts on is what its header names (content/sealed.md, section 5).
-    const sealed = sealedAsked ? readSealedPost(input.sealed, toHex(bearer.peerId)) : null;
-    // A signed post carries its content in the bytes its author signed, and
-    // nowhere else: every field is derived from them, and the signature is
-    // checked before anything is spent, as a malformed field is. Its attachments ride
-    // beside them, each hash a sha256.file fingerprint inside them.
-    const signed = input.canonical !== undefined ? readSignedPostRequest(input) : null;
-    let attachments: Attachment[];
-    let post: PostInput;
-    if (signed !== null) {
-      post = await readSignedPost(db, config, c.req.param("name"), bearer.peerId, signed, sealed, {
-        signedWith: connectorSignedWith(c),
-        tokenHash: bearer.hash,
-      });
-      attachments = readSignedAttachments(input.attachments, post);
+    // One POST, or posts: several, written in order, all or none.
+    const batch = input.posts !== undefined;
+    let items: Item[];
+    let dryRun: boolean;
+    if (batch) {
+      ({ items, dryRun } = await readBatch(db, config, c, name, bearer.peerId, input));
     } else {
-      ({ attachments, ...post } = readUnsignedPost(input, bearer.peerId, sealed));
-    }
-    // A signed POST's data and budget are in the private part its author signed, beyond the
-    // reach of the rule every request's body meets in app.ts: held to it here, before
-    // anything is spent, so a dry run spelt there is never written either.
-    if (namesDryRunIn(post)) refuseDryRunHere();
-    // A signed finding's fields are in the private part its author signed, read whole by
-    // readSignedPost; held to the same rule as an unsigned one's, before anything is spent.
-    // Whether each of its sources is a post of this SPACE is append_post's to say, in the
-    // post's transaction (migrations/0114_findings.sql).
-    if (signed !== null && sealed === null) requireFinding(post.kind, post.data);
-    // And a version's data.stage, as an unsigned one's.
-    if (signed !== null && sealed === null) requireStage(post.kind, post.data);
-    // A title, on every kind but the coordination group's, signed or not: a signed POST's
-    // is the one its author signed. A sealed POST's is in its ciphertext, where the service
-    // reads nothing; its author's bridge checks it before sealing.
-    if (sealed === null) requireTitle(post.kind, post.title);
-    // A version's title says what changed, and is its summary in the document's history.
-    if (post.kind === "version" && (post.summary ?? null) !== null) {
-      throw new ApiError("INVALID_REQUEST", { detail: "a version carries no summary: its title says what changed" });
+      // A dry run checks this POST and writes nothing. It is no field of a signed or sealed
+      // POST, beside or inside canonical, so no signature ever covers it, and a signed POST
+      // that carries it is refused here rather than written.
+      dryRun = optionalBoolean(input.dry_run, "dry_run") === true;
+      if (input.dry_run !== undefined && (input.canonical !== undefined || (input.sealed !== undefined && input.sealed !== null))) {
+        throw new ApiError("INVALID_REQUEST", { detail: "dry_run checks a POST that is neither signed nor sealed: send its fields, without canonical or sealed" });
+      }
+      if (input.key !== undefined) throw new ApiError("INVALID_REQUEST", { detail: "key names an item of posts: a single POST takes none" });
+      if (namesDryRunIn(input.task)) refuseDryRunHere();
+      items = [{ key: null, replyKey: null, ...(await readItem(db, config, c, name, bearer.peerId, input, false)) }];
     }
 
     // Every field read as the POST's own are: from here a dry run reads, and writes nothing.
-    if (dryRun) return c.json(await dryRunOf(c, db, c.req.param("name"), bearer.peerId, post, attachments), 200);
-
-    // A post naming attachments meets the rule an upload meets, before anything is spent:
-    // a KEY that may not upload here, or a sealed SPACE, is refused now.
-    if (attachments.length > 0) {
-      await db.write`select schellingaf.check_file_upload(${c.req.param("name")}, ${bearer.peerId})`;
+    if (dryRun) {
+      return c.json(batch ? await dryRunBatch(c, db, name, bearer.peerId, items) : await dryRunOf(c, db, name, bearer.peerId, items[0]!), 200);
     }
 
-    const me = toHex(bearer.peerId);
-    await spend(c, db, LIMITS.peerWrites(me));
+    // A post naming attachments meets the rule an upload meets, before anything is spent:
+    // a KEY that may not upload here, or a sealed SPACE, is refused now. Only a single POST
+    // names any.
+    if (items[0]!.attachments.length > 0) {
+      await db.write`select schellingaf.check_file_upload(${name}, ${bearer.peerId})`;
+    }
 
+    // The write allowance, once for the call: a POST is one write and its task part
+    // another, as the two calls they replace were, all spent before anything is written.
+    // A resend whose every POST was posted before writes nothing new, and spends one, as a
+    // single POST's resend does: its keys are looked up first, as append_post looks them up.
+    const taskParts = items.filter((item) => item.task !== null).length;
+    let cost = 1;
+    if (batch || taskParts > 0) {
+      cost = items.length + taskParts;
+      const keys = items.map((item) => item.post.idempotencyKey);
+      if (keys.every((key) => key !== null)) {
+        const wanted = [...new Set(keys as string[])];
+        const [found] = await db.readTx(me, (sql) => sql<{ n: number }[]>`
+          select count(*)::int as n from schellingaf.posts p
+           where p.space_id = (select s.space_id from schellingaf.spaces s where s.name = ${name})
+             and p.author_id = ${bearer.peerId} and p.idempotency_key = any(${wanted}::text[])`);
+        if (found!.n === wanted.length) cost = 1;
+      }
+    }
+    await spend(c, db, LIMITS.peerWrites(me), cost);
+    const state = { wrote: false };
+    try {
+      return await writeCall(c, items, batch, fullReceipt, state);
+    } catch (error) {
+      // Refused after the spend: what a refused single POST spends, one write, and the rest
+      // given back. A balance a refund lifts past the bucket's size reads as its size.
+      if (cost > 1 && !state.wrote) await charge(db, [LIMITS.peerWrites(me)], -(cost - 1));
+      throw error;
+    }
+  });
+
+  /**
+   * The call's POSTS written, in order, and its answer: what is decided before, the write,
+   * then what is told after, once it committed.
+   */
+  async function writeCall(
+    c: Context<Env>, items: Item[], batch: boolean, fullReceipt: boolean, state: { wrote: boolean },
+  ): Promise<Response> {
+    const bearer = requireBearer(c.get("bearer"));
+    const name = c.req.param("name")!;
+    const me = toHex(bearer.peerId);
     // WHAT IS DECIDED BEFORE THE POST IS WRITTEN, in one read, and in none for a post to
     // nobody, in reply to nothing.
     //
@@ -725,199 +998,334 @@ export function mountPosts(app: Hono<Env>, config: Config, db: Db, service: Serv
     // cited post's.
     // `to` takes any peer id, so otherwise not_notified would tell a KEY in no SPACE
     // how much mail any peer it names is getting.
-    const name = c.req.param("name");
-    const recipients = post.to;
-    const sources = Array.isArray(post.data?.sources) ? (post.data.sources as string[]) : [];
-    const scene = recipients.length > 0 || post.replyTo !== null || sources.length > 0
+    //
+    // In posts, the SPACE is read once and each POST decided by the same rule. One that
+    // replies by key replies to the caller's own POST, whose author adds no recipient.
+    const sourcesOf = (post: PostInput) => (Array.isArray(post.data?.sources) ? (post.data.sources as string[]) : []);
+    const namesAnyone = (post: PostInput) => post.to.length > 0 || post.replyTo !== null || sourcesOf(post).length > 0;
+    const scenes: ({ reachable: string[] } | null)[] = items.some((item) => namesAnyone(item.post))
       ? await db.readTx(me, async (sql) => {
           const [space] = await sql<{ owner: Buffer; space_id: string; oracle: boolean; document: boolean; join_policy: string; role: string | null }[]>`
             select s.owner_id as owner, s.space_id::text, s.oracle, s.document, s.join_policy,
                    (select m.role from schellingaf.memberships m
                      where m.space_id = s.space_id and m.peer_id = ${bearer.peerId}) as role
               from schellingaf.spaces s where s.name = ${name}`;
-          if (!space) return null;
+          if (!space) return items.map(() => null);
           const owns = space.owner.equals(bearer.peerId);
           // Anyone writes in an oracle space and in an open work space.
           const anyone = space.oracle || space.join_policy === "open";
           // The owner and every role from writer up; where anyone writes, any KEY.
           const mayPost =
             anyone || owns || space.role === "writer" || space.role === "coordinator" || space.role === "admin";
-          let parent: { author: string; kind: string } | null = null;
-          if (mayPost && post.replyTo !== null) {
-            const [row] = await sql<{ author_id: Buffer; kind: string }[]>`
-              select p.author_id, p.kind from schellingaf.visible_posts p where p.post_id = ${post.replyTo}::uuid`;
-            parent = row ? { author: toHex(row.author_id), kind: row.kind } : null;
+          const out: ({ reachable: string[] } | null)[] = [];
+          for (const { post } of items) {
+            if (!namesAnyone(post)) {
+              out.push(null);
+              continue;
+            }
+            const recipients = post.to;
+            const sources = sourcesOf(post);
+            let parent: { author: string; kind: string } | null = null;
+            if (mayPost && post.replyTo !== null) {
+              const [row] = await sql<{ author_id: Buffer; kind: string }[]>`
+                select p.author_id, p.kind from schellingaf.visible_posts p where p.post_id = ${post.replyTo}::uuid`;
+              parent = row ? { author: toHex(row.author_id), kind: row.kind } : null;
+            }
+            // A go or a veto on a version is a decision, in an oracle space or a work space
+            // that keeps a document, and the proposer is told of it whatever their mailbox
+            // holds: read against their allowance, a proposer who filled their own could
+            // stop anybody deciding their proposals at all.
+            const decision = (space.oracle || space.document) && (post.kind === "go" || post.kind === "veto") && parent?.kind === "version";
+            let cited: string[] = [];
+            if (mayPost && sources.length > 0) {
+              const rows = await sql<{ peer: string }[]>`
+                select distinct encode(p.author_id, 'hex') as peer from schellingaf.visible_posts p
+                 where p.space_id = ${space.space_id}::uuid
+                   and (p.post_id = any(${sources.filter((x) => UUID.test(x))}::uuid[])
+                        or p.seq = any(${sources.filter((x) => !UUID.test(x))}::bigint[]))`;
+              // A decision reaches its proposer whatever its mailbox holds, as said above. A KEY
+              // with no role here reaches the owner alone, as with to.
+              const noRole = !owns && space.role === null;
+              cited = rows.map((r) => r.peer).filter((peer) =>
+                peer !== me && !(decision && peer === parent?.author) && (!noRole || peer === toHex(space.owner)));
+            }
+            const named = [...recipients];
+            if (parent && !decision && parent.author !== me && !named.includes(parent.author)) named.push(parent.author);
+            for (const peer of cited) if (!named.includes(peer)) named.push(peer);
+            let reachable: string[] = [];
+            if (mayPost && named.length > 0) {
+              const inSpace = await sql<{ peer: string }[]>`
+                select encode(x, 'hex') as peer
+                  from unnest(${db.read.array(named.map((hex) => Buffer.from(hex, "hex")))}::bytea[]) x
+                 where x = ${space.owner}
+                    or exists (select 1 from schellingaf.memberships m
+                                where m.space_id = ${space.space_id}::uuid and m.peer_id = x)`;
+              reachable = inSpace.map((r) => r.peer);
+              // Where anyone writes, a reply reaches its parent's author whether or not that
+              // author is a member (append_post delivers it).
+              if (anyone && parent && !decision && parent.author !== me && !reachable.includes(parent.author)) reachable.push(parent.author);
+              // And a cited post's author, the same way.
+              if (anyone) for (const peer of cited) if (!reachable.includes(peer)) reachable.push(peer);
+            }
+            out.push({ reachable });
           }
-          // A go or a veto on a version is a decision, in an oracle space or a work space
-          // that keeps a document, and the proposer is told of it whatever their mailbox
-          // holds: read against their allowance, a proposer who filled their own could
-          // stop anybody deciding their proposals at all.
-          const decision = (space.oracle || space.document) && (post.kind === "go" || post.kind === "veto") && parent?.kind === "version";
-          let cited: string[] = [];
-          if (mayPost && sources.length > 0) {
-            const rows = await sql<{ peer: string }[]>`
-              select distinct encode(p.author_id, 'hex') as peer from schellingaf.visible_posts p
-               where p.space_id = ${space.space_id}::uuid
-                 and (p.post_id = any(${sources.filter((x) => UUID.test(x))}::uuid[])
-                      or p.seq = any(${sources.filter((x) => !UUID.test(x))}::bigint[]))`;
-            // A decision reaches its proposer whatever its mailbox holds, as said above. A KEY
-            // with no role here reaches the owner alone, as with to.
-            const noRole = !owns && space.role === null;
-            cited = rows.map((r) => r.peer).filter((peer) =>
-              peer !== me && !(decision && peer === parent?.author) && (!noRole || peer === toHex(space.owner)));
-          }
-          const named = [...recipients];
-          if (parent && !decision && parent.author !== me && !named.includes(parent.author)) named.push(parent.author);
-          for (const peer of cited) if (!named.includes(peer)) named.push(peer);
-          let reachable: string[] = [];
-          if (mayPost && named.length > 0) {
-            const inSpace = await sql<{ peer: string }[]>`
-              select encode(x, 'hex') as peer
-                from unnest(${db.read.array(named.map((hex) => Buffer.from(hex, "hex")))}::bytea[]) x
-               where x = ${space.owner}
-                  or exists (select 1 from schellingaf.memberships m
-                              where m.space_id = ${space.space_id}::uuid and m.peer_id = x)`;
-            reachable = inSpace.map((r) => r.peer);
-            // Where anyone writes, a reply reaches its parent's author whether or not that
-            // author is a member (append_post delivers it).
-            if (anyone && parent && !decision && parent.author !== me && !reachable.includes(parent.author)) reachable.push(parent.author);
-            // And a cited post's author, the same way.
-            if (anyone) for (const peer of cited) if (!reachable.includes(peer)) reachable.push(peer);
-          }
-          return { reachable };
+          return out;
         })
-      : null;
+      : items.map(() => null);
 
-    if (post.kind === "version") await spend(c, db, LIMITS.proposals(me, firstDay(bearer)));
-    const links = post.kind === "version" ? parseDocument(post.body ?? "").links : null;
+    const single = items[0]!;
+    if (single.post.kind === "version") await spend(c, db, LIMITS.proposals(me, firstDay(bearer)));
+    const links = single.post.kind === "version" ? parseDocument(single.post.body ?? "").links : null;
     // A recipient whose allowance for notices is spent is left out of this post's
     // notices, and the post is written: refusing it would let one busy recipient,
     // a swarm's coordinator most of all, stop everybody reporting to it. It still
-    // reads the post in the SPACE; the answer says who was not told.
-    let quiet: string[] = [];
-    if (scene && scene.reachable.length > 0) {
-      const empty = await emptyOf(
-        db,
-        scene.reachable.flatMap((recipient) => [SHARED.delivery(me, recipient), SHARED.inbound(recipient)]),
-      );
-      quiet = scene.reachable.filter(
-        (recipient) => empty.has(SHARED.delivery(me, recipient).key) || empty.has(SHARED.inbound(recipient).key),
-      );
+    // reads the post in the SPACE; the answer says who was not told. In posts, each
+    // allowance is read once and counted down POST by POST, so a recipient is left out
+    // from the POST its count passes its balance at, and no sooner.
+    const quiet: string[][] = items.map(() => []);
+    const charged = scenes.flatMap((scene) => scene?.reachable.flatMap((recipient) => [SHARED.delivery(me, recipient), SHARED.inbound(recipient)]) ?? []);
+    if (charged.length > 0) {
+      const balance = await refilledOf(db, charged);
+      const counted = new Map<string, number>();
+      for (const [i, scene] of scenes.entries()) {
+        for (const recipient of scene?.reachable ?? []) {
+          const buckets = [SHARED.delivery(me, recipient).key, SHARED.inbound(recipient).key];
+          if (buckets.some((key) => (counted.get(key) ?? 0) + 1 > balance.get(key)!)) {
+            quiet[i]!.push(recipient);
+            continue;
+          }
+          for (const key of buckets) counted.set(key, (counted.get(key) ?? 0) + 1);
+        }
+      }
     }
 
-    const appendPost = (sql: typeof db.write) => append(sql, {
-      name, author: bearer.peerId, post, signed, links, reviewer: config.oracleReviewer ?? null, quiet, sealed,
+    const appendPost = (sql: typeof db.write, item: Item, i: number) => append(sql, {
+      name, author: bearer.peerId, post: item.post, signed: item.signed, links: i === 0 ? links : null,
+      reviewer: config.oracleReviewer ?? null, quiet: quiet[i]!, sealed: item.sealed,
       openPostsPerDay: openPostsPerDay(firstDay(bearer)),
     });
     // A post's attachment rows, written by attach_files() while append_post's SPACE lock
     // is held, or on a replay compared with the list the first post stored.
-    const attachFiles = (sql: typeof db.write, postId: unknown, replayed: boolean) => sql<{ list: unknown[] }[]>`
+    const attachFiles = (sql: typeof db.write, postId: unknown, attachments: Attachment[], replayed: boolean) => sql<{ list: unknown[] }[]>`
       select schellingaf.attach_files(
         ${String(postId)}::uuid, ${bearer.peerId}, ${sql.json(attachments)}, ${replayed},
         ${ATTACHMENT_LIMITS.pendingHours}, ${ATTACHMENT_LIMITS.attachedBytesPerSpace}) as list`;
 
-    // A post with no attachments is the one statement it always was. One with attachments
-    // is written in one transaction with its rows: both or neither.
-    let receipt: Record<string, unknown>;
-    let attached: unknown[] = [];
-    if (attachments.length === 0) {
-      const [row] = await appendPost(db.write);
-      receipt = row!.receipt;
+    // Each POST written, then what it does to a task: done or a check, as the tasks route
+    // would with this POST as its post_id, which by then is the caller's own POST here. A
+    // task the POST cannot change refuses it, and both are rolled back. A check refused
+    // after a reject reopened the task is answered, not raised, with its notice: thrown
+    // here, so the notice rolls back with the POST. A replayed POST changes no task again.
+    type Wrote = { receipt: Record<string, unknown>; attached: unknown[]; task: Record<string, unknown> | null; delivered: unknown };
+    const writeItem = async (sql: typeof db.write, item: Item, i: number, done: Wrote[]): Promise<Wrote> => {
+      if (item.replyKey !== null) item.post = { ...item.post, replyTo: String(done[item.replyKey]!.receipt.post_id) };
+      const [row] = await appendPost(sql, item, i);
+      const receipt = row!.receipt;
+      const replayed = receipt.replayed === true;
+      let attached: unknown[] = [];
+      // A retry that drops the list of a post that had one is a conflict, not a replay.
+      if (item.attachments.length > 0 || replayed) {
+        const [list] = await attachFiles(sql, receipt.post_id, item.attachments, replayed);
+        attached = list!.list;
+      }
+      if (item.task === null || replayed) return { receipt, attached, task: null, delivered: null };
+      const { number, check, reason } = item.task;
+      const [out] = check === null
+        ? await sql<{ out: Record<string, unknown> }[]>`
+            select schellingaf.task_done(${name}, ${bearer.peerId}, ${number}::int, ${String(receipt.post_id)}::uuid) as out`
+        : await sql<{ out: Record<string, unknown> }[]>`
+            select schellingaf.task_check(${name}, ${bearer.peerId}, ${number}::int, ${check},
+                                          ${String(receipt.post_id)}::uuid, ${reason}, true) as out`;
+      const { refused, detail, delivered, task } = out!.out;
+      if (typeof refused === "string") throw new ApiError(refused, typeof detail === "string" ? { detail } : {});
+      return { receipt, attached, task: short(shown(task as Record<string, unknown>)), delivered };
+    };
+
+    // A POST with neither attachments nor a task is the one statement it always was. Any
+    // other call is written in one transaction: every POST and its task, or nothing.
+    let results: Wrote[];
+    if (!batch && single.attachments.length === 0 && single.task === null) {
+      const [row] = await appendPost(db.write, single, 0);
+      const receipt = row!.receipt;
+      let attached: unknown[] = [];
       // A retry that drops the list of a post that had one is a conflict, not a replay.
       if (receipt.replayed === true) {
-        const [compared] = await attachFiles(db.write, receipt.post_id, true);
+        const [compared] = await attachFiles(db.write, receipt.post_id, [], true);
         attached = compared!.list;
       }
+      results = [{ receipt, attached, task: null, delivered: null }];
     } else {
-      [receipt, attached] = await db.write.begin(async (tx) => {
+      results = await db.write.begin(async (tx) => {
         const sql = tx as unknown as typeof db.write;
-        const [row] = await appendPost(sql);
-        const written = row!.receipt;
-        const [list] = await attachFiles(sql, written.post_id, written.replayed === true);
-        return [written, list!.list] as const;
-      }) as [Record<string, unknown>, unknown[]];
+        const done: Wrote[] = [];
+        for (const [i, item] of items.entries()) {
+          try {
+            done.push(await writeItem(sql, item, i, done));
+          } catch (error) {
+            throw batch ? atItem(i, item.key, error) : error;
+          }
+        }
+        // All replayed, or none: a resend of a call that committed whole. A mix is one key
+        // used again with another call.
+        const first = done.findIndex((w) => w.receipt.replayed !== true);
+        const again = done.findIndex((w) => w.receipt.replayed === true);
+        if (first !== -1 && again !== -1) {
+          const at = (i: number) => `posts[${i}]${items[i]!.key === null ? "" : ` (${items[i]!.key})`}`;
+          throw new ApiError("IDEMPOTENCY_CONFLICT", {
+            detail: `${at(first)} is new where ${at(again)} replayed: resend the first call byte for byte, or use a new idempotency_key`,
+          });
+        }
+        return done;
+      }) as Wrote[];
     }
-    if (attached.length > 0) receipt = { ...receipt, attachments: attached };
-    const replayed = receipt.replayed === true;
-    // Written to the request log before anything else can fail: these are the
-    // numbers a restore has to be reconciled against, and they exist only here.
-    recordHeads(c, headsOf(name, receipt), { replayed });
-    // And the documents a connector stream may follow that this post changed
-    // besides the SPACE's own: its newest dossier, and the post it answers,
-    // replaces or retracts, whose page counts its replies and names what
-    // corrected it. See listen.ts.
-    if (!replayed) {
-      if (post.kind === "dossier") publishChange({ kind: "dossier_posted", space: name });
-      const oracle = receipt.oracle as { state?: string; decided?: string; version?: string } | undefined;
-      if (oracle?.state === "current" || oracle?.decided === "approved") {
-        publishChange({ kind: "document_changed", space: name });
-      }
-      for (const postId of [post.replyTo, post.supersedes, post.retracts]) {
-        if (postId !== null) publishChange({ kind: "post_changed", postId: postId.toLowerCase() });
-      }
-    }
-    // delivered is logged, never returned: who else received a copy is not the
-    // author's business, and mailbox positions are private counters.
-    // admitted_revision is read to price read_cost below, and answered nowhere.
-    const { delivered, admitted_revision: _revision, ...rest } = receipt as Record<string, unknown> & { delivered?: unknown };
-    // The stage a go set carries finished, as every stage of a SPACE does, from its word.
-    const stageSet = rest.stage_set as { word: string; note: string | null } | undefined;
-    if (stageSet) rest.stage_set = { ...stageSet, finished: isFinishedStage(stageSet.word) };
-    // The service's signed receipt, for a replay too: it describes the post the key
-    // already made, which is exactly what a retry is asking about.
-    // Slim unless asked: the answer's own space_id, seq, post_id, object_id, chain_hash
-    // and posted_at, which are the signed strings, rebuild the rest of the signed bytes.
-    if (typeof rest.object_id === "string" && typeof rest.chain_hash === "string" && typeof rest.space_id === "string") {
-      const signed = await service.receipt({
-        spaceId: rest.space_id,
-        seq: String(rest.seq),
-        postId: String(rest.post_id),
-        objectId: rest.object_id,
-        chainHash: rest.chain_hash,
-        postedAt: String(rest.posted_at),
+    const replayed = results.every((w) => w.receipt.replayed === true);
+    state.wrote = !replayed;
+
+    // A replayed POST that carries a task: neither function is called again, so the task
+    // is read as it stands, and the POST must be the one that finished it or checked it so.
+    // One that was posted before without it is a conflict, with the call that does it.
+    if (replayed && items.some((item) => item.task !== null)) {
+      const linked = await db.readTx(me, async (sql) => {
+        const out: (Record<string, unknown> | null)[] = [];
+        for (const [i, item] of items.entries()) {
+          if (item.task === null) {
+            out.push(null);
+            continue;
+          }
+          const postId = String(results[i]!.receipt.post_id);
+          const { number, check, reason } = item.task;
+          const [row] = await sql<{ item: Record<string, unknown>; finished: boolean; checked: boolean }[]>`
+            select schellingaf.task_item(t, s.task_confirmations) as item,
+                   (t.done_post_id is not distinct from ${postId}::uuid
+                    or exists (select 1 from schellingaf.task_checks k
+                                where k.task_id = t.task_id and k.result_post_id = ${postId}::uuid)) as finished,
+                   exists (select 1 from schellingaf.task_checks k
+                            where k.task_id = t.task_id and k.peer_id = ${bearer.peerId}
+                              and k.post_id = ${postId}::uuid and k.verdict = ${check ?? "finish"}
+                              and k.reason is not distinct from nullif(${reason ?? ""}, '')) as checked
+              from schellingaf.tasks t join schellingaf.spaces s on s.space_id = t.space_id
+             where s.name = ${name} and t.number = ${number}::int`;
+          if (!row || !(check === null ? row.finished : row.checked)) {
+            const refused = new ApiError("IDEMPOTENCY_CONFLICT", {
+              detail: check === null
+                ? "task: this POST was posted before without this task part: mark it done with POST /v1/spaces/(name)/tasks/(number)/done and its post_id"
+                : "task: this POST was posted before without this task part: check it with POST /v1/spaces/(name)/tasks/(number)/confirm or reject and its post_id",
+            });
+            throw batch ? atItem(i, item.key, refused) : refused;
+          }
+          out.push(short(shown(row.item)));
+        }
+        return out;
       });
-      rest.receipt = fullReceipt
-        ? { canonical: signed.canonical, signature: signed.signature, signer_key_id: signed.signer_key_id }
-        : { v: RECEIPT_VERSION, service_epoch: signed.service_epoch, signer_key_id: signed.signer_key_id, signature: signed.signature };
+      for (const [i, task] of linked.entries()) results[i]!.task = task;
     }
-    // Deliveries that actually happened, and only those: a replay delivered
-    // nothing, and a refused post never reached this line. An oracle space's own
-    // notices (a proposal to decide, one out of date, a watched document changed)
-    // are the service's, not the author's, and spend nobody's allowance. A citation
-    // is the author's, as a reply is.
-    const charged = Array.isArray(delivered)
-      ? (delivered as { recipient: string; reason?: string }[]).filter(
-          (d) => d.reason === undefined || d.reason === "to" || d.reason === "reply" || d.reason === "cited",
-        )
-      : [];
-    if (!replayed && charged.length > 0) {
-      await charge(
-        db,
-        charged.flatMap((d) => [
-          SHARED.delivery(me, d.recipient),
-          SHARED.inbound(d.recipient),
-        ]),
-      );
+
+    // Written to the request log before anything else can fail: these are the
+    // numbers a restore has to be reconciled against, and they exist only here. In
+    // posts, once for the call, in seq order, then the notices its task parts wrote.
+    recordHeads(c, [
+      ...results.flatMap((w) => headsOf(name, w.receipt)),
+      ...results.flatMap((w) => (Array.isArray(w.delivered) && w.delivered.length > 0 ? headsOf(null, { delivered: w.delivered }) : [])),
+    ], { replayed });
+
+    const answers: Record<string, unknown>[] = [];
+    for (const [i, { receipt: written, attached }] of results.entries()) {
+      const item = items[i]!;
+      const { post, sealed } = item;
+      let receipt = written;
+      if (attached.length > 0) receipt = { ...receipt, attachments: attached };
+      // And the documents a connector stream may follow that this post changed
+      // besides the SPACE's own: its newest dossier, and the post it answers,
+      // replaces or retracts, whose page counts its replies and names what
+      // corrected it. See listen.ts. A reply by key names the post its key resolved to.
+      if (!replayed) {
+        if (post.kind === "dossier") publishChange({ kind: "dossier_posted", space: name });
+        const oracle = receipt.oracle as { state?: string; decided?: string; version?: string } | undefined;
+        if (oracle?.state === "current" || oracle?.decided === "approved") {
+          publishChange({ kind: "document_changed", space: name });
+        }
+        for (const postId of [post.replyTo, post.supersedes, post.retracts]) {
+          if (postId !== null) publishChange({ kind: "post_changed", postId: postId.toLowerCase() });
+        }
+      }
+      // delivered is logged, never returned: who else received a copy is not the
+      // author's business, and mailbox positions are private counters.
+      // admitted_revision is read to price read_cost below, and answered nowhere.
+      const { delivered, admitted_revision: _revision, ...rest } = receipt as Record<string, unknown> & { delivered?: unknown };
+      // The stage a go set carries finished, as every stage of a SPACE does, from its word.
+      const stageSet = rest.stage_set as { word: string; note: string | null } | undefined;
+      if (stageSet) rest.stage_set = { ...stageSet, finished: isFinishedStage(stageSet.word) };
+      // The service's signed receipt, for a replay too: it describes the post the key
+      // already made, which is exactly what a retry is asking about.
+      // Slim unless asked: the answer's own space_id, seq, post_id, object_id, chain_hash
+      // and posted_at, which are the signed strings, rebuild the rest of the signed bytes.
+      if (typeof rest.object_id === "string" && typeof rest.chain_hash === "string" && typeof rest.space_id === "string") {
+        const signed = await service.receipt({
+          spaceId: rest.space_id,
+          seq: String(rest.seq),
+          postId: String(rest.post_id),
+          objectId: rest.object_id,
+          chainHash: rest.chain_hash,
+          postedAt: String(rest.posted_at),
+        });
+        rest.receipt = fullReceipt
+          ? { canonical: signed.canonical, signature: signed.signature, signer_key_id: signed.signer_key_id }
+          : { v: RECEIPT_VERSION, service_epoch: signed.service_epoch, signer_key_id: signed.signer_key_id, signature: signed.signature };
+      }
+      // Deliveries that actually happened, and only those: a replay delivered
+      // nothing, and a refused post never reached this line. An oracle space's own
+      // notices (a proposal to decide, one out of date, a watched document changed)
+      // are the service's, not the author's, and spend nobody's allowance. A citation
+      // is the author's, as a reply is.
+      const charged = Array.isArray(delivered)
+        ? (delivered as { recipient: string; reason?: string }[]).filter(
+            (d) => d.reason === undefined || d.reason === "to" || d.reason === "reply" || d.reason === "cited",
+          )
+        : [];
+      if (!replayed && charged.length > 0) {
+        await charge(
+          db,
+          charged.flatMap((d) => [
+            SHARED.delivery(me, d.recipient),
+            SHARED.inbound(d.recipient),
+          ]),
+        );
+      }
+      // Who was named and not told: a recipient whose allowance for notices is spent, and
+      // one who blocks the messages of a KEY with no role here. Told is told by any notice
+      // of this post, the service's own included: a cited author handed a proposal to
+      // decide, or the document it watches, has this post in its mailbox.
+      const told = new Set(Array.isArray(delivered) ? (delivered as { recipient: string }[]).map((d) => d.recipient) : []);
+      const scene = scenes[i];
+      const notNotified = replayed || !scene ? [] : scene.reachable.filter((recipient) => !told.has(recipient));
+      // Whether its title or a sentence ran long: see hintOf.
+      const hint = hintOf(post, sealed !== null);
+      // What its readers pay for it, at each level, as a member reads it: so a writer sees
+      // the price of a long title or a missing summary in the answer to the write itself.
+      const readPrice = readCost({
+        space: name, author: bearer.peerId, receipt, post, attachments: attached as Written["attachments"],
+        sealed: sealed === null ? null : { header: sealed.header, ciphertext: sealed.ciphertext, generation: sealed.generation },
+      });
+      const task = results[i]!.task;
+      if (!batch) {
+        return c.json(
+          {
+            ...rest, space: name, read_cost: readPrice, ...(notNotified.length > 0 ? { not_notified: notNotified } : {}), ...(hint ? { hint } : {}),
+            ...(task ? { task } : {}),
+          },
+          replayed ? 200 : 201,
+        );
+      }
+      // In posts, the SPACE and whether the call replayed are said once, beside them.
+      const { space_id: _spaceId, replayed: _replayed, ...own } = rest;
+      answers.push({
+        ...(item.key === null ? {} : { key: item.key }),
+        ...own, read_cost: readPrice, ...(hint ? { hint } : {}), ...(notNotified.length > 0 ? { not_notified: notNotified } : {}),
+        ...(task ? { task } : {}),
+      });
     }
-    // Who was named and not told: a recipient whose allowance for notices is spent, and
-    // one who blocks the messages of a KEY with no role here. Told is told by any notice
-    // of this post, the service's own included: a cited author handed a proposal to
-    // decide, or the document it watches, has this post in its mailbox.
-    const told = new Set(Array.isArray(delivered) ? (delivered as { recipient: string }[]).map((d) => d.recipient) : []);
-    const notNotified = replayed || !scene ? [] : scene.reachable.filter((recipient) => !told.has(recipient));
-    // Whether its title or a sentence ran long: see hintOf.
-    const hint = hintOf(post, sealed !== null);
-    // What its readers pay for it, at each level, as a member reads it: so a writer sees
-    // the price of a long title or a missing summary in the answer to the write itself.
-    const readPrice = readCost({
-      space: name, author: bearer.peerId, receipt, post, attachments: attached as Written["attachments"],
-      sealed: sealed === null ? null : { header: sealed.header, ciphertext: sealed.ciphertext, generation: sealed.generation },
-    });
-    return c.json(
-      { ...rest, space: name, read_cost: readPrice, ...(notNotified.length > 0 ? { not_notified: notNotified } : {}), ...(hint ? { hint } : {}) },
-      replayed ? 200 : 201,
-    );
-  });
+    return c.json({ space: name, space_id: results[0]!.receipt.space_id, replayed, posts: answers }, replayed ? 200 : 201);
+  }
 
   app.get("/v1/spaces/:name/posts", async (c) => {
     // Anyone: a caller with no KEY reads a public SPACE's stream, and row-level

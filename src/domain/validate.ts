@@ -791,8 +791,9 @@ export type TaskInput = { key?: string; title: string; body: string; tag?: strin
 const TASK_NUMBER_TEXT = /^[1-9][0-9]{0,9}$/;
 const TASK_NUMBER_MAX = 2147483647;
 
-/** A key a batch's task may carry: a lowercase word starting with a letter, never a uuid. */
-function taskKey(value: unknown, at: string): string | undefined {
+/** A key a batch's task, or a POST in posts, may carry: a lowercase word starting with a
+ * letter, never a uuid. */
+export function taskKey(value: unknown, at: string): string | undefined {
   if (value === undefined || value === null) return undefined;
   if (typeof value !== "string" || !TASK_KEY.test(value) || UUID.test(value)) {
     throw new ApiError("INVALID_REQUEST", {
@@ -1028,6 +1029,48 @@ export function optionalTaskNumber(value: unknown): number | null {
   }
   if (value > 2147483647) throw new ApiError("TASK_NOT_FOUND");
   return value;
+}
+
+/** What `task` on a POST asks: finish task `number` with this POST, or check it, with `check`. */
+export type PostTask = { number: number; check: "confirm" | "reject" | null; reason: string | null };
+
+/** The keys `task` on a POST takes. */
+const POST_TASK_FIELDS = ["number", "check", "reason"];
+
+/**
+ * `task` on a POST, or null when it sends none: `number`, which this POST marks done, as
+ * POST .../tasks/{number}/done would; or with `check`, confirm or reject, a check of it that
+ * this POST shows, as .../confirm and .../reject would, with `reason`, which a reject needs.
+ * Read strictly: no other key, and a reason only with a check. Each refusal names its field
+ * as task.(field); a refusal in a batch is named by its item around it.
+ */
+export function readPostTask(value: unknown): PostTask | null {
+  if (value === undefined || value === null) return null;
+  const shape = () => new ApiError("INVALID_REQUEST", { detail: "task takes number, and check and reason for a check" });
+  if (typeof value !== "object" || Array.isArray(value)) throw shape();
+  const task = value as Record<string, unknown>;
+  if (Object.keys(task).some((key) => !POST_TASK_FIELDS.includes(key))) throw shape();
+  if (task.reason !== undefined && task.reason !== null && (task.check === undefined || task.check === null)) throw shape();
+  const prefixed = (error: unknown) =>
+    error instanceof ApiError && error.code === "INVALID_REQUEST" && error.detail !== undefined
+      ? new ApiError("INVALID_REQUEST", { detail: `task.${error.detail}` })
+      : error;
+  let number: number | null;
+  try {
+    number = optionalTaskNumber(task.number);
+  } catch (error) {
+    throw prefixed(error);
+  }
+  if (number === null) throw new ApiError("INVALID_REQUEST", { detail: "task.number is a whole number from 1" });
+  if (task.check === undefined || task.check === null) return { number, check: null, reason: null };
+  if (task.check !== "confirm" && task.check !== "reject") {
+    throw new ApiError("INVALID_REQUEST", { detail: "task.check is confirm or reject" });
+  }
+  try {
+    return { number, check: task.check, reason: taskReason(task.reason, task.check === "reject") };
+  } catch (error) {
+    throw prefixed(error);
+  }
 }
 
 /**

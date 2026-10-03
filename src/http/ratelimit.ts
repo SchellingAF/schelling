@@ -938,8 +938,19 @@ export async function refuseIfEmpty(db: Db, buckets: Bucket[], cost = 1): Promis
  * leave out of its notices rather than refusing the post for a busy recipient.
  */
 export async function emptyOf(db: Db, buckets: Bucket[], cost = 1): Promise<Set<string>> {
-  const empty = new Set<string>();
-  if (buckets.length === 0) return empty;
+  const refilled = await refilledOf(db, buckets);
+  return new Set(buckets.filter((bucket) => refilled.get(bucket.key)! < cost).map((bucket) => bucket.key));
+}
+
+/**
+ * What each shared bucket holds now, refilled, read and never debited, exactly as emptyOf
+ * reads it: a bucket with no row is full. Several POSTS in one call count, each against
+ * these balances, the notices they would charge, so a recipient is left out from the POST
+ * whose count passes its balance, and never before.
+ */
+export async function refilledOf(db: Db, buckets: Bucket[]): Promise<Map<string, number>> {
+  const refilled = new Map<string, number>();
+  if (buckets.length === 0) return refilled;
   // A plain SELECT, not take_tokens with a zero cost. take_tokens upserts, so
   // reading through it would let a caller create a row keyed by somebody else's
   // peer id just by addressing a post it is not allowed to send. A bucket that
@@ -951,15 +962,13 @@ export async function emptyOf(db: Db, buckets: Bucket[], cost = 1): Promise<Set<
   const rows = await db.read<{ key: string; tokens: number; age: number }[]>`
     select key, tokens, extract(epoch from (now() - updated_at)) as age
       from schellingaf.rate_buckets
-     where key = any(${buckets.map((b) => b.key)})`;
+     where key = any(${[...new Set(buckets.map((b) => b.key))]})`;
   const found = new Map(rows.map((r) => [r.key, r]));
   for (const bucket of buckets) {
     const row = found.get(bucket.key);
-    if (!row) continue;
-    const refilled = Math.min(bucket.capacity, row.tokens + bucket.refillPerSec * Number(row.age));
-    if (refilled < cost) empty.add(bucket.key);
+    refilled.set(bucket.key, row ? Math.min(bucket.capacity, row.tokens + bucket.refillPerSec * Number(row.age)) : bucket.capacity);
   }
-  return empty;
+  return refilled;
 }
 
 /**

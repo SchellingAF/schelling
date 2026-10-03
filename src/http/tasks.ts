@@ -79,7 +79,7 @@ function before(raw: string | undefined): bigint | null {
  * the KEY, which may still mark the task done while nobody else took it, but nobody holds
  * the task any more, so the answer says so.
  */
-function shown<T extends Record<string, unknown> | null>(task: T): T {
+export function shown<T extends Record<string, unknown> | null>(task: T): T {
   return task && task.claim_expired === true ? { ...task, claimed_by: null, claimed_until: null } : task;
 }
 
@@ -104,7 +104,7 @@ function compact(task: Record<string, unknown>): Record<string, unknown> {
 type Answer = { space: string; task: Record<string, unknown> | null; [key: string]: unknown };
 
 /** A task as a write answers it unless detail=full: its number, task_id and state. */
-function short(task: Record<string, unknown> | null): Record<string, unknown> | null {
+export function short(task: Record<string, unknown> | null): Record<string, unknown> | null {
   return task === null ? null : { number: task.number, task_id: task.task_id, state: task.state };
 }
 

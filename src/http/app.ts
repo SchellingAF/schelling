@@ -158,6 +158,7 @@ import {
   FINISHED_STAGES,
   STAGE_LIMITS,
   ATTACHMENT_LIMITS,
+  POST_LIMITS,
 } from "../surface/vocabulary.ts";
 import { mountSpaces, namedCode, receipt, startFor } from "./spaces.ts";
 import { mountPosts } from "./posts.ts";
@@ -1232,6 +1233,9 @@ export function createApp(config: Config, db: Db): Hono<Env> {
       signed_private_bytes: PRIVATE_MAX_BYTES,
       fingerprints_per_post: 32,
       recipients_per_post: 8,
+      // POSTS one call writes in posts, and the idempotency_key beside them.
+      posts_per_call: POST_LIMITS.batch,
+      batch_idempotency_key_bytes: POST_LIMITS.idempotencyKeyBytes,
       tags_per_member: 8,
       // The members one create sets at once, each as PUT .../members/{peer} sets one.
       create_members: CREATE_MEMBERS,
