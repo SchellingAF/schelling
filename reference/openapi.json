@@ -27630,10 +27630,17 @@
           "after_numbers": {
             "type": "array",
             "items": {
-              "type": "integer",
-              "minimum": 1
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
-            "description": "The numbers of the tasks in after, in the same order."
+            "description": "The numbers of the tasks in after, in the same order: null where that task cannot be read."
           },
           "state": {
             "type": "string",
@@ -27891,10 +27898,17 @@
           "after_numbers": {
             "type": "array",
             "items": {
-              "type": "integer",
-              "minimum": 1
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
-            "description": "The numbers of the tasks it waits for, in after's order. Present only when it waits for any."
+            "description": "The numbers of the tasks it waits for, in after's order: null where that task cannot be read. Present only when it waits for any."
           },
           "progress": {
             "type": "object",

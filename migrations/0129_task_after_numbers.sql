@@ -11,7 +11,8 @@
 -- never answer a number of another SPACE's task. The list calls task_item() as the caller,
 -- so the lookup passes the tasks policy, which answers for a SPACE as it does for the task
 -- being shown; the write functions call it as the owner. A task is never deleted, so each
--- id names a row, and one that did not would be left out, never answered as null.
+-- id names a row; an id that finds none (or none of this SPACE) is answered as null, so
+-- after_numbers always has after's length and order and a client may pair them by position.
 --
 -- Written as a scalar subquery for each id, a probe of the tasks' primary key, so that no
 -- plan reads the SPACE's tasks. As 0125_task_progress.sql made it in every other way:
@@ -28,8 +29,7 @@ CREATE OR REPLACE FUNCTION schellingaf.task_item(t schellingaf.tasks, p_required
                           FROM (SELECT o.ord,
                                        (SELECT k.number FROM schellingaf.tasks k
                                          WHERE k.task_id = o.task_id AND k.space_id = t.space_id) AS number
-                                  FROM unnest(t.waits_for) WITH ORDINALITY o(task_id, ord)) w
-                         WHERE w.number IS NOT NULL),
+                                  FROM unnest(t.waits_for) WITH ORDINALITY o(task_id, ord)) w),
       'state', CASE WHEN t.state = 'claimed' AND t.claimed_until <= now() THEN 'open' ELSE t.state END,
       'cycle', t.cycle,
       'created_by', encode(t.created_by, 'hex'), 'created_at', t.created_at,

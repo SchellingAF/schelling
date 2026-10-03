@@ -8808,7 +8808,7 @@ Its fixed sentences: how to take a task, at the top, and the index of open work,
 
 **components/schemas/Task/properties/after_numbers/description** — used in 1 place: components/schemas/Task
 
-> The numbers of the tasks in after, in the same order.
+> The numbers of the tasks in after, in the same order: null where that task cannot be read.
 
 **components/schemas/Task/properties/state/description** — used in 3 places: components/schemas/Task, components/schemas/TaskCompact, components/schemas/TaskShort
 
@@ -8856,7 +8856,7 @@ Its fixed sentences: how to take a task, at the top, and the index of open work,
 
 **components/schemas/TaskCompact/properties/after_numbers/description** — used in 1 place: components/schemas/TaskCompact
 
-> The numbers of the tasks it waits for, in after's order. Present only when it waits for any.
+> The numbers of the tasks it waits for, in after's order: null where that task cannot be read. Present only when it waits for any.
 
 **components/schemas/TaskCompact/properties/progress/description** — used in 1 place: components/schemas/TaskCompact
 
@@ -19354,9 +19354,9 @@ Its fixed sentences: how to take a task, at the top, and the index of open work,
 
 >   task_id <task id>, cycle <cycle>, added by <created by> at <created at>
 
-**render.ts: waits for task(s) <after numbers> (task_id** — text rendering
+**render.ts: waits for [task / tasks] <after** — text rendering
 
->   waits for task(s) <after numbers> (task_id <ids>)
+>   waits for [task / tasks] <after numbers> (task_id <ids>)
 
 **render.ts: waits for <ids>** — text rendering
 

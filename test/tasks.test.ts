@@ -14,6 +14,7 @@ import { createApp } from "../src/http/app.ts";
 import { KIND_GROUPS, TASK_LIMITS } from "../src/surface/vocabulary.ts";
 import { OPERATIONS } from "../src/surface/operations.ts";
 import { ERRORS } from "../src/db/errors.ts";
+import { renderTask, renderTasks } from "../src/mcp/render.ts";
 
 before(() => {
   process.env.PUBLIC_SPACE_MIN_KEY_AGE_HOURS = "0";
@@ -1785,7 +1786,7 @@ describe("a task says which task numbers it waits for", () => {
     const taken = await tool({ action: "next", number: 4 });
     assert.notEqual(taken.isError, true, taken.content[0].text);
     assert.deepEqual(taken.structuredContent.task.after_numbers, four.after_numbers);
-    assert.ok(taken.content[0].text.includes(`  waits for task(s) ${four.after_numbers.join(" ")} (task_id ${four.after.join(" ")})`), taken.content[0].text);
+    assert.ok(taken.content[0].text.includes(`  waits for tasks ${four.after_numbers.join(" ")} (task_id ${four.after.join(" ")})`), taken.content[0].text);
     const listed = await tool({ action: "list" });
     assert.deepEqual(listed.structuredContent.items.map((t: any) => [t.number, t.after_numbers]), [[4, four.after_numbers], [3, three.after_numbers], [2, undefined], [1, undefined]]);
     assert.match(listed.content[0].text, new RegExp(`^4  claimed, after ${four.after_numbers.join(" ")}  -  Report$`, "m"));
@@ -1793,24 +1794,88 @@ describe("a task says which task numbers it waits for", () => {
     assert.match(listed.content[0].text, /^2  accepted  -  Find the dates$/m);
   });
 
-  test("a task asked for beside a SPACE's tasks that is not its own is left out, never named by another SPACE's number", async () => {
+  test("after_numbers follows the row's own order, and keeps a place, as null, for an id that finds no task", async () => {
+    // add_tasks() sorts what a task waits for, so no write makes a row out of number order
+    // or one that names no task: the rows are made here, with waits_for set as written.
+    const owner = await agent();
+    const name = await workSpace(owner);
+    await fixture.owner`
+      insert into schellingaf.tasks (space_id, number, title, created_by)
+      select s.space_id, g, 'task ' || g, s.owner_id
+        from schellingaf.spaces s cross join generate_series(1, 20) g
+       where s.name = ${name}`;
+    const order = [19, 3, 12, 7, 20, 1, 15, 9];
+    const [unsorted] = await fixture.owner<{ numbers: (number | null)[]; after: string[] }[]>`
+      with made as (
+        insert into schellingaf.tasks (space_id, number, title, waits_for, created_by)
+        select s.space_id, 21, 'waits in no number order',
+               array(select k.task_id from unnest(string_to_array(${order.join(",")}, ',')::int[]) with ordinality o(n, ord)
+                       join schellingaf.tasks k on k.space_id = s.space_id and k.number = o.n order by o.ord),
+               s.owner_id
+          from schellingaf.spaces s where s.name = ${name}
+        returning *)
+      select schellingaf.task_item(m, 0)->'after_numbers' as numbers,
+             array(select jsonb_array_elements_text(schellingaf.task_item(m, 0)->'after')) as after
+        from made m`;
+    assert.equal(unsorted!.after.length, order.length);
+    assert.deepEqual(unsorted!.numbers, order, "the numbers are after's, in its order, not sorted");
+    // An id that finds no task keeps its place as null, so a client may pair the two lists by position.
+    const [missing] = await fixture.owner<{ numbers: (number | null)[]; after: string[] }[]>`
+      with made as (
+        insert into schellingaf.tasks (space_id, number, title, waits_for, created_by)
+        select s.space_id, 22, 'waits for a task that is not there',
+               array[(select k.task_id from schellingaf.tasks k where k.space_id = s.space_id and k.number = 5),
+                     gen_random_uuid(),
+                     (select k.task_id from schellingaf.tasks k where k.space_id = s.space_id and k.number = 2)],
+               s.owner_id
+          from schellingaf.spaces s where s.name = ${name}
+        returning *)
+      select schellingaf.task_item(m, 0)->'after_numbers' as numbers,
+             array(select jsonb_array_elements_text(schellingaf.task_item(m, 0)->'after')) as after
+        from made m`;
+    assert.equal(missing!.after.length, 3);
+    assert.deepEqual(missing!.numbers, [5, null, 2]);
+    // And the list answers both as rows, in full and compact, with a place for each id.
+    const listed = (await list(null, name, "?limit=2")).body.items as any[];
+    assert.deepEqual(listed.map((t) => [t.number, t.after_numbers]), [[22, [5, null, 2]], [21, order]]);
+    const compact = (await list(null, name, "?limit=2&detail=compact")).body.items as any[];
+    assert.deepEqual(compact.map((t) => [t.number, t.after_numbers]), [[22, [5, null, 2]], [21, order]]);
+  });
+
+  test("a task and a list say task for one number and tasks for several, and a null reads as unreadable", () => {
+    const ids = ["0199aaaa-0000-7000-8000-000000000001", "0199aaaa-0000-7000-8000-000000000002", "0199aaaa-0000-7000-8000-000000000003"];
+    const task = (after: string[], numbers: (number | null)[]) => ({
+      task_id: "0199aaaa-0000-7000-8000-0000000000ff", number: 9, title: "Report", body: "", tag: null, after, after_numbers: numbers, state: "open", cycle: 0,
+      created_by: "a".repeat(64), created_at: "2026-10-03T00:00:00Z", confirmations: { required: 0, given: [] },
+    });
+    const one = renderTask("h", { space: "s", task: task([ids[0]!], [4]) });
+    assert.ok(one.includes(`\n  waits for task 4 (task_id ${ids[0]})\n`), one);
+    const several = renderTask("h", { space: "s", task: task(ids, [4, null, 6]) });
+    assert.ok(several.includes(`\n  waits for tasks 4 unreadable 6 (task_id ${ids.join(" ")})\n`), several);
+    const bare = renderTask("h", { space: "s", task: { ...task(ids.slice(0, 1), []), after_numbers: undefined } });
+    assert.ok(bare.includes(`\n  waits for ${ids[0]}\n`), "a task from a service without the numbers reads as it did");
+    const listed = renderTasks("h", { space: "s", items: [{ number: 9, title: "Report", tag: null, state: "open", after_numbers: [4, null, 6] }, { number: 8, title: "Free", tag: null, state: "open" }] });
+    assert.ok(listed.includes("9  open, after 4 unreadable 6  -  Report\n8  open  -  Free"), listed);
+  });
+
+  test("a task of another SPACE in after is answered as null, never by its number", async () => {
     // add_tasks() refuses another SPACE's task in after, so no route makes one; the row is
     // made here, to prove the projection asks for the SPACE again.
     const owner = await agent();
     const first = await workSpace(owner);
     const second = await workSpace(owner);
     const elsewhere = await added(owner, first, { title: "In the first SPACE" });
-    const [row] = await fixture.owner<{ numbers: number[]; after: string[] }[]>`
+    const [row] = await fixture.owner<{ numbers: (number | null)[]; after: string[] }[]>`
       with made as (
         insert into schellingaf.tasks (space_id, number, title, waits_for, created_by)
         select s.space_id, 1, 'Waits for a task of another SPACE', array[${elsewhere.task_id}::uuid], s.owner_id
           from schellingaf.spaces s where s.name = ${second}
         returning *)
-      select array(select jsonb_array_elements_text(schellingaf.task_item(m, 0)->'after_numbers')::int) as numbers,
+      select schellingaf.task_item(m, 0)->'after_numbers' as numbers,
              array(select jsonb_array_elements_text(schellingaf.task_item(m, 0)->'after')) as after
         from made m`;
     assert.deepEqual(row!.after, [elsewhere.task_id], "after is what the row holds");
-    assert.deepEqual(row!.numbers, [], "a number is answered only for a task of the same SPACE");
+    assert.deepEqual(row!.numbers, [null], "a number is answered only for a task of the same SPACE, and its place is kept");
   });
 });
 
@@ -2071,12 +2136,13 @@ describe("the plans inside the task functions", () => {
        where s.name = ${name}`;
     // Task 3001 waits for eight tasks, listed out of number order: what a write may not
     // make, since add_tasks() sorts them, but the projection follows the row's own order.
+    const order = [2900, 12, 1500, 7, 2999, 300, 1, 2048];
     const [waits] = await fixture.owner<{ id: string }[]>`
-      with picked as (
-        select t.task_id from schellingaf.tasks t join schellingaf.spaces s on s.space_id = t.space_id
-         where s.name = ${name} and t.number in (2900, 12, 1500, 7, 2999, 300, 1, 2048))
       insert into schellingaf.tasks (space_id, number, title, waits_for, created_by)
-      select s.space_id, 3001, 'waits for eight', array(select task_id from picked), s.owner_id
+      select s.space_id, 3001, 'waits for eight',
+             array(select k.task_id from unnest(string_to_array(${order.join(",")}, ',')::int[]) with ordinality o(n, ord)
+                     join schellingaf.tasks k on k.space_id = s.space_id and k.number = o.n order by o.ord),
+             s.owner_id
         from schellingaf.spaces s where s.name = ${name}
       returning task_id::text as id`;
     await fixture.owner`analyze schellingaf.tasks`;
@@ -2089,13 +2155,10 @@ describe("the plans inside the task functions", () => {
     assert.ok(scans.some((n) => n.Alias === "k"), `auto_explain logged no probe for the numbers after names:\n${shown}`);
     assert.ok(!scans.some((n) => n.Alias === "k" && n["Node Type"] === "Seq Scan"), `the numbers after names were found by a walk of the tasks:\n${shown}`);
     assert.ok(scans.some((n) => n.Alias === "k" && n["Index Name"] === "tasks_pkey"), shown);
-    const [item] = await fixture.owner<{ numbers: number[]; after: string[] }[]>`
-      select array(select jsonb_array_elements_text(schellingaf.task_item(t, 2)->'after_numbers')::int) as numbers,
-             array(select k.number from unnest(t.waits_for) with ordinality o(id, ord)
-                     join schellingaf.tasks k on k.task_id = o.id order by o.ord) as after
+    const [item] = await fixture.owner<{ numbers: number[] }[]>`
+      select schellingaf.task_item(t, 2)->'after_numbers' as numbers
         from schellingaf.tasks t where t.task_id = ${waits!.id}::uuid`;
-    assert.equal(item!.numbers.length, 8);
-    assert.deepEqual(item!.numbers, item!.after, "the numbers follow the row's own order");
+    assert.deepEqual(item!.numbers, order, "the numbers follow the row's own order");
   });
 });
 
