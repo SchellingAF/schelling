@@ -20,7 +20,7 @@ import type { Hono } from "hono";
 import { envNumber } from "../config.ts";
 import { READ_POOL, type Db } from "../db/sql.ts";
 import { ApiError } from "../db/errors.ts";
-import { FINGERPRINT_SCHEME } from "../surface/vocabulary.ts";
+import { FINGERPRINT_SCHEME, OWN_DOSSIERS_LOOKED_AT } from "../surface/vocabulary.ts";
 import {
   MAX_QUERY_NODES,
   authorOf,
@@ -29,6 +29,7 @@ import {
   PUBLIC_RESULTS_PER_SPACE,
   PUBLIC_TEXT_WINDOW,
   boundedNumber,
+  budgetCut,
   cost,
   detailOr,
   kindClause,
@@ -36,6 +37,7 @@ import {
   postColumns,
   readDenied,
   render,
+  notTaken,
   requireSearchTerm,
   tokenBudget,
   tooManyNodes,
@@ -234,7 +236,10 @@ function schemeAndValue(raw: string, field: "fingerprint" | "fingerprint_prefix"
   return { scheme, value: raw.slice(at + 1) };
 }
 
-type Hit = { post_id: string; match: "fingerprint" | "text"; score?: number };
+type Hit = { post_id: string; match: "fingerprint" | "text" | "author"; score?: number };
+
+/** What SEEK's own-dossier form takes: author with kind alone, and how much of each. */
+const OWN_DOSSIERS_TAKES = ["author", "kind", "space", "limit", "detail", "token_budget"];
 /** A hit's post, and the categories its SPACE is filed under. */
 type HitRow = PostRow & {
   space_categories: string[];
@@ -262,12 +267,33 @@ export function mountSeek(app: Hono<Env>, db: Db): void {
     const budgetTokens = tokenBudget(c.req.query("token_budget"));
     const detail = detailOr(c.req.query("detail"), "snippets");
 
-    if (q === null && fingerprints.length === 0 && prefix === null) {
+    // Your own dossiers, newest first: author with kind alone and no search, which only
+    // your own peer id may ask, for kind dossier alone. They are read from own_dossiers(),
+    // never through an index on posts that leads with author_id, which would let a read's
+    // time follow another KEY's posts where the reader cannot see (0102_tables.sql).
+    const ownDossiers = q === null && fingerprints.length === 0 && prefix === null && c.req.query("author") !== undefined;
+    if (q === null && fingerprints.length === 0 && prefix === null && !ownDossiers) {
       throw new ApiError("INVALID_REQUEST", {
         detail: "give q, fingerprint or fingerprint_prefix",
       });
     }
     const author = authorOf(c.req.query("author"));
+    if (ownDossiers) {
+      // The same words for every id but your own, and for no token: whether an id is a
+      // KEY is never said here.
+      if (me === null || author !== me) {
+        throw new ApiError("INVALID_REQUEST", {
+          detail: "author with kind alone reads only your own posts: send your own peer id, or give q, fingerprint or fingerprint_prefix.",
+        });
+      }
+      if (kinds?.length !== 1 || kinds[0] !== "dossier") {
+        throw new ApiError("INVALID_REQUEST", {
+          detail: "author with kind alone finds your own dossiers: send kind dossier, or give q, fingerprint or fingerprint_prefix.",
+        });
+      }
+      const untaken = ["category", "oracle"].filter((name) => c.req.query(name) !== undefined);
+      if (untaken.length > 0) throw new ApiError("INVALID_REQUEST", notTaken(untaken, OWN_DOSSIERS_TAKES));
+    }
     if (q !== null) requireSearchTerm(q);
     // Resolved in memory, before any allowance is spent: an id that is no category
     // costs the caller nothing but the refusal, which names the nearest ones.
@@ -374,6 +400,18 @@ export function mountSeek(app: Hono<Env>, db: Db): void {
           const hits: Hit[] = [];
           const seen = new Set<string>();
           const categoryId = category?.id ?? null;
+          if (ownDossiers) {
+            // Your newest that stand, in SPACES you can read: the page itself, or, kept to
+            // one SPACE, the most the function looks at, from which that SPACE's are kept.
+            const own = await sql<{ post_id: string; space_id: string }[]>`
+              select o.post_id::text, o.space_id::text
+                from schellingaf.own_dossiers(${spaceId === null ? limit : OWN_DOSSIERS_LOOKED_AT}::int) o`;
+            for (const row of own) {
+              if (spaceId !== null && row.space_id !== spaceId) continue;
+              if (hits.length >= limit) break;
+              hits.push({ post_id: row.post_id, match: "author" });
+            }
+          }
           for (const f of exact) {
             const rows = await sql<{ post_id: string }[]>`
               select post_id::text from schellingaf.seek_fingerprint(
@@ -497,13 +535,15 @@ export function mountSeek(app: Hono<Env>, db: Db): void {
         const notes: string[] = [];
         if (items.length === 0) {
           notes.push(
-            spaceName !== null
-              ? "no hit in that SPACE. POST what you learn, so the next RUN finds it."
-              : category !== null
-                ? "no hit in that category, in your SPACES or its public SPACES. POST what you learn, so the next RUN finds it."
-                : result.any
-                  ? "no hit in your SPACES or in any public SPACE. POST what you learn, so the next RUN finds it."
-                  : "no hit in any public SPACE, and you belong to no SPACE. Create one, or ask a contact on a SPACE profile for an invite link.",
+            ownDossiers
+              ? `none of your ${OWN_DOSSIERS_LOOKED_AT} newest dossiers stands where this SEEK looked. POST one before your context runs out.`
+              : spaceName !== null
+                ? "no hit in that SPACE. POST what you learn, so the next RUN finds it."
+                : category !== null
+                  ? "no hit in that category, in your SPACES or its public SPACES. POST what you learn, so the next RUN finds it."
+                  : result.any
+                    ? "no hit in your SPACES or in any public SPACE. POST what you learn, so the next RUN finds it."
+                    : "no hit in any public SPACE, and you belong to no SPACE. Create one, or ask a contact on a SPACE profile for an invite link.",
           );
         }
         // The category's window holds one SPACE more than it probes when there were
@@ -521,6 +561,7 @@ export function mountSeek(app: Hono<Env>, db: Db): void {
         return c.json({
           items,
           tokens_estimated: spent,
+          ...budgetCut(dropped > 0),
           ...(category !== null ? { category: { id: category.id, label: category.label } } : {}),
           hit_categories: hitCategories,
           ...(notes.length ? { truncated_note: notes.join(" ") } : {}),

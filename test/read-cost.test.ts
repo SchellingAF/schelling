@@ -17,12 +17,12 @@
 import { test, before, describe } from "node:test";
 import assert from "node:assert/strict";
 import { filed } from "./helpers.ts";
-import { useService, db, fixture, config, agent, send, read, type Agent, type App } from "./lib/service.ts";
+import { useService, db, fixture, config, agent, send, read, connector, type Agent, type App } from "./lib/service.ts";
 import { allowReadQueryWatch, watchReadQueries, type Db } from "../src/db/sql.ts";
 import { createApp } from "../src/http/app.ts";
-import { CONCURRENT_READS_PER_CALLER } from "../src/http/ratelimit.ts";
+import { CONCURRENT_READS_PER_CALLER, readsCounted, resetReadWindows } from "../src/http/ratelimit.ts";
 import { CANDIDATES_PER_SPACE, CANDIDATES_TOTAL, PUBLIC_CANDIDATES, RANK_WORK } from "../src/http/seek.ts";
-import { PUBLIC_RESULTS_PER_OWNER, PUBLIC_RESULTS_PER_SPACE, PUBLIC_TEXT_WINDOW, cost, render, type PostRow } from "../src/http/postview.ts";
+import { PUBLIC_RESULTS_PER_OWNER, PUBLIC_RESULTS_PER_SPACE, PUBLIC_TEXT_WINDOW, cost, itemCost, render, type PostRow } from "../src/http/postview.ts";
 
 /** Bodies large enough that fetching one that is never rendered is unmistakable
  * in a row count, and a space deep enough that the export cap bites well before
@@ -582,5 +582,57 @@ describe("a post's files are priced by the bytes their fields add", () => {
       Object.fromEntries(Object.entries(render(some, "snippets")).filter(([k]) => k.startsWith("attachment"))),
       counts,
     );
+  });
+});
+
+describe("one section of many documents: what a budget leaves out, and what a call spends", () => {
+  const names = ["costly-docs-a", "costly-docs-b", "costly-docs-c"];
+  before(async () => {
+    for (const [i, name] of names.entries()) {
+      assert.equal((await call("POST", "/v1/spaces", owner, { name, title: "Costly documents", document: true })).status, 201);
+      const posted = await call("POST", `/v1/spaces/${name}/posts`, owner, { kind: "version", body: `## Status\n\n${"Done, and checked. ".repeat(10 * (i + 1))}` });
+      assert.equal(posted.status, 201, JSON.stringify(posted.body));
+    }
+  });
+
+  test("token_budget=1 gives one item, the rest named in not_included in order, and tokens_estimated is what the items cost", async () => {
+    const asked = [...names, "costly-docs-none"];
+    const cut = await call("GET", `/v1/documents?spaces=${asked.join(",")}&section=status&token_budget=1`, owner);
+    assert.equal(cut.status, 200, JSON.stringify(cut.body));
+    assert.equal(cut.body.items.length, 1);
+    assert.deepEqual(cut.body.not_included, asked.slice(1));
+    assert.equal(cut.body.budget_cut, true);
+    assert.equal(cut.body.tokens_estimated, itemCost(cut.body.items[0]));
+    const whole = await call("GET", `/v1/documents?spaces=${asked.join(",")}&section=status`, owner);
+    assert.equal(whole.body.items.length, 4);
+    assert.deepEqual(whole.body.not_included, []);
+    assert.equal(whole.body.tokens_estimated, whole.body.items.reduce((sum: number, item: unknown) => sum + itemCost(item), 0));
+    // A budget that pays for the first two and not the third stops at the third.
+    const two = itemCost(whole.body.items[0]) + itemCost(whole.body.items[1]);
+    const some = await call("GET", `/v1/documents?spaces=${asked.join(",")}&section=status&token_budget=${two}`, owner);
+    assert.deepEqual(some.body.items.map((i: { space: string }) => i.space), asked.slice(0, 2));
+    assert.deepEqual(some.body.not_included, asked.slice(2));
+  });
+
+  test("a call spends one read for every five SPACES named, rounded up: 1, 5, 6 and 20 names", async () => {
+    const reader = await agent({ on: app });
+    for (const [count, reads] of [[1, 1], [5, 1], [6, 2], [20, 4]] as const) {
+      resetReadWindows();
+      const spaces = Array.from({ length: count }, (_, i) => `spent-${i}`).join(",");
+      const out = await call("GET", `/v1/documents?spaces=${spaces}&section=status`, reader);
+      assert.equal(out.status, 200, JSON.stringify(out.body));
+      assert.equal(readsCounted(`peer:${reader.peerId}`), reads, `${count} names spent ${readsCounted(`peer:${reader.peerId}`)} reads`);
+    }
+  });
+
+  test("the connector's read with spaces spends the same", async () => {
+    const reader = await agent({ on: app });
+    for (const [count, reads] of [[1, 1], [5, 1], [6, 2], [20, 4]] as const) {
+      resetReadWindows();
+      const spaces = Array.from({ length: count }, (_, i) => `spent-${i}`);
+      const { message } = await connector("tools/call", { name: "schellingaf_oracle", arguments: { action: "read", spaces, section: "status" } }, reader.token, app);
+      assert.notEqual(message.result.isError, true, message.result.content?.[0]?.text);
+      assert.equal(readsCounted(`peer:${reader.peerId}`), reads, `${count} names spent ${readsCounted(`peer:${reader.peerId}`)} reads through the connector`);
+    }
   });
 });

@@ -117,7 +117,9 @@ export const PLACES: {
 } = {
   routes: {
     "ALL /*": { none: "middleware on every request, with no words of its own" },
-    "ALL /v1/*": { none: "middleware on every /v1 request, with no words of its own" },
+    // Middleware on every /v1 request. One speaks: it refuses a name a read does not take,
+    // in details swept from src/http/postview.ts and src/http/app.ts.
+    "ALL /v1/*": [19],
     "ALL /mcp": [3, 6, 22, 23],
     "ALL /mcp/connect": [3, 6, 21, 22, 23],
     "OPTIONS /.well-known/oauth-protected-resource/mcp/connect": { none: "CORS preflight, no body" },

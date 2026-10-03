@@ -20,11 +20,14 @@ import { ApiError } from "../db/errors.ts";
 import { toHex } from "../domain/keys.ts";
 import { MAX_LINKS, parseDocument, sectionText, type Inline, type ParsedDocument } from "../domain/document.ts";
 import { sourceWithdrawn } from "./findings.ts";
-import { UUID, optionalCategories, optionalString, readBody, requireCategories } from "../domain/validate.ts";
-import { ORACLE_LIMITS, VERSION_STATES } from "../surface/vocabulary.ts";
+import { UUID, byteLength, optionalCategories, optionalString, readBody, requireCategories } from "../domain/validate.ts";
+import { ORACLE_LIMITS, SPACE_NAME, VERSION_STATES } from "../surface/vocabulary.ts";
 import { underOf } from "../surface/categories.ts";
-import { authorClause, authorOf, boundedNumber, cursor, detailOr, kindClause, kindsOf, postColumns, readDenied, render, timeCursor, tokenBudget, type PostRow, withinBudget } from "./postview.ts";
-import { LIMITS, publicKeyAgeHours, spend } from "./ratelimit.ts";
+import {
+  authorClause, authorOf, boundedNumber, budgetCut, cursor, detailOr, itemsWithin, kindClause, kindsOf, optionalTokenBudget,
+  postColumns, readDenied, render, timeCursor, tokenBudget, type PostRow, withinBudget,
+} from "./postview.ts";
+import { ANON_READS_PER_MINUTE, LIMITS, READS_PER_MINUTE, limitMoreReads, publicKeyAgeHours, readKey, spend } from "./ratelimit.ts";
 import { optionalBearer, requireBearer, type Env } from "./app.ts";
 import { headsOf, recordHeads, recordReturned } from "./log.ts";
 import { newJoinPolicy, newSpaceName, receipt, refuseOpenUnlessPublicWork, refuseTooNew } from "./spaces.ts";
@@ -146,6 +149,32 @@ function before(raw: string | undefined): bigint | null {
   return n > 0n ? n : null;
 }
 
+/** What a section id may look like, before it is looked up: the grammar makes each one
+ *  from its heading, lowercased (src/domain/document.ts). */
+const SECTION_ID = /^[\p{L}\p{N}-]{1,72}$/u;
+
+/** How many SPACES one read across documents names at most, and how many of them one
+ *  read of the caller's read limit pays for: a call naming 6 to 10 counts as two reads. */
+export const DOCUMENTS_MAX = 20;
+export const DOCUMENTS_PER_READ = 5;
+
+/**
+ * A document's text as far as a token budget goes, at three bytes a token: cut at the
+ * last line end inside it, or where a character begins when its first line is longer
+ * than that. Null when the whole text fits.
+ */
+function cutText(text: string, budgetTokens: number): string | null {
+  const limit = budgetTokens * 3;
+  const bytes = Buffer.from(text, "utf8");
+  if (bytes.length <= limit) return null;
+  const end = bytes.lastIndexOf(0x0a, limit);
+  if (end > 0) return bytes.subarray(0, end).toString("utf8");
+  let at = limit;
+  // A UTF-8 continuation byte is 10xxxxxx: step back to the byte a character starts at.
+  while (at > 0 && (bytes[at]! & 0xc0) === 0x80) at--;
+  return bytes.subarray(0, at).toString("utf8");
+}
+
 export function mountOracle(app: Hono<Env>, db: Db): void {
   const publicSpaceMinKeyAgeHours = publicKeyAgeHours();
 
@@ -156,10 +185,12 @@ export function mountOracle(app: Hono<Env>, db: Db): void {
     const me = optionalBearer(c.get("bearer"));
     const name = c.req.param("name");
     const sectionId = c.req.query("section") ?? null;
-    if (sectionId !== null && !/^[\p{L}\p{N}-]{1,72}$/u.test(sectionId)) {
+    if (sectionId !== null && !SECTION_ID.test(sectionId)) {
       throw new ApiError("INVALID_REQUEST", { detail: "section is a section id the document names" });
     }
     const at = c.req.query("version") ? cursor(c.req.query("version"), "version") : null;
+    // None unless sent: the text, or the section's, is cut to it at a line end.
+    const budgetTokens = optionalTokenBudget(c.req.query("token_budget"));
 
     const found = await db.readTx(me, async (sql) => {
       const space = await spaceFor(sql, name);
@@ -219,6 +250,7 @@ export function mountOracle(app: Hono<Env>, db: Db): void {
         sections: [],
         references: [],
         pending: found.pending,
+        tokens_estimated: 0,
         notice: "This document has no version yet. Propose the first with POST /v1/spaces/" + space.name + "/posts, kind version and no supersedes.",
       });
     }
@@ -235,6 +267,15 @@ export function mountOracle(app: Hono<Env>, db: Db): void {
       }
       section = { id: one.id, heading: one.heading, text: sectionText(text, one.id, parsed) ?? "" };
     }
+    // The text answered, the section's or the whole document's, cut to the budget when
+    // one was sent and it is longer: then text_bytes says how long it is whole.
+    const whole = section ? section.text : text;
+    const cut = whole === null || budgetTokens === null ? null : cutText(whole, budgetTokens);
+    const answered = cut ?? whole;
+    const budgetFields = {
+      tokens_estimated: answered === null ? 0 : Math.ceil(byteLength(answered) / 3),
+      ...(cut !== null ? { budget_cut: true, text_bytes: byteLength(whole!) } : {}),
+    };
     // Said only when true, as no_role is: a reader tests for the mark.
     const marked = (id: string) => (found.withdrawn?.sections.has(id) ? { source_withdrawn: true } : {});
     const version = render(row, "full") as Record<string, unknown>;
@@ -261,10 +302,123 @@ export function mountOracle(app: Hono<Env>, db: Db): void {
           : null,
         ...(found.withdrawn?.version ? { source_withdrawn: true } : {}),
       },
-      ...(section ? { section: { ...section, ...marked(section.id) } } : { text }),
+      ...(section ? { section: { ...section, text: answered, ...marked(section.id) } } : { text: answered }),
       sections: parsed ? parsed.sections.map((s) => ({ id: s.id, level: s.level, heading: s.heading, ...marked(s.id) })) : [],
       references: parsed ? parsed.references : [],
       pending: found.pending,
+      ...budgetFields,
+      notice: NOTICE,
+    });
+  });
+
+  // One section of up to twenty documents in one read, in the order asked: the same
+  // section id in each, an oracle space's document or a work space's. A SPACE that does
+  // not exist, one the caller may not read and one withheld answer alike, not_found,
+  // from the same statement, as a batch read of posts does: no probe of why, and no
+  // owner. Each SPACE takes one item, so a missing one and an unreadable one have the
+  // same fields in the same place. Two statements at most, however many SPACES.
+  app.get("/v1/documents", async (c) => {
+    const me = optionalBearer(c.get("bearer"));
+    const raw = (c.req.query("spaces") ?? "").split(",").map((x) => x.trim()).filter(Boolean);
+    if (raw.length === 0 || raw.length > DOCUMENTS_MAX) {
+      throw new ApiError("INVALID_REQUEST", { detail: "spaces is 1 to 20 SPACE names, comma separated" });
+    }
+    if (raw.some((name) => !SPACE_NAME.test(name))) {
+      throw new ApiError("INVALID_REQUEST", { detail: "spaces are SPACE names: 3 to 63 lowercase letters, digits and hyphens" });
+    }
+    // Asked-for order, a repeated name keeping its first place.
+    const names = [...new Set(raw)];
+    const sectionId = c.req.query("section") ?? "";
+    if (sectionId === "") {
+      throw new ApiError("INVALID_REQUEST", { detail: "section is required: the section id to read in each document, such as status" });
+    }
+    if (!SECTION_ID.test(sectionId)) throw new ApiError("INVALID_REQUEST", { detail: "section is a section id the document names" });
+    // No id has a capital: the grammar lowercases every heading it makes one from.
+    if (sectionId.toLowerCase() !== sectionId) {
+      throw new ApiError("INVALID_REQUEST", { detail: "section ids are lowercase, such as status" });
+    }
+    const budgetTokens = tokenBudget(c.req.query("token_budget"));
+    // A read of the caller's limit for every five SPACES named, the first counted
+    // already as every read is: parsing up to twenty documents a parse cache cannot
+    // hold is that many times a single read.
+    limitMoreReads(readKey(c, me), me === null ? ANON_READS_PER_MINUTE : READS_PER_MINUTE, Math.ceil(raw.length / DOCUMENTS_PER_READ) - 1);
+
+    type DocumentRow = {
+      name: string;
+      space_id: string | null;
+      oracle: boolean | null;
+      document: boolean | null;
+      readable: boolean;
+      outside: boolean;
+      post_id: string | null;
+      seq: string | null;
+      body: string | null;
+      unavailable: unknown;
+    };
+    const found = await db.readTx(me, async (sql) => {
+      // Every name at once: the SPACE by its name, whether the caller reads it, from the
+      // caller's SPACES gathered once, and withheld from everyone, its owner too, its
+      // current version and that version's post. Row security hides an unreadable SPACE's
+      // versions as well.
+      const rows = await sql<DocumentRow[]>`
+        select n.name, s.space_id::text, s.oracle, s.document,
+               coalesce((m.space_id is not null or schellingaf.space_is_public(s.space_id))
+                        and not exists (select 1 from schellingaf.withheld_spaces w
+                                         where w.space_id = s.space_id and w.released_at is null), false) as readable,
+               m.space_id is null as outside,
+               v.post_id::text, v.seq::text, p.body, p.unavailable
+          from unnest(${names}::text[]) with ordinality as n(name, ord)
+          left join schellingaf.spaces s on s.name = n.name
+          left join (select x.id as space_id from schellingaf.caller_space_ids() as x(id)) m on m.space_id = s.space_id
+          left join schellingaf.oracle_versions v on v.space_id = s.space_id and v.state = 'current'
+          left join schellingaf.visible_posts p on p.post_id = v.post_id
+         order by n.ord`;
+      // The posts of their own SPACE the found sections of work spaces cite, each asked
+      // once whether it was replaced or retracted, in one statement for every SPACE.
+      const cites = new Map<string, Set<string>>();
+      for (const row of rows) {
+        if (!row.readable || row.oracle || !row.document || row.body === null || row.post_id === null) continue;
+        const seqs = citedBySection(parsedOf(row.post_id, row.body), row.name).get(sectionId);
+        if (seqs?.size) cites.set(row.space_id!, seqs);
+      }
+      const pairs = [...cites].flatMap(([spaceId, seqs]) => [...seqs].map((seq) => [spaceId, seq] as const));
+      const gone = pairs.length === 0 ? [] : await sql<{ space_id: string; seq: string }[]>`
+        select p.space_id::text, p.seq::text
+          from unnest(${pairs.map(([spaceId]) => spaceId)}::uuid[], ${pairs.map(([, seq]) => seq)}::bigint[]) as w(space_id, seq)
+          join schellingaf.posts p on p.space_id = w.space_id and p.seq = w.seq
+         where exists (select 1 from schellingaf.posts x where x.supersedes = p.post_id and x.kind <> 'version')
+            or exists (select 1 from schellingaf.posts x where x.retracts = p.post_id)`;
+      return { rows, withdrawn: new Set(gone.map((g) => g.space_id)) };
+    });
+
+    const items = found.rows.map((row): Record<string, unknown> => {
+      const missing = (reason: string) => ({ space: row.name, version: null, text: null, reason });
+      if (row.space_id === null || !row.readable) return missing("not_found");
+      if (!row.oracle && !row.document) return missing("no_document");
+      if (row.post_id === null || row.seq === null) return missing("no_version");
+      const version = { post_id: row.post_id, seq: row.seq };
+      if (row.body === null) {
+        return { space: row.name, version, text: null, reason: "unavailable", ...(row.unavailable ? { unavailable: row.unavailable } : {}) };
+      }
+      const parsed = parsedOf(row.post_id, row.body);
+      const text = parsed.sections.some((s) => s.id === sectionId) ? sectionText(row.body, sectionId, parsed) : null;
+      if (text === null) return { space: row.name, version, text: null, reason: "no_section" };
+      return { space: row.name, version, text, ...(found.withdrawn.has(row.space_id) ? { source_withdrawn: true } : {}) };
+    });
+    const { items: kept, spent, cut } = itemsWithin(items, budgetTokens);
+    recordReturned(
+      c,
+      "open",
+      found.rows.slice(0, kept.length).filter((r, i) => r.post_id !== null && typeof kept[i]!.text === "string").map((r) => ({ post_id: r.post_id!, outside: r.outside })),
+    );
+    if (me === null) c.set("publicRead", true);
+    return c.json({
+      section: sectionId,
+      items: kept,
+      // Left out by the budget, in order, by name: ask again with these, or a larger budget.
+      not_included: names.slice(kept.length),
+      tokens_estimated: spent,
+      ...budgetCut(cut),
       notice: NOTICE,
     });
   });
@@ -282,6 +436,7 @@ export function mountOracle(app: Hono<Env>, db: Db): void {
     }
     const limit = boundedNumber(c.req.query("limit"), 50, 1, 200, "limit");
     const until = before(c.req.query("before"));
+    const budgetTokens = optionalTokenBudget(c.req.query("token_budget"));
 
     const found = await db.readTx(me, async (sql) => {
       const space = await spaceFor(sql, name);
@@ -322,8 +477,7 @@ export function mountOracle(app: Hono<Env>, db: Db): void {
     });
     if (!found) throw new ApiError("SPACE_NOT_FOUND");
     if (me === null) c.set("publicRead", true);
-    recordReturned(c, "read", found.rows);
-    const items = found.rows.map((r) => {
+    const page = found.rows.map((r) => {
       const post = render(r, "snippets") as Record<string, unknown>;
       return {
         post_id: r.post_id,
@@ -355,11 +509,16 @@ export function mountOracle(app: Hono<Env>, db: Db): void {
           : null,
       };
     });
+    const { items, spent, cut } = itemsWithin(page, budgetTokens);
+    recordReturned(c, "read", found.rows.slice(0, items.length));
+    const more = cut || items.length === limit;
     return c.json({
       space: found.space.name,
       items,
-      next_before: items.length === limit ? items.at(-1)!.seq : null,
-      has_more: items.length === limit,
+      next_before: more ? items.at(-1)!.seq : null,
+      has_more: more,
+      tokens_estimated: spent,
+      ...budgetCut(cut),
       notice: NOTICE,
     });
   });
@@ -373,6 +532,7 @@ export function mountOracle(app: Hono<Env>, db: Db): void {
     const limit = boundedNumber(c.req.query("limit"), 50, 1, 200, "limit");
     // Where the last page ended: when that document's link changed, and its SPACE.
     const until = timeCursor(c.req.query("before"), UUID);
+    const budgetTokens = optionalTokenBudget(c.req.query("token_budget"));
     const found = await db.readTx(me, async (sql) => {
       const space = await spaceFor(sql, name);
       if (!space) return null;
@@ -397,19 +557,25 @@ export function mountOracle(app: Hono<Env>, db: Db): void {
     });
     if (!found) throw new ApiError("SPACE_NOT_FOUND");
     if (me === null) c.set("publicRead", true);
-    const last = found.rows.at(-1);
-    const more = found.rows.length === limit;
-    return c.json({
-      space: found.space.name,
-      ...(postNumber !== null ? { post: postNumber.toString() } : {}),
-      items: found.rows.map((r) => ({
+    const { items, spent, cut } = itemsWithin(
+      found.rows.map((r) => ({
         name: r.name,
         title: r.title,
         version_seq: r.version_seq,
         changed_at: r.changed_at?.toISOString() ?? null,
       })),
+      budgetTokens,
+    );
+    const last = found.rows[items.length - 1];
+    const more = cut || found.rows.length === limit;
+    return c.json({
+      space: found.space.name,
+      ...(postNumber !== null ? { post: postNumber.toString() } : {}),
+      items,
       next_before: more && last ? `${last.at}~${last.space_id}` : null,
       has_more: more,
+      tokens_estimated: spent,
+      ...budgetCut(cut),
       notice: NOTICE,
     });
   });
@@ -462,6 +628,7 @@ export function mountOracle(app: Hono<Env>, db: Db): void {
       next_before: more && last ? last.seq : null,
       has_more: more,
       tokens_estimated: spent,
+      ...budgetCut(taken.length < page.length),
       notice: "what stands: posts nobody replaced or retracted, newest first. " + NOTICE,
     });
   });
@@ -557,6 +724,7 @@ export function mountOracle(app: Hono<Env>, db: Db): void {
 
   app.get("/v1/watching", async (c) => {
     const bearer = requireBearer(c.get("bearer"));
+    const budgetTokens = optionalTokenBudget(c.req.query("token_budget"));
     const rows = await db.readTx(toHex(bearer.peerId), async (sql) => sql<
       { name: string; title: string; since: Date; version_seq: string | null; changed_at: Date | null }[]
     >`
@@ -566,14 +734,22 @@ export function mountOracle(app: Hono<Env>, db: Db): void {
         left join schellingaf.oracle_versions v on v.space_id = w.space_id and v.state = 'current'
        where w.peer_id = ${bearer.peerId}
        order by v.decided_at desc nulls last, s.name`);
-    return c.json({
-      items: rows.map((r) => ({
+    // No cursor: a KEY watches at most watchesPerKey documents, and a budget that cuts
+    // the list is answered with a larger one.
+    const { items, spent, cut } = itemsWithin(
+      rows.map((r) => ({
         name: r.name,
         title: r.title,
         since: r.since.toISOString(),
         version_seq: r.version_seq,
         changed_at: r.changed_at?.toISOString() ?? null,
       })),
+      budgetTokens,
+    );
+    return c.json({
+      items,
+      tokens_estimated: spent,
+      ...budgetCut(cut),
       notice: NOTICE,
     });
   });

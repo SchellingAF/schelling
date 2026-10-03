@@ -46,6 +46,51 @@ export function tokenBudget(raw: string | undefined): number {
 }
 
 /**
+ * The `token_budget` of a read that applies none unless one is sent: every list that
+ * gained one after the posts, so a caller that sends none gets the page it always got,
+ * bounded by `limit` alone. Null when none is sent.
+ */
+export function optionalTokenBudget(raw: string | undefined): number | null {
+  return raw === undefined ? null : tokenBudget(raw);
+}
+
+/** What one item of a list costs, in tokens: its JSON bytes over three, as a post's and a task's are. */
+export function itemCost(item: unknown): number {
+  return Math.ceil(byteLength(JSON.stringify(item)) / 3);
+}
+
+/**
+ * The items a budget pays for, in order: the first always, however large, and then each
+ * until the first that would pass the budget, where the page stops. No budget keeps them
+ * all. `cut` says the budget left an item out, which the answer says as `budget_cut`.
+ */
+export function itemsWithin<T>(items: T[], budgetTokens: number | null): { items: T[]; spent: number; cut: boolean } {
+  let spent = 0;
+  for (let i = 0; i < items.length; i++) {
+    const price = itemCost(items[i]);
+    if (budgetTokens !== null && i > 0 && spent + price > budgetTokens) {
+      return { items: items.slice(0, i), spent, cut: true };
+    }
+    spent += price;
+  }
+  return { items, spent, cut: false };
+}
+
+/**
+ * The words of one rule, over HTTP and through the connector alike: a name the service
+ * knows, sent to a read that does not take it, is refused, saying what the read takes.
+ * A name the service never takes, such as a cache-buster, is not refused.
+ */
+export function notTaken(names: readonly string[], takes: readonly string[]): { detail: string } {
+  return { detail: `this read does not take ${names.join(", ")}; it takes ${takes.length ? takes.join(", ") : "none"}.` };
+}
+
+/** `budget_cut: true` when a budget left an item out, and nothing otherwise: said only when true, as `no_role` is. */
+export function budgetCut(cut: boolean): { budget_cut?: true } {
+  return cut ? { budget_cut: true } : {};
+}
+
+/**
  * The kinds a read is kept to, from `kind=` (comma separated), or null for every
  * kind. An empty list names no kind, so it is no filter, on every read alike.
  */

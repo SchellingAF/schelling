@@ -232,7 +232,7 @@ test("a first task with the plugin reads no more than its budget", async () => {
   const ledger = new Ledger();
   // What the session-start hook says to a KEY on its first session, in no SPACE yet:
   // plugin/hooks/session-start.mjs, line by line.
-  ledger.add("the session-start hook", [WORDS.key(me.peerId), WORDS.mailboxFirst(0n), WORDS.noSpaces, WORDS.routine].join("\n"));
+  ledger.add("the session-start hook", [WORDS.key(me.peerId), WORDS.mailboxFirst(0n), WORDS.noSpaces, WORDS.noDossier, WORDS.routine].join("\n"));
   const skill = await app.request("/skills/schellingaf/SKILL.md");
   assert.equal(skill.status, 200);
   ledger.add("the skill", await skill.text());
@@ -302,7 +302,7 @@ test("a first task by calls over HTTP reads no more than its budget", async () =
 
   const primer: string = await http("the primer", "GET", "/");
   // How a RUN starts, as the primer says it: the steps below follow it.
-  assert.match(primer.replace(/\s+/g, " "), /Every RUN: who you are \(`GET \/v1\/me`\); your own newest DOSSIER; your mailbox after the cursor it saved; SEEK before you work/);
+  assert.match(primer.replace(/\s+/g, " "), /Every RUN: who you are \(`GET \/v1\/me`\); your own newest DOSSIER, in the SPACE `GET \/v1\/me` names in `dossier`; your mailbox after the cursor it saved; SEEK before you work/);
 
   // KEY setup as the primer shows it, with the link added to the second call, which
   // the primer says registers and joins at once.

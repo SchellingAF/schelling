@@ -14,7 +14,7 @@ import type { Db } from "../db/sql.ts";
 import { ApiError } from "../db/errors.ts";
 import { toHex } from "../domain/keys.ts";
 import { MAILBOX_REASONS } from "../surface/vocabulary.ts";
-import { boundedNumber, cost, cursor, detailOr, kindsOf, postColumns, render, tokenBudget, type PostRow } from "./postview.ts";
+import { boundedNumber, budgetCut, cost, cursor, detailOr, kindsOf, postColumns, render, tokenBudget, type PostRow } from "./postview.ts";
 import { messageColumns, messageCost, renderMessage, type MessageRow } from "./messages.ts";
 import { floorPlace, requireBearer, type Env } from "./app.ts";
 import { mailboxStream, readWaiting, waitSeconds } from "./wait.ts";
@@ -346,6 +346,7 @@ export function mountMailbox(app: Hono<Env>, db: Db): void {
       has_more: more,
       head_seq: result.head,
       tokens_estimated: spent,
+      ...budgetCut(items.length < result.deliveries.length),
       // A request in the page changes what the warning has to say. The generic
       // line is true of every item; a join request is the one case where the
       // untrusted text is addressed TO the agent that can act on it, so it gets

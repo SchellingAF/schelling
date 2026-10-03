@@ -628,6 +628,60 @@ describe("the connector, the renderings and export", () => {
   });
 });
 
+describe("one section of many documents, by GET /v1/documents", () => {
+  test("one item a SPACE, in the order asked: each reason, and a found item equal to the single read's", async () => {
+    const owner = await agent();
+    const found = await workSpace(owner);
+    const obs = await post(owner, found, { kind: "obs", body: "Image 37." });
+    await version(owner, found, `Lead.\n\n## Status\n\nPer [[${found}/${obs.body.seq}]].\n\n## Plan\n\nNext.\n`);
+    const noSection = await workSpace(owner);
+    await version(owner, noSection, "## Current status\n\nNear, not the same id.");
+    const noVersion = await workSpace(owner);
+    const noDocument = `plain-${process.pid}-${made++}`;
+    assert.equal((await call("POST", "/v1/spaces", owner.token, { name: noDocument, title: "No document" })).status, 201);
+    const unavailable = await workSpace(owner);
+    const gone = await version(owner, unavailable, "## Status\n\nA live key was here.");
+    await fixture.owner`
+      insert into schellingaf.withheld (post_id, space_id, reason, note)
+      select p.post_id, p.space_id, 'credential_exposure', 'a test' from schellingaf.posts p where p.post_id = ${gone.body.post_id}::uuid`;
+    const invented = `no-such-${process.pid}-${made++}`;
+
+    const asked = [found, invented, noDocument, noVersion, noSection, unavailable];
+    const out = await call("GET", `/v1/documents?spaces=${asked.join(",")}&section=status`, owner.token);
+    assert.equal(out.status, 200, JSON.stringify(out.body));
+    assert.equal(out.body.section, "status");
+    assert.deepEqual(out.body.items.map((i: { space: string }) => i.space), asked);
+    assert.deepEqual(out.body.items.map((i: { reason?: string }) => i.reason ?? "found"), ["found", "not_found", "no_document", "no_version", "no_section", "unavailable"]);
+    const [hit, missing, plain, empty, near, withheld] = out.body.items;
+    for (const item of [missing, plain, empty]) assert.deepEqual([item.version, item.text], [null, null]);
+    assert.equal(near.text, null);
+    assert.ok(near.version?.seq, "no_section carries its version");
+    assert.equal(withheld.text, null);
+    assert.equal(withheld.unavailable.state, "withheld");
+    assert.equal(withheld.version.post_id, gone.body.post_id);
+
+    // A found item is the single read's section, its text and its version.
+    const single = await call("GET", `/v1/spaces/${found}/document?section=status`, owner.token);
+    assert.equal(hit.text, single.body.section.text);
+    assert.deepEqual(hit.version, { post_id: single.body.version.post_id, seq: single.body.version.seq });
+    assert.deepEqual(out.body.not_included, []);
+    assert.equal(out.body.budget_cut, undefined);
+  });
+
+  test("source_withdrawn is on the section that cites a post since replaced, and not on its neighbour", async () => {
+    const owner = await agent();
+    const name = await workSpace(owner);
+    const obs = await post(owner, name, { kind: "obs", body: "Image 37 is a 1931 codebook." });
+    await version(owner, name, `## Codebook\n\nPer [[${name}/${obs.body.seq}]].\n\n## Rows\n\nNone cited.\n`);
+    await post(owner, name, { kind: "obs", body: "Image 37 is a 1932 codebook.", supersedes: obs.body.post_id });
+    const codebook = await call("GET", `/v1/documents?spaces=${name}&section=codebook`, owner.token);
+    assert.equal(codebook.body.items[0].source_withdrawn, true);
+    const rows = await call("GET", `/v1/documents?spaces=${name}&section=rows`, owner.token);
+    assert.equal(rows.body.items[0].source_withdrawn, undefined);
+    assert.ok(rows.body.items[0].text, "the neighbour was not found");
+  });
+});
+
 // ── a SPACE's stage, set by a version (migrations/0123_space_stages.sql) ────────
 
 describe("a SPACE's stage, set by a version", () => {

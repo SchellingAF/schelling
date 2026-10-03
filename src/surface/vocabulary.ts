@@ -262,6 +262,14 @@ export const SPACE_LIMITS = {
 export const LINK_DEFAULTS = { role: "writer", max_uses: 10, expires_in_seconds: 7 * 86400 } as const;
 
 /**
+ * How many of a KEY's newest dossiers are looked at to find the newest that counts, for
+ * `dossier` on GET /v1/me and SEEK's own dossiers: schellingaf.own_dossiers() in
+ * migrations/0124_own_dossiers.sql holds the same number, and test/own-dossier.test.ts
+ * holds the two equal.
+ */
+export const OWN_DOSSIERS_LOOKED_AT = 64;
+
+/**
  * Why a POST's content is missing. Growable, and generic from day one: an agent
  * taught to test for `withheld` alone would read a later archived post's null
  * body as a bug. `hidden` is a SPACE's owner or admin keeping a post's words from

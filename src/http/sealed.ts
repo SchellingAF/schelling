@@ -43,7 +43,7 @@ import {
   type SignatureEnvelope,
 } from "../domain/encryption.ts";
 import { LIMITS as SEALED_LIMITS, SealedError, readHeader, readKeeperList, readStamp, type Header } from "../../content/sealed.mjs";
-import { boundedNumber, hexCursor, readDenied, uuidCursor } from "./postview.ts";
+import { boundedNumber, budgetCut, hexCursor, itemsWithin, optionalTokenBudget, readDenied, uuidCursor } from "./postview.ts";
 import { LIMITS, spend } from "./ratelimit.ts";
 import { requireBearer, type Env } from "./app.ts";
 
@@ -295,6 +295,7 @@ export function mountSealed(app: Hono<Env>, config: Config, db: Db): void {
     const beforeRaw = c.req.query("before");
     const before = beforeRaw === undefined || beforeRaw === "" ? null : generationOf(beforeRaw, "before");
     const limit = boundedNumber(c.req.query("limit"), 100, 1, 1000, "limit");
+    const budgetTokens = optionalTokenBudget(c.req.query("token_budget"));
 
     const rows = await db.readTx(me, async (sql) => {
       const space = await sealedSpace(sql, name, me);
@@ -306,21 +307,28 @@ export function mountSealed(app: Hono<Env>, config: Config, db: Db): void {
          order by g.generation desc
          limit ${limit}`;
     });
-    const last = rows.at(-1);
-    // A full page that stopped above the first generation: more lie below it.
-    const more = last !== undefined && last.generation !== "1" && rows.length === limit;
-    return c.json({
-      space: name,
-      // Newest first, as a reader walks back: each back link opens the one below it.
-      items: rows.map((g) => ({
+    // Newest first, as a reader walks back: each back link opens the one below it.
+    const page = itemsWithin(
+      rows.map((g) => ({
         generation: g.generation,
         commitment: toHex(g.commitment),
         back: g.back ? toHex(g.back) : null,
         created_by: toHex(g.created_by),
         activated_at: g.activated_at.toISOString(),
       })),
+      budgetTokens,
+    );
+    const last = page.items.at(-1);
+    // A full page, or one its budget cut, that stopped above the first generation: more
+    // lie below it.
+    const more = last !== undefined && last.generation !== "1" && (page.cut || rows.length === limit);
+    return c.json({
+      space: name,
+      items: page.items,
       next_before: more ? last!.generation : null,
       has_more: more,
+      tokens_estimated: page.spent,
+      ...budgetCut(page.cut),
     });
   });
 
@@ -333,6 +341,7 @@ export function mountSealed(app: Hono<Env>, config: Config, db: Db): void {
     const after = hexCursor(c.req.query("after"));
     const limit = boundedNumber(c.req.query("limit"), 100, 1, LOCKS_PER_REQUEST, "limit");
     const asked = c.req.query("generation");
+    const budgetTokens = optionalTokenBudget(c.req.query("token_budget"));
 
     const result = await db.readTx(me, async (sql) => {
       const space = await sealedSpace(sql, name, me);
@@ -352,16 +361,20 @@ export function mountSealed(app: Hono<Env>, config: Config, db: Db): void {
                                            ${after === null ? null : Buffer.from(after, "hex")}::bytea, ${limit}) u`;
       return { generation: generation.toString(), rows };
     });
-    const last = result.rows.at(-1);
+    // Whether somebody the owner trusts vouched for each is the service's reading of
+    // the lists and stamps it holds. A keeper hands the key to none it has not
+    // checked the stamp of itself (content/sealed.md, section 6); a keeper is shown it.
+    const page = itemsWithin(result.rows.map((r) => ({ ...renderKey(r), vouched: r.vouched, stamp: renderStamp(r) })), budgetTokens);
+    const last = result.rows[page.items.length - 1];
+    const more = page.cut || result.rows.length === limit;
     return c.json({
       space: name,
       generation: result.generation,
-      // Whether somebody the owner trusts vouched for each is the service's reading of
-      // the lists and stamps it holds. A keeper hands the key to none it has not
-      // checked the stamp of itself (content/sealed.md, section 6); a keeper is shown it.
-      items: result.rows.map((r) => ({ ...renderKey(r), vouched: r.vouched, stamp: renderStamp(r) })),
-      next_after: last && result.rows.length === limit ? toHex(last.peer_id) : null,
-      has_more: result.rows.length === limit,
+      items: page.items,
+      next_after: last && more ? toHex(last.peer_id) : null,
+      has_more: more,
+      tokens_estimated: page.spent,
+      ...budgetCut(page.cut),
     });
   });
 
@@ -373,6 +386,7 @@ export function mountSealed(app: Hono<Env>, config: Config, db: Db): void {
     const name = c.req.param("name");
     const after = uuidCursor(c.req.query("after"));
     const limit = boundedNumber(c.req.query("limit"), 100, 1, LOCKS_PER_REQUEST, "limit");
+    const budgetTokens = optionalTokenBudget(c.req.query("token_budget"));
 
     const rows = await db.readTx(me, async (sql) => {
       await sealedSpace(sql, name, me);
@@ -382,17 +396,24 @@ export function mountSealed(app: Hono<Env>, config: Config, db: Db): void {
                r.stamp, r.stamp_signature, r.stamp_issuer
           from schellingaf.sealed_requests(${name}, ${bearer.peerId}, ${after}::uuid, ${limit}) r`;
     });
-    const last = rows.at(-1);
-    return c.json({
-      space: name,
-      items: rows.map((r) => ({
+    const page = itemsWithin(
+      rows.map((r) => ({
         request_id: r.request_id,
         created_at: r.created_at.toISOString(),
         peer: renderKey(r),
         stamp: renderStamp(r),
       })),
-      next_after: last && rows.length === limit ? last.request_id : null,
-      has_more: rows.length === limit,
+      budgetTokens,
+    );
+    const last = page.items.at(-1);
+    const more = page.cut || rows.length === limit;
+    return c.json({
+      space: name,
+      items: page.items,
+      next_after: last && more ? last.request_id : null,
+      has_more: more,
+      tokens_estimated: page.spent,
+      ...budgetCut(page.cut),
     });
   });
 

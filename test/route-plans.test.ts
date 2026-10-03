@@ -783,6 +783,100 @@ describe("a file's fetch and attach_files() find their rows through an index", (
   });
 });
 
+describe("your own dossiers and one section of many documents find their rows through an index", () => {
+  // A SPACE of dossiers at the scale the privacy check measured: five thousand of the
+  // owner's and two thousand of another KEY's, so a read that walked the owner's dossiers,
+  // or found them by kind, or read another KEY's, is unmistakable in a plan.
+  let crowd: string;
+  before(async () => {
+    const [peer] = await fixture.owner<{ hex: string }[]>`
+      select encode(peer_id, 'hex') as hex from schellingaf.peers where peer_id <> decode(${owner.peerId}, 'hex') order by peer_id limit 1`;
+    crowd = peer!.hex;
+    await fixture.owner`
+      insert into schellingaf.spaces (name, owner_id, title)
+      values ('planned-dossiers', decode(${owner.peerId}, 'hex'), 'Dossiers')`;
+    await fixture.owner`
+      insert into schellingaf.memberships (space_id, peer_id, role, via, granted_by, revision)
+      select s.space_id, decode(${crowd}, 'hex'), 'writer', 'grant', s.owner_id, 1
+        from schellingaf.spaces s where s.name = 'planned-dossiers'`;
+    await fixture.owner`
+      insert into schellingaf.posts (space_id, seq, admitted_revision, author_id, kind, title, body, content_hash)
+      select s.space_id, g, 1, case when g % 7 < 5 then decode(${owner.peerId}, 'hex') else decode(${crowd}, 'hex') end,
+             case when g % 11 = 0 then 'obs' else 'dossier' end, 'state ' || g, 'the state, ' || g, sha256(('dossier' || g)::bytea)
+        from schellingaf.spaces s, generate_series(1, 7700) g
+       where s.name = 'planned-dossiers'
+       order by g`;
+    await fixture.owner`update schellingaf.spaces set last_seq = 7700 where name = 'planned-dossiers'`;
+    await fixture.owner`analyze`;
+  });
+
+  test("GET /v1/me finds your newest dossier through own_dossiers_pkey, backwards, at most 64 rows, and never sorts", async () => {
+    statementFor(await sent("/v1/me", owner), "own_dossiers(");
+    type PlanNode = { [field: string]: any; Plans?: PlanNode[] };
+    const nodesOf = (plan: PlanNode): PlanNode[] => [plan, ...(plan.Plans ?? []).flatMap(nodesOf)];
+    const logged: string[] = [];
+    const su = postgres({ ...SUPERUSER, database: fixture.name, onnotice: (n) => logged.push(n.message ?? "") });
+    try {
+      await su`load 'auto_explain'`;
+      for (const setting of ["log_min_duration = 0", "log_nested_statements = on", "log_format = json", "log_level = notice", "log_analyze = on"]) {
+        await su.unsafe(`set auto_explain.${setting}`);
+      }
+      await su.begin(async (tx) => {
+        await tx.unsafe("set local role schellingaf_api");
+        await tx.unsafe("set local plan_cache_mode = force_generic_plan");
+        await tx`select set_config('schellingaf.peer_id', ${owner.peerId}, true)`;
+        await tx`select * from schellingaf.own_dossiers(1)`;
+      });
+    } finally {
+      await su.end({ timeout: 5 });
+    }
+    const plans = logged
+      .filter((m) => m.includes("{"))
+      .map((m) => JSON.parse(m.slice(m.indexOf("{"))) as { "Query Text": string; Plan: PlanNode });
+    const inner = plans.filter((p) => nodesOf(p.Plan).some((n) => n["Relation Name"] === "own_dossiers"));
+    assert.equal(inner.length, 1, `own_dossiers() was not planned once:\n${plans.map((p) => p["Query Text"]).join("\n--\n")}`);
+    const nodes = nodesOf(inner[0]!.Plan);
+    const walk = nodes.find((n) => n["Index Name"] === "own_dossiers_pkey");
+    assert.ok(walk, `own_dossiers() did not read own_dossiers_pkey:\n${JSON.stringify(inner[0]!.Plan, null, 1)}`);
+    assert.equal(walk["Scan Direction"], "Backward", JSON.stringify(nodes.map((n) => [n["Node Type"], n["Index Name"], n["Scan Direction"], n["Relation Name"]])));
+    assert.ok(walk["Actual Rows"] <= 64, `own_dossiers() read ${walk["Actual Rows"]} rows of its index`);
+    assert.deepEqual(nodes.filter((n) => n["Node Type"] === "Sort").map((n) => n["Sort Key"]), [], "own_dossiers() sorted");
+    assert.deepEqual(
+      nodes.filter((n) => n["Node Type"] === "Seq Scan" && ["posts", "own_dossiers", "spaces"].includes(n["Relation Name"])).map((n) => n["Relation Name"]),
+      [],
+      "own_dossiers() scanned a table",
+    );
+  });
+
+  test("no index on posts leads with author_id, and a standing read with author and kind dossier leads with its SPACE", async () => {
+    const indexes = await fixture.owner<{ indexname: string; indexdef: string }[]>`
+      select indexname, indexdef from pg_indexes where schemaname = 'schellingaf' and tablename = 'posts'`;
+    const leading = indexes.filter((i) => /\(\s*author_id\b/.test(i.indexdef));
+    assert.deepEqual(leading.map((i) => i.indexname), [], "an index on posts leads with author_id");
+    const plan = await genericPlanAll(statementFor(await sent(`/v1/spaces/planned-dossiers/standing?kind=dossier&author=${crowd}&limit=1`, owner), "x.supersedes"));
+    assert.match(plan, /Index Scan Backward using posts_space_\w+ on posts p\n\s+Index Cond: \(\(?space_id = \$\d+\)/, plan);
+    assert.doesNotMatch(plan, /own_dossiers/, plan);
+  });
+
+  test("one section of twenty documents takes at most two statements, by the name key, oracle_versions_current and the posts key", async () => {
+    const names = ["planned-work", "planned-oracle", "other-oracle", "planned-space", ...Array.from({ length: 16 }, (_, i) => `listed-space-${i + 1}`)];
+    // The statements of the read itself: not the token's lookup, the caller's binding or the transaction's.
+    const seen = (await sent(`/v1/documents?spaces=${names.join(",")}&section=part-3`, owner))
+      .filter((s) => s.sql.includes("schellingaf.") && !s.sql.includes("schellingaf.tokens") && !s.sql.includes("set_config"));
+    // planned-work's third part cites posts, so the second statement is always sent here.
+    assert.equal(seen.length, 2, `${seen.length} statements:\n${seen.map((s) => s.sql.slice(0, 300)).join("\n--\n")}`);
+    const plan = await genericPlanAll(statementFor(seen, "with ordinality"));
+    assert.match(plan, /spaces_name_key/, plan);
+    assert.match(plan, /oracle_versions_current/, plan);
+    assert.match(plan, /posts_pkey/, plan);
+    assert.doesNotMatch(plan, /Seq Scan on (posts|spaces|oracle_versions)\b/, plan);
+    // The cited posts of planned-work's third part, every one asked at once by its key.
+    const cites = await genericPlanAll(seen.find((s) => !s.sql.includes("with ordinality"))!);
+    assert.match(cites, /posts_space_id_seq_key/, cites);
+    assert.doesNotMatch(cites, /Seq Scan on posts\b/, cites);
+  });
+});
+
 // ── the operator's report ────────────────────────────────────────────────────
 
 describe("npm run query-plans reads what the service sends, and nothing it wrote itself", () => {

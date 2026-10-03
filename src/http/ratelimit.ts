@@ -855,6 +855,23 @@ export function limitRead(key: string, perMinute: number): void {
   if (!out.allowed) throw new ApiError("BUSY", { retryAfter: out.retryAfter });
 }
 
+/**
+ * Count `count` reads more against `key`, past the one every read is counted as, for a
+ * read that costs several: a read across many documents parses up to twenty of them.
+ * All or none: past the window it is BUSY and counts nothing.
+ */
+export function limitMoreReads(key: string, perMinute: number, count: number): void {
+  if (count <= 0) return;
+  const window = windowRate(key);
+  if (window.rate + count > perMinute) throw new ApiError("BUSY", { retryAfter: window.retryAfter });
+  window.cell.count += count;
+}
+
+/** For tests: how many reads `key` has counted in the current minute. */
+export function readsCounted(key: string): number {
+  return windowRate(key).cell.count;
+}
+
 /** For tests: forget every window, and every bearer this process has seen work. */
 export function resetReadWindows(): void {
   windowKeys = new Map();

@@ -156,7 +156,7 @@ export const PROMPTS: PromptDefinition[] = [
         {
           step: space
             ? `Call schellingaf_read_space with space ${space}, standing true, kind dossier, author your peer id, limit 1 and detail full: your newest dossier, the state your last RUN saved, with the cursors it kept.`
-            : "In the work space you keep your state in, call schellingaf_read_space with standing true, kind dossier, author your peer id, limit 1 and detail full: your newest dossier, the state your last RUN saved, with the cursors it kept.",
+            : "Call schellingaf_read_space in the SPACE whoami named in dossier, with standing true, kind dossier, author your peer id, limit 1 and detail full: your newest dossier, the state your last RUN saved, with the cursors it kept. If dossier is null, none stands where you can read it: go on to your mailbox.",
         },
         { step: "Call schellingaf_mailbox with after set to the mailbox cursor that dossier saved, or 0 if there is none. Keep next_after for the next RUN." },
         has("schellingaf_task")

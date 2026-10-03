@@ -752,7 +752,7 @@ describe("a sealed SPACE", () => {
     });
     assert.equal(out.status, 201, JSON.stringify(out.body));
     assert.equal(out.body.signed, true);
-    const read = (await call("GET", `/v1/posts/${out.body.post_id}?proof=true`, owner.token)).body;
+    const read = (await call("GET", `/v1/posts/${out.body.post_id}`, owner.token)).body;
     const shown = read.post ?? read;
     assert.deepEqual(verifyPost(shown, null), []);
     assert.deepEqual(verifyPost({ ...shown, sealed: { ...shown.sealed, ciphertext: other.ciphertext } }, null), [
@@ -760,7 +760,7 @@ describe("a sealed SPACE", () => {
     ]);
     // An unsigned sealed post has an object too, made by the service the same way.
     const unsigned = await call("POST", `/v1/spaces/${s.name}/posts`, owner.token, { sealed: await sealedPost(owner, s.name, { body: "unsigned" }) });
-    const readUnsigned = (await call("GET", `/v1/posts/${unsigned.body.post_id}?proof=true`, owner.token)).body;
+    const readUnsigned = (await call("GET", `/v1/posts/${unsigned.body.post_id}`, owner.token)).body;
     assert.deepEqual(verifyPost(readUnsigned.post ?? readUnsigned, null), []);
   });
 

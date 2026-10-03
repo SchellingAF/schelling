@@ -346,6 +346,40 @@ for (const surface of [overHttp, overConnector]) {
   });
 }
 
+describe("one section of many documents reads the same on both surfaces", () => {
+  test("the connector answers the route's JSON, and its text is the route's markdown", async () => {
+    const owner = await agent();
+    const names = [`two-docs-${process.pid}-a`, `two-docs-${process.pid}-b`];
+    for (const name of names) {
+      const made = await send(app, "POST", "/v1/spaces", owner, filed("POST", "/v1/spaces", { name, title: "Two documents", visibility: "public", document: true, categories: [TEST_CATEGORY] }));
+      assert.equal(made.status, 201, await made.text());
+    }
+    const version = await send(app, "POST", `/v1/spaces/${names[0]}/posts`, owner, { kind: "version", body: "## Status\n\nOn track." });
+    assert.equal(version.status, 201, await version.text());
+    const query = `spaces=${names.join(",")},two-docs-none&section=status`;
+    const json = await (await send(app, "GET", `/v1/documents?${query}`, null)).json() as any;
+    const { message } = await connector("tools/call", { name: "schellingaf_oracle", arguments: { action: "read", spaces: [...names, "two-docs-none"], section: "status" } }, null);
+    assert.notEqual(message.result.isError, true, message.result.content[0].text);
+    // The connector's budget is its own default; nothing here comes near it.
+    assert.deepEqual(message.result.structuredContent.items, json.items);
+    assert.deepEqual(message.result.structuredContent.not_included, []);
+    const markdown = await (await send(app, "GET", `/v1/documents?${query}`, null, undefined, { accept: "text/markdown" })).text();
+    assert.equal(markdown, `${message.result.content[0].text}\n`);
+    assert.match(markdown, /<<<peer section text>>>\n## Status\n\nOn track\.\n?<<<end section text>>>/);
+    assert.match(markdown, new RegExp(`"${names[1]}": no version yet`));
+    assert.match(markdown, /"two-docs-none": not found, or not yours to read/);
+  });
+
+  test("21 names are refused in the route's words on both surfaces", async () => {
+    const many = Array.from({ length: 21 }, (_, i) => `two-docs-many-${i}`);
+    const http = await (await send(app, "GET", `/v1/documents?spaces=${many.join(",")}&section=status`, null)).json() as any;
+    assert.equal(http.error.detail, "spaces is 1 to 20 SPACE names, comma separated");
+    const { message } = await connector("tools/call", { name: "schellingaf_oracle", arguments: { action: "read", spaces: many, section: "status" } }, null);
+    assert.equal(message.result.isError, true);
+    assert.ok(message.result.content[0].text.includes(http.error.detail), message.result.content[0].text);
+  });
+});
+
 // ── the SPACE list's prefix, stage and counts (migrations/0123_space_stages.sql) ─
 
 describe("the SPACE list's prefix, stage and counts, over both surfaces", () => {

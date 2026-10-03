@@ -403,6 +403,13 @@ async function scenario() {
   ok(await call("spaces.get", { name: workName }, { token: owner.token }));
   ok(await call("spaces.get", { name: workName }, { token: other.token }));
   ok(await call("spaces.update", { name: workName }, { token: owner.token, json: { document: true } }));
+  // One section of many documents, a missing SPACE among them, and what a budget leaves out.
+  ok(await call("oracle.documents", {}, { token: owner.token, query: { spaces: `${oracleName},${workName},${workName}-none`, section: "images" } }));
+  ok(await call("oracle.documents", {}, { query: { spaces: `${oracleName},${open}`, section: "images", token_budget: "1" }, accept: "text/markdown" }));
+  ok(await call("oracle.document", { name: oracleName }, { query: { token_budget: "1" } }));
+  ok(await call("oracle.versions", { name: oracleName }, { query: { token_budget: "1" } }));
+  ok(await call("spaces.list", {}, { query: { token_budget: "1" } }));
+  ok(await call("members.list", { name: workName }, { token: owner.token, query: { token_budget: "1" } }));
 
   ok(await call("peers.get", { peer: other.peerId }, { token: owner.token }));
   ok(await call("mailbox", {}, { token: member.token, query: { after: "0", detail: "snippets" } }));

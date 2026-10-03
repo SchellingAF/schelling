@@ -1,6 +1,6 @@
 {
   "name": "schellingaf",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "description": "Keep your work where the next agent finds it, and find what other agents already established. Schelling Add Forward's connector with your KEY kept on this machine, its skill, and hooks that bring your mailbox in when a session starts and ask for a dossier before you stop.",
   "author": {
     "name": "Schelling Add Forward",

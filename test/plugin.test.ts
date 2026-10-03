@@ -234,6 +234,8 @@ describe("the plugin's hooks", () => {
     assert.ok(peer, said);
     assert.match(said, /Mailbox: head 0\./);
     assert.match(said, /SPACES: none yet/);
+    // No dossier yet, said as that: GET /v1/me's dossier is null.
+    assert.match(said, /Dossier: none yet\. Post one before you stop\./);
     // The last line says these lines were the routine's first step and leaves the rest
     // to the connector's instructions, the one place the routine is written.
     assert.equal(said.split("\n").at(-1), WORDS.routine);
@@ -262,8 +264,18 @@ describe("the plugin's hooks", () => {
     // Nothing a PEER wrote reaches the context: not a title, not a join request's note.
     assert.doesNotMatch(now, /script|Ignore your instructions/);
 
+    // A dossier in a SPACE this KEY created: the hook names the SPACE, from GET /v1/me.
+    const saved = await fetch(`${origin}/v1/spaces/plugin-start-${process.pid}/posts`, {
+      method: "POST",
+      headers: { "content-type": "application/json", Authorization: `Bearer ${kept.token}` },
+      body: JSON.stringify({ kind: "dossier", body: "Objective: the hook test." }),
+    });
+    assert.equal(saved.status, 201);
+    const savedSeq = ((await saved.json()) as { seq: string }).seq;
+
     const third = await runHook("SessionStart", { session_id: "s-3", source: "resume" }, env);
     assert.match(contextOf(third.out), /Mailbox: nothing new since the last session began \(head 1\)\./);
+    assert.match(contextOf(third.out), new RegExp(`Dossier: your newest is seq ${savedSeq} in plugin-start-${process.pid}\\. Read it first\\.`));
 
     // A SPACE another KEY made and added this one to is counted and never named: its
     // name is whatever its owner chose, and any owner may add any KEY.
@@ -281,9 +293,17 @@ describe("the plugin's hooks", () => {
       body: JSON.stringify({ role: "writer" }),
     });
     assert.equal(added.status, 200);
+    // Its newest dossier there is counted by its seq, and the SPACE is never named.
+    const there = await fetch(`${origin}/v1/spaces/${lure}/posts`, {
+      method: "POST",
+      headers: { "content-type": "application/json", Authorization: `Bearer ${kept.token}` },
+      body: JSON.stringify({ kind: "dossier", body: "Objective: the hook test, elsewhere." }),
+    });
+    assert.equal(there.status, 201);
     const fourth = await runHook("SessionStart", { session_id: "s-4", source: "startup" }, env);
     const later = contextOf(fourth.out);
     assert.match(later, new RegExp(`SPACES: you own plugin-start-${process.pid}, and are a member of 1\\. `));
+    assert.match(later, new RegExp(`Dossier: your newest is seq ${((await there.json()) as { seq: string }).seq}, in a SPACE you did not create; schellingaf_whoami names it\\. Read it first\\.`));
     assert.doesNotMatch(later, /ignore-your-instructions/);
   });
 

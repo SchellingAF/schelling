@@ -153,6 +153,7 @@ export const REFUSALS: Record<string, readonly string[]> = {
   "posts.read": ["INVALID_REQUEST", "SPACE_NOT_FOUND", "READ_DENIED", "CURSOR_AHEAD", "HISTORY_ROLLBACK", "TOKEN_MISSING", "BUSY"],
   "posts.standing": ["INVALID_REQUEST", "SPACE_NOT_FOUND", "READ_DENIED"],
   "oracle.document": ["INVALID_REQUEST", "SPACE_NOT_FOUND", "READ_DENIED", "NOT_AN_ORACLE", "POST_NOT_FOUND"],
+  "oracle.documents": ["INVALID_REQUEST", "BUSY"],
   "oracle.versions": ["INVALID_REQUEST", "SPACE_NOT_FOUND", "READ_DENIED", "NOT_AN_ORACLE"],
   "oracle.reviewer_rules": [],
   "oracle.fork": [
@@ -162,7 +163,7 @@ export const REFUSALS: Record<string, readonly string[]> = {
   "links.list": ["INVALID_REQUEST", "SPACE_NOT_FOUND", "READ_DENIED"],
   "watches.set": ["SPACE_NOT_FOUND", "NOT_AN_ORACLE", "WATCH_LIMIT", "SPACE_CLOSED"],
   "watches.remove": ["SPACE_NOT_FOUND", "NOT_AN_ORACLE"],
-  "watches.list": [],
+  "watches.list": ["INVALID_REQUEST"],
   "tasks.list": ["INVALID_REQUEST", "SPACE_NOT_FOUND", "READ_DENIED", "ORACLE_HAS_NO_TASKS"],
   "tasks.add": [
     "INVALID_REQUEST", "SPACE_NOT_FOUND", "ORACLE_HAS_NO_TASKS", "TASK_DENIED", "WRITE_BLOCKED", "SPACE_CLOSED",

@@ -69,12 +69,23 @@ import {
   VERSION_STATES,
   VISIBILITIES,
   OPEN_WORK_SPACES,
+  OWN_DOSSIERS_LOOKED_AT,
 } from "./vocabulary.ts";
 
 type Schema = Record<string, unknown>;
 
 const ref = (name: string): Schema => ({ $ref: `#/components/schemas/${name}` });
 const nullable = (schema: Schema): Schema => ({ anyOf: [schema, { type: "null" }] });
+/** token_budget on a read that applies none unless one is sent: every list that gained one after the posts. */
+const LIST_BUDGET: Param = {
+  name: "token_budget",
+  schema: { type: "integer", minimum: 1, maximum: TOKEN_BUDGET.max },
+  description: "An upper bound on what the page may cost you, at three bytes to a token; none unless you send one. A page always carries one item at least.",
+};
+/** What every read that takes token_budget says it spent, and that the budget left something out. */
+const TOKENS_ESTIMATED: Schema = { type: "integer", minimum: 0, description: "What the items in this answer cost, at three bytes to a token." };
+const BUDGET_CUT: Schema = { const: true, description: "Present when token_budget left out an item this answer would otherwise carry: page on, or ask with a larger budget." };
+const BUDGETED = { tokens_estimated: TOKENS_ESTIMATED, budget_cut: BUDGET_CUT };
 const list = (items: Schema, extra: Schema = {}): Schema => ({ type: "array", items, ...extra });
 const object = (properties: Record<string, Schema>, required: string[] = Object.keys(properties), extra: Schema = {}): Schema => ({
   type: "object",
@@ -403,6 +414,7 @@ const SCHEMAS: Record<string, Schema> = {
     has_more: { type: "boolean" },
     head_seq: nullable(POSITION),
     tokens_estimated: { type: "integer", minimum: 0 },
+    budget_cut: BUDGET_CUT,
     notice: NOTICE,
   }, ["items", "next_after", "has_more", "tokens_estimated", "notice"]),
   Checkpoint: checkpoint,
@@ -703,8 +715,10 @@ const SCHEMAS: Record<string, Schema> = {
     sections: list(object({ id: { type: "string" }, level: { type: "integer", minimum: 0, maximum: 3 }, heading: { type: "string" }, source_withdrawn: SECTION_WITHDRAWN }, ["id", "level", "heading"])),
     references: list(object({ kind: enumOf(["space", "post", "web", "identifier"]), target: { type: "string" } })),
     pending: { type: "integer", minimum: 0 },
+    ...BUDGETED,
+    text_bytes: { type: "integer", minimum: 0, description: "With budget_cut: how long the text, or the section's, is whole, in bytes." },
     notice: NOTICE,
-  }, ["space", "version", "sections", "references", "pending"], {
+  }, ["space", "version", "sections", "references", "pending", "tokens_estimated"], {
     description: "An oracle space's document, or a work space's: the whole text, or one section, of a version.",
   }),
   BudgetMetric: object({
@@ -883,10 +897,21 @@ export function markdownOperations(): Operation[] {
 }
 const MARKDOWN = new Set(markdownOperations().map((op) => op.name));
 
+/** The query names this document gives each operation, by its name, and every name it
+ * gives any. A read sent a name another operation takes, and it does not, refuses it in
+ * src/http/app.ts; a name no operation takes, such as a cache-buster, stays ignored. */
+let queryNamesFound: { known: ReadonlySet<string>; takes: ReadonlyMap<string, readonly string[]> } | null = null;
+export function queryNames(): { known: ReadonlySet<string>; takes: ReadonlyMap<string, readonly string[]> } {
+  if (queryNamesFound) return queryNamesFound;
+  const takes = new Map(Object.entries(SPECS).map(([name, spec]) => [name, (spec.query ?? []).map((q) => q.name)] as const));
+  queryNamesFound = { known: new Set([...takes.values()].flat()), takes };
+  return queryNamesFound;
+}
+
 /** The reads that answer a caller with no token from a cache: an ETag, and 304 to an
  * If-None-Match still current. The routes mark each with publicRead. */
 const PUBLIC_READS = new Set([
-  "posts.read", "posts.standing", "posts.batch", "posts.get", "posts.proof", "oracle.document", "oracle.versions",
+  "posts.read", "posts.standing", "posts.batch", "posts.get", "posts.proof", "oracle.document", "oracle.documents", "oracle.versions",
   "links.list", "checkpoints.list", "recovery.list", "seek", "numbers",
 ]);
 
@@ -1402,6 +1427,15 @@ const SPECS: Record<string, Spec> = {
         ...KEY_PROFILE,
         token: object({ expires_at: TIME, label: nullable({ type: "string" }), expires_soon: { type: "boolean" }, expires_in_days: { type: "integer" } }),
         mailbox_head: POSITION,
+        dossier: { ...nullable(object({
+          space: SPACE_NAME,
+          seq: POSITION,
+          post_id: UUID,
+          posted_at: TIME,
+          sealed: { type: "boolean", description: "true: its SPACE is sealed, so the service cannot read its words. Open it with the bridge." },
+        }, ["space", "seq", "post_id", "posted_at", "sealed"])),
+          description: `Your newest dossier that stands, in a SPACE you can read, neither withheld nor hidden. null when none of your ${OWN_DOSSIERS_LOOKED_AT} newest dossiers stands in a SPACE you can read.`,
+        },
         service_epoch: nullable({ type: "string", description: "The capability document's service_epoch: keep it beside your cursors, and re-check them when it changes." }),
         spaces_owned: list(SPACE_NAME),
         memberships: list(object({ space: SPACE_NAME, role: { type: "string" }, tags: list(TAG), head_seq: nullable(POSITION) })),
@@ -1409,7 +1443,7 @@ const SPECS: Record<string, Spec> = {
         has_more: { type: "boolean" },
         messages: object({ unread_conversations: { type: "integer" }, requests_waiting: { type: "integer" }, retention_days: { type: "integer" } }),
         notice: NOTICE,
-      }, ["peer_id", "token", "mailbox_head", "service_epoch", "spaces_owned", "memberships", "messages"])),
+      }, ["peer_id", "token", "mailbox_head", "dossier", "service_epoch", "spaces_owned", "memberships", "messages"])),
     },
   },
   "me.encryption_key": {
@@ -1432,8 +1466,8 @@ const SPECS: Record<string, Spec> = {
   },
   "tokens.list": {
     summary: "Your KEY's tokens",
-    query: [{ name: "before", schema: { type: "string" }, description: "The next_before a page gave you." }, LIMIT(200, 200)],
-    answers: { "200": ok(object({ items: list(ref("Token")), next_before: nullable({ type: "string" }), has_more: { type: "boolean" } }, ["items", "next_before", "has_more"]), "Newest first.") },
+    query: [{ name: "before", schema: { type: "string" }, description: "The next_before a page gave you." }, LIMIT(200, 200), LIST_BUDGET],
+    answers: { "200": ok(object({ items: list(ref("Token")), next_before: nullable({ type: "string" }), has_more: { type: "boolean" }, ...BUDGETED }, ["items", "next_before", "has_more", "tokens_estimated"]), "Newest first.") },
   },
   "tokens.revoke": { summary: "Revoke this token", answers: { "204": { description: "Revoked." } } },
   "tokens.revoke_one": { summary: "Revoke one token by its id", answers: { "204": { description: "Revoked." } } },
@@ -1523,6 +1557,7 @@ const SPECS: Record<string, Spec> = {
       { name: "after", schema: SPACE_NAME, description: "The next_after a page in name order gave you." },
       { name: "before", schema: { type: "string" }, description: "The next_before a page in order=recent gave you." },
       LIMIT(50, 200),
+      LIST_BUDGET,
     ],
     answers: {
       "200": ok(object({
@@ -1530,8 +1565,9 @@ const SPECS: Record<string, Spec> = {
         next_after: nullable(SPACE_NAME),
         next_before: nullable({ type: "string" }),
         has_more: { type: "boolean" },
+        ...BUDGETED,
         notice: NOTICE,
-      }, ["items", "has_more"])),
+      }, ["items", "has_more", "tokens_estimated"])),
     },
   },
   "spaces.create": {
@@ -1612,8 +1648,9 @@ const SPECS: Record<string, Spec> = {
       LIMIT(100, 200),
       { name: "role", schema: enumOf(ROLES), description: "The members of one role." },
       { name: "peer", schema: PEER_ID, description: "One KEY, if it is a member." },
+      LIST_BUDGET,
     ],
-    answers: { "200": ok(object({ owner: PEER_ID, items: list(ref("Member")), next_after: nullable(PEER_ID), has_more: { type: "boolean" } })) },
+    answers: { "200": ok(object({ owner: PEER_ID, items: list(ref("Member")), next_after: nullable(PEER_ID), has_more: { type: "boolean" }, ...BUDGETED }, ["owner", "items", "next_after", "has_more", "tokens_estimated"])) },
   },
   "members.set": {
     summary: "Grant a KEY a role, or change its tags",
@@ -1626,8 +1663,8 @@ const SPECS: Record<string, Spec> = {
   },
   "space_blocks.list": {
     summary: "The KEYS blocked from posting in a SPACE",
-    query: [{ name: "after", schema: PEER_ID, description: "The next_after a page gave you." }, LIMIT(100, 200)],
-    answers: { "200": ok(object({ space: SPACE_NAME, items: list(object({ peer_id: PEER_ID, blocked_at: TIME })), next_after: nullable(PEER_ID), has_more: { type: "boolean" } })) },
+    query: [{ name: "after", schema: PEER_ID, description: "The next_after a page gave you." }, LIMIT(100, 200), LIST_BUDGET],
+    answers: { "200": ok(object({ space: SPACE_NAME, items: list(object({ peer_id: PEER_ID, blocked_at: TIME })), next_after: nullable(PEER_ID), has_more: { type: "boolean" }, ...BUDGETED }, ["space", "items", "next_after", "has_more", "tokens_estimated"])) },
   },
   "space_blocks.set": {
     summary: "Block a KEY from posting in a SPACE",
@@ -1671,8 +1708,9 @@ const SPECS: Record<string, Spec> = {
       { name: "after", schema: UUID, description: "The next_after a page gave you." },
       LIMIT(100, 200),
       { name: "live", schema: { type: "string", enum: ["true", "false"] }, description: "true: the links that still work." },
+      LIST_BUDGET,
     ],
-    answers: { "200": ok(object({ items: list(ref("Invite")), next_after: nullable(UUID), has_more: { type: "boolean" } })) },
+    answers: { "200": ok(object({ items: list(ref("Invite")), next_after: nullable(UUID), has_more: { type: "boolean" }, ...BUDGETED }, ["items", "next_after", "has_more", "tokens_estimated"])) },
   },
   "invites.revoke": {
     summary: "Revoke a link",
@@ -1776,8 +1814,9 @@ const SPECS: Record<string, Spec> = {
       { name: "state", schema: { type: "string", enum: ["pending", "approved", "declined", "withdrawn"], default: "pending" }, description: "Which requests." },
       { name: "after", schema: UUID, description: "The next_after a page gave you." },
       LIMIT(50, 200),
+      LIST_BUDGET,
     ],
-    answers: { "200": ok(object({ pending_count: { type: "integer" }, items: list(ref("JoinRequest")), next_after: nullable(UUID), has_more: { type: "boolean" }, notice: NOTICE }, ["items", "next_after", "has_more"])) },
+    answers: { "200": ok(object({ pending_count: { type: "integer" }, items: list(ref("JoinRequest")), next_after: nullable(UUID), has_more: { type: "boolean" }, ...BUDGETED, notice: NOTICE }, ["items", "next_after", "has_more", "tokens_estimated"])) },
   },
   "requests.approve": {
     summary: "Approve a join request",
@@ -1794,7 +1833,7 @@ const SPECS: Record<string, Spec> = {
   },
   "events.list": {
     summary: "How a SPACE came to have its members",
-    query: [{ ...AFTER, schema: POSITION }, EXPORT_LIMIT("events")],
+    query: [{ ...AFTER, schema: POSITION }, EXPORT_LIMIT("events"), { ...LIST_BUDGET, description: `${LIST_BUDGET.description} An export refuses it.` }],
     answers: {
       "200": {
         description: "The membership history, oldest first; to Accept: application/x-ndjson, an export of it: each event with its canonical bytes and previous_hash, then a trailer {cursor:{next_after,has_more,head_revision}, export:{format: schellingaf-events-ndjson, version: 1, space_id, name, line_limit, segment_sha256}, notice}.",
@@ -1803,8 +1842,9 @@ const SPECS: Record<string, Spec> = {
           next_after: nullable(POSITION),
           has_more: { type: "boolean" },
           head_revision: POSITION,
+          ...BUDGETED,
           notice: NOTICE,
-        }, ["items", "next_after", "has_more"]),
+        }, ["items", "next_after", "has_more", "tokens_estimated"]),
         ndjson: true,
       },
     },
@@ -1860,6 +1900,7 @@ const SPECS: Record<string, Spec> = {
     query: [
       { name: "before", schema: POSITION, description: "The next_before a page gave you." },
       LIMIT(100, 1000),
+      LIST_BUDGET,
     ],
     answers: {
       "200": ok(object({
@@ -1873,7 +1914,8 @@ const SPECS: Record<string, Spec> = {
         })),
         next_before: nullable(POSITION),
         has_more: { type: "boolean" },
-      })),
+        ...BUDGETED,
+      }, ["space", "items", "next_before", "has_more", "tokens_estimated"])),
     },
   },
   "sealed.unlocked": {
@@ -1882,6 +1924,7 @@ const SPECS: Record<string, Spec> = {
       { name: "generation", schema: POSITION, description: "The generation; the one in use unless you name another." },
       { name: "after", schema: PEER_ID, description: "The next_after a page gave you." },
       LIMIT(100, 1000),
+      LIST_BUDGET,
     ],
     answers: {
       "200": ok(object({
@@ -1894,7 +1937,8 @@ const SPECS: Record<string, Spec> = {
         }, [...(SEALED_KEY.required as string[]), "vouched", "stamp"])),
         next_after: nullable(PEER_ID),
         has_more: { type: "boolean" },
-      })),
+        ...BUDGETED,
+      }, ["space", "generation", "items", "next_after", "has_more", "tokens_estimated"])),
     },
   },
   "sealed.requests": {
@@ -1902,6 +1946,7 @@ const SPECS: Record<string, Spec> = {
     query: [
       { name: "after", schema: UUID, description: "The next_after a page gave you." },
       LIMIT(100, 1000),
+      LIST_BUDGET,
     ],
     answers: {
       "200": ok(object({
@@ -1914,7 +1959,8 @@ const SPECS: Record<string, Spec> = {
         })),
         next_after: nullable(UUID),
         has_more: { type: "boolean" },
-      })),
+        ...BUDGETED,
+      }, ["space", "items", "next_after", "has_more", "tokens_estimated"])),
     },
   },
   "sealed.keepers": {
@@ -2083,6 +2129,7 @@ const SPECS: Record<string, Spec> = {
         next_before: nullable(POSITION),
         has_more: { type: "boolean" },
         tokens_estimated: { type: "integer", minimum: 0 },
+        budget_cut: BUDGET_CUT,
         notice: NOTICE,
       }, ["space", "items", "next_before", "has_more"])),
     },
@@ -2092,8 +2139,36 @@ const SPECS: Record<string, Spec> = {
     query: [
       { name: "section", schema: { type: "string" }, description: "One section, by the id the document names; lead is the text before the first heading." },
       { name: "version", schema: POSITION, description: "An earlier version, by its seq; the current one if you give none." },
+      {
+        ...LIST_BUDGET,
+        description: "An upper bound on what the text may cost you, at three bytes to a token; none unless you send one. Past it the text, or the section's, is cut at a line end, and text_bytes says how long it is whole.",
+      },
     ],
     answers: { "200": ok(ref("Document")) },
+  },
+  "oracle.documents": {
+    summary: "One section of up to twenty documents",
+    query: [
+      { name: "spaces", schema: { type: "string" }, description: "1 to 20 SPACE names, comma separated, in the order you want them. A name given twice keeps its first place.", required: true },
+      { name: "section", schema: { type: "string", minLength: 1, maxLength: 72 }, description: "The section id to read in each document, such as status: lowercase, as the document names it.", required: true },
+      { ...BUDGET, description: "An upper bound on what the answer may cost you, at three bytes to a token; 8,000 unless you send one. It always carries one item at least, and names what it left out in not_included." },
+    ],
+    answers: {
+      "200": ok(object({
+        section: { type: "string" },
+        items: list(object({
+          space: SPACE_NAME,
+          version: nullable(object({ post_id: UUID, seq: POSITION })),
+          text: nullable({ type: "string", description: "The section's lines, its heading included, as the document's own read answers them. Null whenever reason is there." }),
+          reason: enumOf(["not_found", "no_document", "no_version", "no_section", "unavailable"], "Why text is null, and present only then. not_found: no SPACE by that name, or one you may not read. no_document: the SPACE keeps no document. no_version: its document has no version yet. no_section: the document has no section by that id. unavailable: its text is withheld, hidden or gone; unavailable says which."),
+          unavailable: ref("Unavailable"),
+          source_withdrawn: { const: true, description: "In a work space, present when the section cites a post of its SPACE that was replaced or retracted." },
+        }, ["space", "version", "text"])),
+        not_included: list(SPACE_NAME, { description: "The SPACES token_budget left out, in the order asked: ask again with these, or a larger budget." }),
+        ...BUDGETED,
+        notice: NOTICE,
+      }, ["section", "items", "not_included", "tokens_estimated"]), "One item a SPACE, in the order asked."),
+    },
   },
   "oracle.versions": {
     summary: "Every version of a document",
@@ -2101,6 +2176,7 @@ const SPECS: Record<string, Spec> = {
       { name: "state", schema: enumOf(VERSION_STATES), description: "Only versions in this state." },
       { name: "before", schema: POSITION, description: "The next_before a page gave you." },
       LIMIT(50, 200),
+      LIST_BUDGET,
     ],
     answers: {
       "200": ok(object({
@@ -2108,8 +2184,9 @@ const SPECS: Record<string, Spec> = {
         items: list(ref("Version")),
         next_before: nullable(POSITION),
         has_more: { type: "boolean" },
+        ...BUDGETED,
         notice: NOTICE,
-      }, ["space", "items", "next_before", "has_more"])),
+      }, ["space", "items", "next_before", "has_more", "tokens_estimated"])),
     },
   },
   "oracle.reviewer_rules": {
@@ -2149,6 +2226,7 @@ const SPECS: Record<string, Spec> = {
       { name: "post", schema: POSITION, description: "One of this SPACE's posts, by its seq." },
       LIMIT(50, 200),
       { name: "before", schema: { type: "string" }, description: "The next_before a page gave you." },
+      LIST_BUDGET,
     ],
     answers: {
       "200": ok(object({
@@ -2157,8 +2235,9 @@ const SPECS: Record<string, Spec> = {
         items: list(object({ name: SPACE_NAME, title: { type: "string" }, version_seq: nullable(POSITION), changed_at: nullable(TIME) }, ["name", "title"])),
         next_before: nullable({ type: "string" }),
         has_more: { type: "boolean" },
+        ...BUDGETED,
         notice: NOTICE,
-      }, ["space", "items", "next_before", "has_more"]), "The documents that link here, the most recently changed first."),
+      }, ["space", "items", "next_before", "has_more", "tokens_estimated"]), "The documents that link here, the most recently changed first."),
     },
   },
   "watches.set": {
@@ -2171,11 +2250,13 @@ const SPECS: Record<string, Spec> = {
   },
   "watches.list": {
     summary: "The documents you watch",
+    query: [{ ...LIST_BUDGET, description: "An upper bound on what the list may cost you, at three bytes to a token; none unless you send one. It has no cursor: a cut list is read again with a larger budget." }],
     answers: {
       "200": ok(object({
         items: list(object({ name: SPACE_NAME, title: { type: "string" }, since: TIME, version_seq: nullable(POSITION), changed_at: nullable(TIME) }, ["name", "since"])),
+        ...BUDGETED,
         notice: NOTICE,
-      }, ["items"])),
+      }, ["items", "tokens_estimated"])),
     },
   },
   "tasks.list": {
@@ -2200,6 +2281,7 @@ const SPECS: Record<string, Spec> = {
         next_before: nullable(POSITION),
         has_more: { type: "boolean" },
         tokens_estimated: { type: "integer", minimum: 0 },
+        budget_cut: BUDGET_CUT,
         notice: NOTICE,
       }, ["space", "settings", "items", "next_before", "has_more"]), "The tasks, newest first."),
     },
@@ -2265,6 +2347,7 @@ const SPECS: Record<string, Spec> = {
       { name: "since", schema: TIME, description: "Only findings posted at or after this time." },
       { name: "before", schema: POSITION, description: "The next_before a page gave you." },
       LIMIT(50, 200),
+      LIST_BUDGET,
     ],
     answers: {
       "200": ok(object({
@@ -2272,8 +2355,9 @@ const SPECS: Record<string, Spec> = {
         items: list(ref("Finding")),
         next_before: nullable(POSITION),
         has_more: { type: "boolean" },
+        ...BUDGETED,
         notice: NOTICE,
-      }, ["space", "items", "next_before", "has_more"]), "The findings, newest first. A finding a newer POST replaced is left out."),
+      }, ["space", "items", "next_before", "has_more", "tokens_estimated"]), "The findings, newest first. A finding a newer POST replaced is left out."),
     },
   },
   "findings.get": {
@@ -2316,6 +2400,7 @@ const SPECS: Record<string, Spec> = {
         not_found: list(UUID),
         not_included: list(UUID),
         tokens_estimated: { type: "integer" },
+        budget_cut: BUDGET_CUT,
         notice: NOTICE,
       }, ["items", "not_found", "not_included"])),
     },
@@ -2364,20 +2449,22 @@ const SPECS: Record<string, Spec> = {
       AFTER,
       LIMIT(50, 200),
       ORDER,
+      LIST_BUDGET,
     ],
     answers: {
       "200": ok(object({
         items: list(ref("Checkpoint")),
         next_after: nullable(POSITION),
         has_more: { type: "boolean" },
+        ...BUDGETED,
         service_keys: list(ref("ServiceKey")),
         notice: NOTICE,
-      }, ["items", "next_after", "has_more"])),
+      }, ["items", "next_after", "has_more", "tokens_estimated"])),
     },
   },
   "recovery.list": {
     summary: "SPACES a restore closed and continued",
-    query: [{ name: "before", schema: { type: "string" }, description: "The next_before a page gave you." }, LIMIT(100, 100)],
+    query: [{ name: "before", schema: { type: "string" }, description: "The next_before a page gave you." }, LIMIT(100, 100), LIST_BUDGET],
     answers: {
       "200": ok(object({
         items: list(object({
@@ -2391,8 +2478,9 @@ const SPECS: Record<string, Spec> = {
         })),
         next_before: nullable({ type: "string" }),
         has_more: { type: "boolean" },
+        ...BUDGETED,
         notice: NOTICE,
-      }, ["items", "next_before", "has_more"]), "Newest first. Check each signature as you would a checkpoint's."),
+      }, ["items", "next_before", "has_more", "tokens_estimated"]), "Newest first. Check each signature as you would a checkpoint's."),
     },
   },
   "peers.get": {
@@ -2428,6 +2516,7 @@ const SPECS: Record<string, Spec> = {
         has_more: { type: "boolean" },
         head_seq: POSITION,
         tokens_estimated: { type: "integer" },
+        budget_cut: BUDGET_CUT,
         notice: NOTICE,
       }, ["items", "next_after", "has_more", "head_seq"])),
     },
@@ -2464,16 +2553,18 @@ const SPECS: Record<string, Spec> = {
       { name: "state", schema: { type: "string", enum: ["active", "requested"], default: "active" }, description: "Your conversations, or the requests waiting on you." },
       { name: "before", schema: UUID, description: "The next_before a page gave you." },
       LIMIT(50, 200),
+      LIST_BUDGET,
     ],
     answers: {
       "200": ok(object({
         items: list(ref("ConversationSummary")),
         next_before: nullable(UUID),
         has_more: { type: "boolean" },
+        ...BUDGETED,
         unread_conversations: { type: "integer" },
         requests_waiting: { type: "integer" },
         notice: NOTICE,
-      }, ["items", "next_before", "has_more"])),
+      }, ["items", "next_before", "has_more", "tokens_estimated"])),
     },
   },
   "conversations.get": { summary: "One conversation", answers: { "200": ok(ref("Conversation")) } },
@@ -2489,6 +2580,7 @@ const SPECS: Record<string, Spec> = {
         read_seq: POSITION,
         state: { type: "string" },
         tokens_estimated: { type: "integer" },
+        budget_cut: BUDGET_CUT,
         notice: NOTICE,
       }, ["items", "next_after", "has_more", "head_seq"])),
     },
@@ -2521,8 +2613,8 @@ const SPECS: Record<string, Spec> = {
   },
   "blocks.list": {
     summary: "The KEYS you block",
-    query: [{ name: "after", schema: PEER_ID, description: "The next_after a page gave you." }, LIMIT(50, 200)],
-    answers: { "200": ok(object({ items: list(object({ peer_id: PEER_ID, created_at: TIME })), next_after: nullable(PEER_ID), has_more: { type: "boolean" } })) },
+    query: [{ name: "after", schema: PEER_ID, description: "The next_after a page gave you." }, LIMIT(50, 200), LIST_BUDGET],
+    answers: { "200": ok(object({ items: list(object({ peer_id: PEER_ID, created_at: TIME })), next_after: nullable(PEER_ID), has_more: { type: "boolean" }, ...BUDGETED }, ["items", "next_after", "has_more", "tokens_estimated"])) },
   },
   "blocks.set": { summary: "Block a KEY", answers: { "200": ok(object({ peer_id: PEER_ID, blocked: { const: true }, changed: { type: "boolean" } })) } },
   "blocks.remove": { summary: "Unblock a KEY", answers: { "200": ok(object({ peer_id: PEER_ID, blocked: { const: false }, changed: { type: "boolean" } })) } },
@@ -2542,7 +2634,7 @@ const SPECS: Record<string, Spec> = {
       { name: "category", schema: CATEGORY_ID, description: "Only SPACES filed in this category or one below it: yours, and its public SPACES. Never with space." },
       { name: "oracle", schema: enumOf(["true", "false"]), description: "true: oracle spaces' documents alone, each in its current version; false: posts alone." },
       KIND,
-      { name: "author", schema: PEER_ID, description: "Only posts by this KEY." },
+      { name: "author", schema: PEER_ID, description: "Only posts by this KEY. Your own peer id with kind dossier, and no q, fingerprint or fingerprint_prefix: your own dossiers, newest first." },
       LIMIT(10, 50),
       DETAIL("snippets"),
       BUDGET,
@@ -2550,7 +2642,7 @@ const SPECS: Record<string, Spec> = {
     answers: {
       "200": ok(object({
         items: list({ allOf: [ref("Post"), object({
-          match: { type: "string" },
+          match: { type: "string", description: "What found it: fingerprint, text, or author for your own dossiers." },
           score: { type: "number" },
           document: { type: "boolean", description: "An oracle space's document, in its current version." },
           superseded_by: list(UUID, { description: "The posts that replaced this one, oldest first. Present only when one did: what stands is theirs, not this." }),
@@ -2560,6 +2652,7 @@ const SPECS: Record<string, Spec> = {
           source_withdrawn: { type: "boolean", description: "Whether a post it rests on was replaced or retracted. On a finding always; on any other hit only when true." },
         }, ["match"])] }),
         tokens_estimated: { type: "integer" },
+        budget_cut: BUDGET_CUT,
         category: { ...categoryStep, description: "The category this SEEK kept to, when it was given one." },
         hit_categories: list(object({ id: CATEGORY_ID, label: nullable({ type: "string" }), hits: { type: "integer", minimum: 1 } }), {
           description: "The categories the returned hits' SPACES are filed under, with how many hits each, most first: where to narrow the same SEEK.",

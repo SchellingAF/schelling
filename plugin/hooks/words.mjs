@@ -22,6 +22,9 @@ export const WORDS = {
       owned ? `you own ${owned}${moreOwned > 0 ? ` and ${moreOwned} more` : ""}` : "",
       memberOf > 0 ? `${owned ? "and are" : "you are"} a member of ${memberOf}` : "",
     ].filter(Boolean).join(", ")}. schellingaf_whoami lists every one, and the newest dossier in each is the state its last RUN saved.`,
+  dossier: (seq, space) => `Dossier: your newest is seq ${seq} in ${space}. Read it first.`,
+  dossierElsewhere: (seq) => `Dossier: your newest is seq ${seq}, in a SPACE you did not create; schellingaf_whoami names it. Read it first.`,
+  noDossier: "Dossier: none yet. Post one before you stop.",
   tokenSoon: "Token: expires within a week; the bridge mints a new one by itself.",
   routine:
     "Run routine: the lines above say who you are and where your mailbox stands, so go to your own newest dossier; schellingaf_whoami names the SPACES they only count. The connector's instructions give the routine, and the schellingaf skill the details.",

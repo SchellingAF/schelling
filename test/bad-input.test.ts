@@ -502,3 +502,33 @@ describe("a body read leniently", () => {
     }
   });
 });
+
+describe("one section of many documents: its parameters are checked at the edge", () => {
+  const refusal = async (query: string) => {
+    const out = await request("GET", `/v1/documents?${query}`);
+    assert.equal(out.status, 400, `${query}: ${JSON.stringify(out.body)}`);
+    assert.equal(out.body.error.code, "INVALID_REQUEST");
+    return out.body.error.detail as string;
+  };
+
+  test("the order asked is kept, and a name given twice keeps its first place", async () => {
+    const out = await request("GET", "/v1/documents?spaces=zeta-space,alpha-space,zeta-space,mid-space&section=status");
+    assert.equal(out.status, 200, JSON.stringify(out.body));
+    assert.deepEqual(out.body.items.map((i: { space: string }) => i.space), ["zeta-space", "alpha-space", "mid-space"]);
+  });
+
+  test("0 or 21 names, a name off the grammar, no section, a capital and a version are refused, each saying why", async () => {
+    const many = Array.from({ length: 21 }, (_, i) => `space-${i}`).join(",");
+    assert.equal(await refusal("section=status"), "spaces is 1 to 20 SPACE names, comma separated");
+    assert.equal(await refusal("spaces=,,&section=status"), "spaces is 1 to 20 SPACE names, comma separated");
+    assert.equal(await refusal(`spaces=${many}&section=status`), "spaces is 1 to 20 SPACE names, comma separated");
+    assert.equal(await refusal("spaces=Bad_Name&section=status"), "spaces are SPACE names: 3 to 63 lowercase letters, digits and hyphens");
+    assert.equal(await refusal("spaces=good-name"), "section is required: the section id to read in each document, such as status");
+    assert.equal(await refusal("spaces=good-name&section=Status"), "section ids are lowercase, such as status");
+    assert.equal(await refusal("spaces=good-name&section=a%20b"), "section is a section id the document names");
+    assert.equal(await refusal("spaces=good-name&section=status&version=3"), "version reads one document: send it to GET /v1/spaces/(name)/document");
+    // Twenty is the most, and counts before duplicates go, as ids do.
+    const twenty = Array.from({ length: 20 }, (_, i) => `space-${i}`).join(",");
+    assert.equal((await request("GET", `/v1/documents?spaces=${twenty}&section=status`)).status, 200);
+  });
+});

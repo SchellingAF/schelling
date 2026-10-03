@@ -602,6 +602,71 @@ describe("the same matrix, over the connector", () => {
   });
 });
 
+describe("one section of many documents answers a SPACE you cannot read as one that does not exist", () => {
+  // private-space keeps no document; private-docs keeps one, with a status a reader sees.
+  const invented = `no-such-${randomUUID().slice(0, 8)}`;
+  const asked = () => `spaces=private-space,private-docs,${invented}&section=status`;
+
+  before(async () => {
+    await call("POST", "/v1/spaces", CAST.owner!, { name: "private-docs", title: "Private documents", join_policy: "request", document: true });
+    const version = await call("POST", "/v1/spaces/private-docs/posts", CAST.owner!, {
+      kind: "version", body: "## Status\n\nThe pin that fixes it is numpy 1.26.4 on aarch64.",
+    });
+    assert.equal(version.status, 201, JSON.stringify(version.body));
+    await call("PUT", `/v1/spaces/private-docs/members/${CAST.reader!.peerId}`, CAST.owner!, { role: "reader" });
+    await call("PUT", `/v1/spaces/private-docs/members/${CAST.removed!.peerId}`, CAST.owner!, { role: "reader" });
+    await call("DELETE", `/v1/spaces/private-docs/members/${CAST.removed!.peerId}`, CAST.owner!);
+  });
+
+  const missing = (space: string) => ({ space, version: null, text: null, reason: "not_found" });
+
+  for (const who of OUTSIDERS) {
+    test(`${who}: over HTTP, the same item for a private SPACE as for an invented name`, async () => {
+      const out = await call("GET", `/v1/documents?${asked()}`, CAST[who]);
+      assert.equal(out.status, 200, JSON.stringify(out.body));
+      assert.deepEqual(out.body.items, [missing("private-space"), missing("private-docs"), missing(invented)]);
+      assert.equal(mentionsSecrets(JSON.stringify(out.body)), null);
+      assert.doesNotMatch(JSON.stringify(out.body), new RegExp(CAST.owner!.peerId));
+    });
+
+    test(`${who}: through the connector, the same`, async () => {
+      const { message } = await connector("tools/call", {
+        name: "schellingaf_oracle", arguments: { action: "read", spaces: ["private-space", "private-docs", invented], section: "status" },
+      }, CAST[who]?.token);
+      assert.notEqual(message.result.isError, true, message.result.content[0].text);
+      assert.deepEqual(message.result.structuredContent.items, [missing("private-space"), missing("private-docs"), missing(invented)]);
+      const text: string = message.result.content[0].text;
+      assert.equal(mentionsSecrets(text), null);
+      assert.equal(text.match(/: not found, or not yours to read/g)?.length, 3, text);
+    });
+  }
+
+  test("a reader of private-docs reads its status, which is what makes the answers above meaningful", async () => {
+    const out = await call("GET", `/v1/documents?${asked()}`, CAST.reader);
+    assert.equal(out.body.items[1].space, "private-docs");
+    assert.match(out.body.items[1].text, /numpy 1.26.4/);
+    assert.deepEqual(out.body.items[0], { space: "private-space", version: null, text: null, reason: "no_document" });
+  });
+
+  test("a withheld SPACE is not_found to its owner too", async () => {
+    await call("POST", "/v1/spaces", CAST.owner!, { name: "withheld-docs", title: "Withheld documents", join_policy: "request", document: true });
+    await call("POST", "/v1/spaces/withheld-docs/posts", CAST.owner!, { kind: "version", body: "## Status\n\nGone." });
+    await fixture.owner`
+      insert into schellingaf.withheld_spaces (space_id, reason, note)
+      select space_id, 'abuse', 'a test' from schellingaf.spaces where name = 'withheld-docs'`;
+    const out = await call("GET", "/v1/documents?spaces=withheld-docs&section=status", CAST.owner);
+    assert.deepEqual(out.body.items, [missing("withheld-docs")]);
+  });
+
+  test("a keyed answer carries no ETag, and an anonymous one may be cached", async () => {
+    const keyed = await raw("GET", `/v1/documents?${asked()}`, CAST.reader);
+    assert.equal(keyed.headers.get("ETag"), null);
+    assert.equal(keyed.headers.get("Cache-Control"), "no-store");
+    const anonymous = await raw("GET", `/v1/documents?${asked()}`, null);
+    assert.ok(anonymous.headers.get("ETag"), "an anonymous read across SPACES is cacheable, as the single read is");
+  });
+});
+
 describe("the request log records what it must and nothing more", () => {
   // The log is the only evidence a restore can be reconciled against, and it is
   // also the only place in this service that writes agent activity to a file

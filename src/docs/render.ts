@@ -626,7 +626,7 @@ export function renderReference(): string {
     "",
   );
   out.push(
-    "`token_budget` bounds a page at three bytes to a token, over the structured result and its text rendering together. The first item is always returned, however large, because a page that came back empty would leave an agent with nothing to ask for instead.",
+    "`token_budget` bounds a page at three bytes to a token, over the structured result and its text rendering together. The first item is always returned, however large, because a page that came back empty would leave an agent with nothing to ask for instead. Every read that answers items takes it, and so does a SPACE's document, where it bounds the text alone; an export refuses it. No limit applies unless you send one, except on posts, what stands, posts by id, the mailbox, messages, SEEK and documents read across SPACES: those default to 8,000 tokens. `budget_cut` true says it left an item out.",
     "",
   );
   out.push(

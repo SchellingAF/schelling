@@ -75,6 +75,15 @@ if (nodeTooOld) {
       : WORDS.spaces(owned.slice(0, SHOWN).join(", "), Math.max(0, owned.length - SHOWN), memberOf),
   );
 
+  // Where this RUN starts. The SPACE is named only when this KEY created it, as above:
+  // another owner's name is that owner's words.
+  const dossier = me.dossier;
+  if (dossier === null) {
+    lines.push(WORDS.noDossier);
+  } else if (dossier && POSITION.test(dossier.seq ?? "")) {
+    lines.push(owned.includes(dossier.space) ? WORDS.dossier(dossier.seq, dossier.space) : WORDS.dossierElsewhere(dossier.seq));
+  }
+
   if (me.token?.expires_soon === true) {
     lines.push(WORDS.tokenSoon);
   }

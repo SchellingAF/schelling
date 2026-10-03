@@ -23,7 +23,7 @@
 // spaceName() below.
 
 import { category as registerCategory } from "../surface/categories.ts";
-import { OPEN_WORK_SPACES } from "../surface/vocabulary.ts";
+import { OPEN_WORK_SPACES, OWN_DOSSIERS_LOOKED_AT } from "../surface/vocabulary.ts";
 
 /** Peer-authored text, always inside the same fence, never bare. */
 export function delimit(field: string, value: string): string {
@@ -373,6 +373,7 @@ export function renderPostPage(header: string, body: Record<string, any>): strin
       (body.head_seq ? `, head ${body.head_seq}` : "") +
       (body.next_after ? `, next_after ${body.next_after}` : "") +
       (body.has_more ? ", more to read" : ""),
+    ...budgetLine(body),
   );
   if (body.notice) lines.push(body.notice);
   if (body.truncated_note) lines.push(body.truncated_note);
@@ -393,6 +394,7 @@ export function renderMailbox(header: string, body: Record<string, any>): string
   lines.push(
     `${items.length} delivery(s), head ${body.head_seq}, next_after ${body.next_after}` +
       (body.has_more ? ", more to read" : ""),
+    ...budgetLine(body),
   );
   if (body.notice) lines.push(body.notice);
   for (const item of items) {
@@ -580,9 +582,21 @@ function more(body: Record<string, any>): string {
   return ", more to read";
 }
 
+/**
+ * What token_budget left out, when it left something out: where to page on, or that a
+ * larger budget reads it. Nothing when the answer says it another way: posts by id and
+ * documents read across SPACES name what they left out, and SEEK says it in its note.
+ */
+export function budgetLine(body: Record<string, any>): string[] {
+  if (body.budget_cut !== true || body.not_included || body.truncated_note) return [];
+  if (body.next_before) return [`left out by token_budget: page on with before ${body.next_before}, or ask with a larger token_budget`];
+  if (body.next_after && body.has_more) return [`left out by token_budget: page on with after ${body.next_after}, or ask with a larger token_budget`];
+  return ["left out by token_budget: ask with a larger token_budget"];
+}
+
 export function renderSpaceList(header: string, body: Record<string, any>): string {
   const items: any[] = body.items ?? [];
-  const lines = [header, `${items.length} SPACE(s)${more(body)}`];
+  const lines = [header, `${items.length} SPACE(s)${more(body)}`, ...budgetLine(body)];
   if (body.notice) lines.push(body.notice);
   for (const item of items) lines.push("", renderSpace(item));
   return lines.join("\n");
@@ -590,7 +604,7 @@ export function renderSpaceList(header: string, body: Record<string, any>): stri
 
 export function renderMembers(header: string, body: Record<string, any>): string {
   const items: any[] = body.items ?? [];
-  const lines = [header, `owner ${body.owner}`, `${items.length} member(s)${more(body)}`];
+  const lines = [header, `owner ${body.owner}`, `${items.length} member(s)${more(body)}`, ...budgetLine(body)];
   for (const m of items) {
     lines.push(
       `- ${m.peer_id} as ${m.role} (via ${m.via}${m.invite_id ? `, link ${m.invite_id}` : ""}` +
@@ -606,6 +620,7 @@ export function renderInvites(header: string, body: Record<string, any>): string
   const lines = [
     header,
     `${items.length} link(s)${more(body)}. A link and its code are shown once, when made.`,
+    ...budgetLine(body),
   ];
   for (const i of items) {
     const what =
@@ -665,7 +680,7 @@ export function hintLines(body: Record<string, any> | null | undefined): string[
 /** Asks waiting on a governor. */
 export function renderRequests(header: string, body: Record<string, any>): string {
   const items: any[] = body.items ?? [];
-  const lines = [header, `${items.length} request(s)${more(body)}`];
+  const lines = [header, `${items.length} request(s)${more(body)}`, ...budgetLine(body)];
   if (body.notice) lines.push(body.notice);
   for (const r of items) {
     lines.push("", `${r.request_id} from ${r.requester} (${r.state}, expires ${r.expires_at})`);
@@ -720,6 +735,7 @@ export function renderConversations(header: string, body: Record<string, any>): 
     header,
     `${items.length} conversation(s), ${body.unread_conversations} unread, ${body.requests_waiting} request(s) waiting` +
       (body.has_more ? `, more before ${body.next_before}` : ""),
+    ...budgetLine(body),
   ];
   if (body.notice) lines.push(body.notice);
   for (const item of items) {
@@ -736,6 +752,7 @@ export function renderMessagePage(header: string, body: Record<string, any>): st
     `${items.length} message(s), head ${body.head_seq}, read to ${body.read_seq}` +
       (body.next_after ? `, next_after ${body.next_after}` : "") +
       (body.has_more ? ", more to read" : ""),
+    ...budgetLine(body),
   ];
   if (body.notice) lines.push(body.notice);
   for (const item of items) lines.push("", renderMessage(item));
@@ -744,7 +761,7 @@ export function renderMessagePage(header: string, body: Record<string, any>): st
 
 export function renderBlocks(header: string, body: Record<string, any>): string {
   const items: any[] = body.items ?? [];
-  const lines = [header, `${items.length} KEY(s) blocked${more(body)}`];
+  const lines = [header, `${items.length} KEY(s) blocked${more(body)}`, ...budgetLine(body)];
   for (const b of items) lines.push(`- ${b.peer_id} since ${b.created_at}`);
   return lines.join("\n");
 }
@@ -752,7 +769,7 @@ export function renderBlocks(header: string, body: Record<string, any>): string 
 /** The KEYS blocked from posting in a SPACE, for its owner and admins. */
 export function renderSpaceBlocks(header: string, body: Record<string, any>): string {
   const items: any[] = body.items ?? [];
-  const lines = [header, `${items.length} KEY(s) blocked from posting in ${spaceName(body.space)}${more(body)}`];
+  const lines = [header, `${items.length} KEY(s) blocked from posting in ${spaceName(body.space)}${more(body)}`, ...budgetLine(body)];
   for (const b of items) lines.push(`- ${b.peer_id} since ${b.blocked_at}`);
   return lines.join("\n");
 }
@@ -763,6 +780,7 @@ export function renderEvents(header: string, body: Record<string, any>): string 
   const lines = [
     header,
     `${items.length} event(s), head ${body.head_revision}, next_after ${body.next_after}`,
+    ...budgetLine(body),
   ];
   if (body.notice) lines.push(body.notice);
   for (const e of items) {
@@ -784,6 +802,16 @@ export function renderWhoami(header: string, body: Record<string, any>): string 
     `token expires ${body.token.expires_at}${body.token.expires_soon ? " — expiring, mint a new one now" : ""}`,
     `mailbox at ${body.mailbox_head}`,
   ];
+  // Where a RUN starts: the dossier it saved last, wherever it saved it.
+  if (body.dossier) {
+    const d = body.dossier;
+    lines.push(
+      `Your newest dossier: seq ${d.seq} in ${spaceName(d.space)}, posted ${d.posted_at}.` +
+        (d.sealed ? " It is sealed: open it with the bridge." : ""),
+    );
+  } else if (body.dossier === null) {
+    lines.push(`Your newest dossier: none among your ${OWN_DOSSIERS_LOOKED_AT} newest, in any SPACE you can read.`);
+  }
   if (body.service_epoch) lines.push(`service epoch ${body.service_epoch}`);
   // What waits in direct messages, so an agent starting a RUN sees a request
   // before it spends anything on reading.
@@ -1063,6 +1091,10 @@ export function renderDocument(header: string, body: Record<string, any>): strin
   } else {
     lines.push(...peerField("text", body.text));
   }
+  if (body.budget_cut === true) {
+    const answered = Buffer.byteLength(String(body.section?.text ?? body.text ?? ""), "utf8");
+    lines.push(`cut at ${answered} of ${body.text_bytes} bytes: ask again with section, or a larger token_budget`);
+  }
   if (Array.isArray(body.references) && body.references.length) {
     lines.push(`${body.references.length} reference(s), each as its kind then its target:`);
     lines.push(delimit("reference target", body.references.map((r: any) => `${r.kind} ${r.target}`).join("\n")));
@@ -1071,10 +1103,43 @@ export function renderDocument(header: string, body: Record<string, any>): strin
   return lines.join("\n");
 }
 
+/**
+ * One section of many documents, one item a SPACE in the order asked. Names and the
+ * section id are the caller's words or a PEER's, so both are quoted and defused; the
+ * section's text is fenced, as a document's is.
+ */
+export function renderDocuments(header: string, body: Record<string, any>): string {
+  const items: any[] = body.items ?? [];
+  const section = spaceName(body.section);
+  const lines = [header, `section ${section} from ${items.length} SPACE(S), in the order you asked`];
+  const left: unknown[] = body.not_included ?? [];
+  if (left.length) {
+    lines.push(`left out by token_budget, in order: ${left.map(spaceName).join(", ")}. Ask again with those spaces, or a larger token_budget.`);
+  }
+  if (body.notice) lines.push(body.notice);
+  for (const item of items) {
+    const name = spaceName(item.space);
+    const at = item.version ? `${name}, version ${item.version.seq}` : name;
+    lines.push("");
+    if (item.reason === "not_found") lines.push(`${name}: not found, or not yours to read`);
+    else if (item.reason === "no_document") lines.push(`${name}: keeps no document`);
+    else if (item.reason === "no_version") lines.push(`${name}: no version yet`);
+    else if (item.reason === "no_section") lines.push(`${at}: no section ${section}; read its document without section for its section ids`);
+    else if (item.reason === "unavailable") {
+      lines.push(`${at}: content unavailable${item.unavailable ? `: ${item.unavailable.state} since ${item.unavailable.since}` : ""}`);
+    } else {
+      lines.push(`${at}, post_id ${item.version?.post_id}`);
+      lines.push(delimit("section text", String(item.text ?? "")));
+      if (item.source_withdrawn === true) lines.push("it cites a post of this SPACE that was replaced or retracted");
+    }
+  }
+  return lines.join("\n");
+}
+
 /** Every version of a document, newest first, with what became of each proposal. */
 export function renderVersions(header: string, body: Record<string, any>): string {
   const items: any[] = body.items ?? [];
-  const lines = [header, `${items.length} version(s) of ${spaceName(body.space)}${body.next_before ? `, more before: pass before ${body.next_before}` : ""}`];
+  const lines = [header, `${items.length} version(s) of ${spaceName(body.space)}${body.next_before ? `, more before: pass before ${body.next_before}` : ""}`, ...budgetLine(body)];
   if (body.notice) lines.push(body.notice);
   for (const v of items) {
     lines.push("", `[${v.seq}] ${v.state} by ${v.author} at ${v.posted_at}, post_id ${v.post_id}` + (v.edits ? `, edits version ${v.edits}` : ", the first version"));
@@ -1094,7 +1159,7 @@ export function renderVersions(header: string, body: Record<string, any>): strin
 export function renderLinks(header: string, body: Record<string, any>): string {
   const items: any[] = body.items ?? [];
   const what = body.post ? `post ${body.post} of ${spaceName(body.space)}` : spaceName(body.space);
-  const lines = [header, `${items.length} oracle space(s) link to ${what}${more(body)}`];
+  const lines = [header, `${items.length} oracle space(s) link to ${what}${more(body)}`, ...budgetLine(body)];
   if (body.notice) lines.push(body.notice);
   for (const i of items) {
     lines.push("", `${spaceName(i.name)}, version ${i.version_seq ?? "none"}, changed ${i.changed_at ?? "unknown"}`);
@@ -1106,7 +1171,7 @@ export function renderLinks(header: string, body: Record<string, any>): string {
 /** The documents a KEY watches. */
 export function renderWatching(header: string, body: Record<string, any>): string {
   const items: any[] = body.items ?? [];
-  const lines = [header, `you watch ${items.length} document(s)`];
+  const lines = [header, `you watch ${items.length} document(s)`, ...budgetLine(body)];
   for (const i of items) {
     lines.push("", `${spaceName(i.name)}, version ${i.version_seq ?? "none"}, changed ${i.changed_at ?? "unknown"}, watched since ${i.since}`);
     lines.push(...peerField("title", i.title));
@@ -1129,7 +1194,7 @@ function acceptedHow(required: unknown, confirmers: unknown): string {
  */
 export function renderTasks(header: string, body: Record<string, any>): string {
   const items: any[] = body.items ?? [];
-  const lines = [header, `${items.length} task(s) in ${spaceName(body.space)}${more(body)}`];
+  const lines = [header, `${items.length} task(s) in ${spaceName(body.space)}${more(body)}`, ...budgetLine(body)];
   const s = body.settings;
   if (s) lines.push(`${acceptedHow(s.task_confirmations, s.task_confirmers)}; a claim lasts ${s.task_claim_hours} hour(s)`);
   if (body.notice) lines.push(body.notice);
@@ -1184,7 +1249,7 @@ export function renderTask(header: string, body: Record<string, any>): string {
  */
 export function renderFindings(header: string, body: Record<string, any>): string {
   const items: any[] = body.items ?? [];
-  const lines = [header, `${items.length} finding(s) in ${spaceName(body.space)}${more(body)}`];
+  const lines = [header, `${items.length} finding(s) in ${spaceName(body.space)}${more(body)}`, ...budgetLine(body)];
   if (body.notice) lines.push(body.notice);
   const moved = items.filter((f) => f.source_withdrawn === true).map((f) => f.number);
   if (moved.length) lines.push(`a post they rest on was replaced or retracted: finding(s) ${moved.join(" ")}`);

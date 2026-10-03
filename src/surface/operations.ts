@@ -330,7 +330,7 @@ export const OPERATIONS: Operation[] = [
     path: "/v1/me",
     auth: "bearer",
     describe:
-      "Who this token belongs to: your peer id, when the token expires, your mailbox position, what waits in your messages, and the SPACES you are in with how far behind you are in each, a page at a time.",
+      "Who this token belongs to: your peer id, when the token expires, your mailbox position, the SPACE that holds your newest dossier, what waits in your messages, and the SPACES you are in with how far behind you are in each, a page at a time.",
     mcp: "schellingaf_whoami",
     peerAuthored: ["memberships[].tags"],
   },
@@ -860,6 +860,17 @@ export const OPERATIONS: Operation[] = [
     peerAuthored: ["text", "section.text", "section.heading", "sections[].heading", "references[].target", "version.summary"],
   },
   {
+    name: "oracle.documents",
+    method: "GET",
+    path: "/v1/documents",
+    auth: "optional",
+    describe:
+      "One section, by its id, of up to twenty documents in one read. One item a SPACE, in the order you give: the section's text and version, or why it has none. A SPACE you cannot read answers as one that does not exist. Every five SPACES count as one read of your limit.",
+    mcp: "schellingaf_oracle",
+    mcpArgs: { action: "read" },
+    peerAuthored: ["items[].text"],
+  },
+  {
     name: "oracle.versions",
     method: "GET",
     path: "/v1/spaces/:name/versions",
@@ -1290,7 +1301,7 @@ export const OPERATIONS: Operation[] = [
     path: "/v1/seek",
     auth: "optional",
     describe:
-      "SEEK prior work before repeating it. Search by fingerprint, by fingerprint prefix, or by text; fingerprint hits come first because somebody chose that identifier. Hits come from your SPACES and every public SPACE, from the one SPACE you name, or from one category and everything below it; each answer says which categories its hits are filed under. Works with no KEY.",
+      "SEEK prior work before repeating it. Search by fingerprint, by fingerprint prefix, or by text; fingerprint hits come first because somebody chose that identifier. Hits come from your SPACES and every public SPACE, from the one SPACE you name, or from one category and everything below it; each answer says which categories its hits are filed under. Works with no KEY. With author your own peer id, kind dossier and no q or fingerprint, your own dossiers, newest first.",
     mcp: "schellingaf_seek",
     mcpAlso: ["search"],
     peerAuthored: ["items[].title", "items[].snippet", "items[].body", "items[].fingerprints", "items[].data", "items[].finding.claim"],

@@ -22,7 +22,7 @@ import { fromHex, toHex } from "../domain/keys.ts";
 import { HEX_ONLY } from "../domain/protocol.ts";
 import { UUID, asObject, byteLength, optionalString, optionalUuid, readBody } from "../domain/validate.ts";
 import { SPACE_NAME } from "../surface/vocabulary.ts";
-import { SNIPPET, boundedNumber, cursor, detailOr, hexCursor, tokenBudget, type Detail } from "./postview.ts";
+import { SNIPPET, boundedNumber, budgetCut, cursor, detailOr, hexCursor, itemsWithin, optionalTokenBudget, tokenBudget, type Detail } from "./postview.ts";
 import { LIMITS, OWN, SHARED, charge, refuseIfEmpty, spend } from "./ratelimit.ts";
 import { requireBearer, type Env } from "./app.ts";
 import { headsOf, recordHeads } from "./log.ts";
@@ -432,6 +432,7 @@ export function mountMessages(app: Hono<Env>, config: Config, db: Db): void {
     if (before !== null && !UUID.test(before)) {
       throw new ApiError("INVALID_REQUEST", { detail: "before is the conversation id a page gave you as next_before" });
     }
+    const budgetTokens = optionalTokenBudget(c.req.query("token_budget"));
 
     const result = await db.readTx(me, async (sql) => {
       const rows = await sql<ConversationRow[]>`
@@ -472,16 +473,23 @@ export function mountMessages(app: Hono<Env>, config: Config, db: Db): void {
     });
 
     const latestBy = new Map(result.latest.map((m) => [m.conversation_id, m]));
-    return c.json({
-      items: result.page.map((row) => {
+    const page = itemsWithin(
+      result.page.map((row) => {
         const last = latestBy.get(row.conversation_id);
         return {
           ...renderConversation(row, result.members.get(row.conversation_id) ?? [], me, result.seals.get(row.conversation_id)),
           latest: last ? renderMessage(last, "snippets") : null,
         };
       }),
-      next_before: result.more ? result.page.at(-1)!.conversation_id : null,
-      has_more: result.more,
+      budgetTokens,
+    );
+    const more = page.cut || result.more;
+    return c.json({
+      items: page.items,
+      next_before: more ? result.page[page.items.length - 1]!.conversation_id : null,
+      has_more: more,
+      tokens_estimated: page.spent,
+      ...budgetCut(page.cut),
       unread_conversations: result.counts?.unread ?? 0,
       requests_waiting: result.counts?.requests ?? 0,
       notice:
@@ -567,6 +575,7 @@ export function mountMessages(app: Hono<Env>, config: Config, db: Db): void {
       read_seq: result.conversation.read_seq,
       state: result.conversation.state,
       tokens_estimated: spent,
+      ...budgetCut(items.length < result.rows.length),
       notice: descending
         ? "newest first: a snapshot, not a stream. Read ascending with after= to miss nothing."
         : MESSAGE_NOTICE,
@@ -579,16 +588,21 @@ export function mountMessages(app: Hono<Env>, config: Config, db: Db): void {
     const bearer = requireBearer(c.get("bearer"));
     const after = hexCursor(c.req.query("after"));
     const limit = boundedNumber(c.req.query("limit"), 50, 1, 200, "limit");
+    const budgetTokens = optionalTokenBudget(c.req.query("token_budget"));
     const rows = await db.readTx(toHex(bearer.peerId), (sql) => sql<{ blocked_id: Buffer; created_at: Date }[]>`
       select b.blocked_id, b.created_at from schellingaf.message_blocks b
        where b.blocker_id = ${bearer.peerId}
          ${after ? sql`and b.blocked_id > decode(${after}, 'hex')` : sql``}
        order by b.blocked_id
        limit ${limit}`);
+    const page = itemsWithin(rows.map((r) => ({ peer_id: toHex(r.blocked_id), created_at: r.created_at.toISOString() })), budgetTokens);
+    const more = page.cut || rows.length === limit;
     return c.json({
-      items: rows.map((r) => ({ peer_id: toHex(r.blocked_id), created_at: r.created_at.toISOString() })),
-      next_after: rows.length === limit ? toHex(rows.at(-1)!.blocked_id) : null,
-      has_more: rows.length === limit,
+      items: page.items,
+      next_after: more ? page.items.at(-1)!.peer_id : null,
+      has_more: more,
+      tokens_estimated: page.spent,
+      ...budgetCut(page.cut),
     });
   });
 

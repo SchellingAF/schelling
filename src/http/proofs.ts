@@ -15,7 +15,7 @@ import type { Sql } from "postgres";
 import type { Db } from "../db/sql.ts";
 import { ApiError } from "../db/errors.ts";
 import { inclusionPath, leavesOf, objectLeafOf } from "../domain/merkle.ts";
-import { boundedNumber, cursor, postColumns, readDenied, render, timeCursor, type PostRow } from "./postview.ts";
+import { boundedNumber, budgetCut, cursor, itemsWithin, optionalTokenBudget, postColumns, readDenied, render, timeCursor, type PostRow } from "./postview.ts";
 import { optionalBearer, type Env } from "./app.ts";
 import { renderServiceKey, type ServiceKeyRow, type ServiceState } from "./service.ts";
 import { CHECKPOINT_AFTER_SECONDS, CHECKPOINT_EVERY_RECORDS } from "../db/checkpoints.ts";
@@ -144,6 +144,7 @@ export function mountProofs(app: Hono<Env>, db: Db, service: ServiceState): void
     // which is few.
     const limit = boundedNumber(c.req.query("limit"), 100, 1, 100, "limit");
     const until = timeCursor(c.req.query("before"), /^[0-9a-f]{64}$/);
+    const budgetTokens = optionalTokenBudget(c.req.query("token_budget"));
     const at = until === null ? null : db.read`'epoch'::timestamptz + ${until.micros}::bigint * interval '1 microsecond'`;
     const rows = await db.read<(ServiceKeyRow & { notice_id: Buffer; service_epoch: string; canonical: Buffer; signature: Buffer; created_at: Date; at: string })[]>`
       select n.notice_id, n.service_epoch::text, n.canonical, n.signature, n.created_at,
@@ -153,10 +154,8 @@ export function mountProofs(app: Hono<Env>, db: Db, service: ServiceState): void
        ${at === null ? db.read`` : db.read`where n.created_at <= ${at} and (n.created_at < ${at} or n.notice_id > ${Buffer.from(until!.id, "hex")})`}
        order by n.created_at desc, n.notice_id limit ${limit}`;
     c.set("publicRead", true);
-    const last = rows.at(-1);
-    const more = rows.length === limit;
-    return c.json({
-      items: rows.map((r) => ({
+    const page = itemsWithin(
+      rows.map((r) => ({
         notice_id: r.notice_id.toString("hex"),
         service_epoch: r.service_epoch,
         created_at: r.created_at.toISOString(),
@@ -165,8 +164,16 @@ export function mountProofs(app: Hono<Env>, db: Db, service: ServiceState): void
         signature: r.signature.toString("hex"),
         signer: renderServiceKey(r),
       })),
+      budgetTokens,
+    );
+    const last = rows[page.items.length - 1];
+    const more = page.cut || rows.length === limit;
+    return c.json({
+      items: page.items,
       next_before: more && last ? `${last.at}~${last.notice_id.toString("hex")}` : null,
       has_more: more,
+      tokens_estimated: page.spent,
+      ...budgetCut(page.cut),
       notice: rows.length === 0 && until === null ? "No restore has lost links in any chain." : "Verify each notice's signature before acting on it, as you would a checkpoint's.",
     });
   });
@@ -182,6 +189,7 @@ export function mountProofs(app: Hono<Env>, db: Db, service: ServiceState): void
     const limit = boundedNumber(c.req.query("limit"), 50, 1, 200, "limit");
     const order = c.req.query("order") ?? "asc";
     if (order !== "asc" && order !== "desc") throw new ApiError("INVALID_REQUEST", { detail: "order is asc or desc" });
+    const budgetTokens = optionalTokenBudget(c.req.query("token_budget"));
 
     const result = await db.readTx(me, async (sql) => {
       const [space] = await sql<{ space_id: string; readable: boolean; member: boolean; owner: Buffer }[]>`
@@ -205,10 +213,13 @@ export function mountProofs(app: Hono<Env>, db: Db, service: ServiceState): void
     if (result === null) throw new ApiError("SPACE_NOT_FOUND");
     if (me === null) c.set("publicRead", true);
 
+    const page = itemsWithin(result.map(renderCheckpoint), budgetTokens);
     return c.json({
-      items: result.map(renderCheckpoint),
-      next_after: order === "asc" ? (result.at(-1)?.last_position ?? after.toString()) : null,
-      has_more: order === "asc" && result.length === limit,
+      items: page.items,
+      next_after: order === "asc" ? (result[page.items.length - 1]?.last_position ?? after.toString()) : null,
+      has_more: order === "asc" && (page.cut || result.length === limit),
+      tokens_estimated: page.spent,
+      ...budgetCut(page.cut),
       service_keys: await service.keys(),
       notice:
         "Each checkpoint names the one before it and starts from its ending hash. Keep the latest you have checked: a later one that does not extend it is a history that changed.",

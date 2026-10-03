@@ -9,7 +9,7 @@ import type { Db } from "../db/sql.ts";
 import { ApiError, ERRORS, refusalBody, toApiError } from "../db/errors.ts";
 import { OPERATIONS, type Operation } from "../surface/operations.ts";
 import { refusalsOf } from "../surface/refusals.ts";
-import { buildOpenApi, openApiSlice } from "../surface/openapi.ts";
+import { buildOpenApi, openApiSlice, queryNames } from "../surface/openapi.ts";
 import { PLUGIN_NAME, bridgeScript, marketplace, pluginArchive } from "../surface/plugin.ts";
 import {
   CHALLENGE_BYTES,
@@ -79,7 +79,7 @@ import { jsonText, renderOpenWork } from "../mcp/render.ts";
 import { requestLog, type Head, type Refusal, type Returned } from "./log.ts";
 import { LISTEN_ADDRESSES_MAX, LISTEN_ADDRESS_SHAPES, LISTEN_MAX_SECONDS, LISTENS_PER_KEY, publishChange } from "../mcp/listen.ts";
 import { markdownReads } from "./markdown.ts";
-import { PUBLIC_RESULTS_PER_OWNER, PUBLIC_RESULTS_PER_SPACE, publicSeekablePerDay, QUERY_BYTES, QUERY_TERMS, boundedNumber, timeCursor } from "./postview.ts";
+import { PUBLIC_RESULTS_PER_OWNER, PUBLIC_RESULTS_PER_SPACE, publicSeekablePerDay, QUERY_BYTES, QUERY_TERMS, boundedNumber, budgetCut, itemsWithin, notTaken, optionalTokenBudget, timeCursor } from "./postview.ts";
 import {
   ANON_READS_PER_MINUTE,
   CONCURRENT_READS_PER_ANON,
@@ -825,6 +825,25 @@ export function createApp(config: Config, db: Db): Hono<Env> {
     if (config.readOnly) {
       const op = operationAt(c.req.method, c.req.path);
       if (op && op.method !== "GET" && !CHALLENGE_PATHS.has(op.path)) throw new ApiError("SERVICE_READ_ONLY");
+    }
+    await next();
+  });
+
+  // One rule for a name a read does not take, as the connector keeps it: a query name
+  // /openapi.json gives some operation, sent to a read that does not take it, is refused
+  // with the names it does take, so a filter sent to the wrong read is never dropped in
+  // silence. A name no operation takes, such as a cache-buster, is ignored as before.
+  app.use("/v1/*", async (c, next) => {
+    const op = operationAt(c.req.method, c.req.path);
+    if (op?.method === "GET") {
+      const { known, takes } = queryNames();
+      const taken = takes.get(op.name) ?? [];
+      const sent = [...new Set(new URL(c.req.url).searchParams.keys())];
+      const untaken = sent.filter((name) => known.has(name) && !taken.includes(name));
+      if (op.name === "oracle.documents" && untaken.includes("version")) {
+        throw new ApiError("INVALID_REQUEST", { detail: "version reads one document: send it to GET /v1/spaces/(name)/document" });
+      }
+      if (untaken.length > 0) throw new ApiError("INVALID_REQUEST", notTaken(untaken, taken));
     }
     await next();
   });
@@ -1945,7 +1964,11 @@ export function createApp(config: Config, db: Db): Hono<Env> {
                (select ms.retention_days::int from schellingaf.message_settings ms
                  where ms.peer_id = ${bearer.peerId}) as retention_days
           from schellingaf.caller_conversation_list() cc`;
-      return { peer, mailbox, owned, memberships, messages };
+      // Where this KEY's newest dossier is, so a RUN reads the state it saved last in
+      // the SPACE that holds it: its own rows alone, never another KEY's.
+      const [dossier] = await sql<{ space: string; seq: string; post_id: string; posted_at: Date; sealed: boolean }[]>`
+        select d.space, d.seq::text, d.post_id::text, d.posted_at, d.sealed from schellingaf.own_dossiers(1) d`;
+      return { peer, mailbox, owned, memberships, messages, dossier };
     });
 
     const secondsLeft = Math.floor((bearer.expiresAt.getTime() - Date.now()) / 1000);
@@ -1969,6 +1992,17 @@ export function createApp(config: Config, db: Db): Hono<Env> {
         expires_in_days: Math.floor(secondsLeft / 86400),
       },
       mailbox_head: rows.mailbox?.last_seq ?? "0",
+      // Your newest dossier that stands, in a SPACE you can read, among your 64 newest;
+      // null when none does. A sealed one opens with the bridge, as any sealed post.
+      dossier: rows.dossier
+        ? {
+            space: rows.dossier.space,
+            seq: rows.dossier.seq,
+            post_id: rows.dossier.post_id,
+            posted_at: rows.dossier.posted_at.toISOString(),
+            sealed: rows.dossier.sealed,
+          }
+        : null,
       // What the capability document says too, here so an agent keeping its cursors
       // need not read the whole capability document at the start of every RUN. Cached
       // in serviceState; a restore that lost links starts a new epoch.
@@ -1997,6 +2031,7 @@ export function createApp(config: Config, db: Db): Hono<Env> {
     // still see them all.
     const limit = boundedNumber(c.req.query("limit"), 200, 1, 200, "limit");
     const until = timeCursor(c.req.query("before"), /^[0-9a-f]{64}$/);
+    const budgetTokens = optionalTokenBudget(c.req.query("token_budget"));
     // On the read pool, like the bearer lookup: a plain SELECT on a table with no
     // row security, which has no business queueing in front of the writes.
     const at = until === null ? null : db.read`'epoch'::timestamptz + ${until.micros}::bigint * interval '1 microsecond'`;
@@ -2023,10 +2058,8 @@ export function createApp(config: Config, db: Db): Hono<Env> {
          ${at === null ? db.read`` : db.read`and created_at <= ${at} and (created_at < ${at} or token_hash > ${Buffer.from(until!.id, "hex")})`}
        order by created_at desc, token_hash
        limit ${limit}`;
-    const last = rows.at(-1);
-    const more = rows.length === limit;
-    return c.json({
-      items: rows.map((r) => ({
+    const { items, spent, cut } = itemsWithin(
+      rows.map((r) => ({
         // The token's hash, which names it and cannot be used as it: a bearer is
         // looked up by hashing what is presented, so knowing this buys nothing.
         id: toHex(r.token_hash),
@@ -2041,8 +2074,16 @@ export function createApp(config: Config, db: Db): Hono<Env> {
         // for a token the KEY minted itself.
         app: r.client_id === null ? null : { client_id: r.client_id, scope: r.scope?.split(" ") ?? [], resource: r.audience },
       })),
+      budgetTokens,
+    );
+    const last = rows[items.length - 1];
+    const more = cut || rows.length === limit;
+    return c.json({
+      items,
       next_before: more && last ? `${last.at}~${toHex(last.token_hash)}` : null,
       has_more: more,
+      tokens_estimated: spent,
+      ...budgetCut(cut),
     });
   });
 

@@ -19,7 +19,6 @@ import type { Db } from "../db/sql.ts";
 import { ApiError } from "../db/errors.ts";
 import { toHex } from "../domain/keys.ts";
 import {
-  byteLength,
   optionalBoolean,
   optionalTaskAfter,
   optionalTaskBody,
@@ -31,7 +30,7 @@ import {
   taskReason,
 } from "../domain/validate.ts";
 import { TASK_LIMITS, TASK_STATES } from "../surface/vocabulary.ts";
-import { boundedNumber, cursor, readDenied, tokenBudget } from "./postview.ts";
+import { boundedNumber, budgetCut, cursor, itemCost, optionalTokenBudget, readDenied } from "./postview.ts";
 import { LIMITS, spend } from "./ratelimit.ts";
 import { optionalBearer, requireBearer, type Env } from "./app.ts";
 import { headsOf, recordHeads } from "./log.ts";
@@ -88,11 +87,6 @@ function compact(task: Record<string, unknown>): Record<string, unknown> {
   return { number, title, tag, state, claimed_by, confirmations };
 }
 
-/** What one task in a list costs, in tokens: three bytes to a token, as a post's does. */
-function cost(task: Record<string, unknown>): number {
-  return Math.ceil(byteLength(JSON.stringify(task)) / 3);
-}
-
 /** A function's answer, as the route sends it: the task as every read shows it. */
 type Answer = { space: string; task: Record<string, unknown> | null; [key: string]: unknown };
 
@@ -135,7 +129,7 @@ export function mountTasks(app: Hono<Env>, db: Db): void {
       throw new ApiError("INVALID_REQUEST", { detail: "detail is compact or full" });
     }
     // A budget only when one is sent: a list read without one stays whole, as it always was.
-    const budgetTokens = c.req.query("token_budget") === undefined ? null : tokenBudget(c.req.query("token_budget"));
+    const budgetTokens = optionalTokenBudget(c.req.query("token_budget"));
 
     const found = await db.readTx(me, async (sql) => {
       const [space] = await sql<
@@ -174,7 +168,7 @@ export function mountTasks(app: Hono<Env>, db: Db): void {
     let spent = 0;
     for (const row of found.rows) {
       const item = detail === "compact" ? compact(shown(row.item)) : shown(row.item);
-      const price = cost(item);
+      const price = itemCost(item);
       if (budgetTokens !== null && items.length > 0 && spent + price > budgetTokens) break;
       items.push(item);
       spent += price;
@@ -191,6 +185,7 @@ export function mountTasks(app: Hono<Env>, db: Db): void {
       next_before: full ? String(items.at(-1)!.number) : null,
       has_more: full,
       tokens_estimated: spent,
+      ...budgetCut(items.length < found.rows.length),
       notice: NOTICE,
     });
   });

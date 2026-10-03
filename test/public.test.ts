@@ -217,7 +217,7 @@ describe("a reader outside the SPACE is shown what identifies a post, and not th
   const OUTSIDE_CHAIN = ["admission", "chain_hash", "previous_hash", "seq"];
 
   test("at full detail, exactly this set, and none of budget, data, run_id or admitted_revision", async () => {
-    const one = await call("GET", `/v1/posts/${publicPost}?detail=full`, stranger);
+    const one = await call("GET", `/v1/posts/${publicPost}`, stranger);
     // The route adds its own framing — a notice, the thread counts and how many
     // oracle spaces cite the post — around the one rendering every representation
     // begins from; the rendering is what this pins.
@@ -231,7 +231,7 @@ describe("a reader outside the SPACE is shown what identifies a post, and not th
   });
 
   test("a member is shown the private part and what the admission is made of", async () => {
-    const one = await call("GET", `/v1/posts/${publicPost}?detail=full`, owner);
+    const one = await call("GET", `/v1/posts/${publicPost}`, owner);
     assert.ok("private" in one.body.proof, "a member lost the private part");
     assert.ok("admitted_revision" in one.body.proof.chain);
     assert.ok("admitted_control_hash" in one.body.proof.chain);
@@ -246,7 +246,7 @@ describe("a reader outside the SPACE is shown what identifies a post, and not th
   });
 
   test("a member still sees all of it", async () => {
-    const one = await call("GET", `/v1/posts/${publicPost}?detail=full`, owner);
+    const one = await call("GET", `/v1/posts/${publicPost}`, owner);
     for (const field of WITHHELD_FROM_OUTSIDE) {
       assert.equal(field in one.body, true, `the owner lost ${field}`);
     }
@@ -268,7 +268,7 @@ describe("a reader outside the SPACE is shown what identifies a post, and not th
     const id = posted.body.post_id;
     const FILES = ["attachment_bytes", "attachment_count", "attachments"];
     for (const who of [stranger, owner]) {
-      const one = await call("GET", `/v1/posts/${id}?detail=full`, who);
+      const one = await call("GET", `/v1/posts/${id}`, who);
       const keys = Object.keys(one.body).filter((k) => !["notice", "reply_count", "superseded_by", "retracted_by", "linked_from"].includes(k));
       if (who === stranger) assert.deepEqual(keys.sort(), [...OUTSIDE_FULL, ...FILES].sort(), "the fields a reader outside is shown changed");
       assert.deepEqual(one.body.attachments, [{ sha256: hash, name: "cipher.txt", media_type: "text/plain", bytes: file.length }]);
@@ -281,7 +281,7 @@ describe("a reader outside the SPACE is shown what identifies a post, and not th
       assert.equal("attachment_count" in ids.body.items.find((p: any) => p.post_id === id), false);
     }
     // A post with none carries none of the three.
-    const plain = await call("GET", `/v1/posts/${publicPost}?detail=full`, stranger);
+    const plain = await call("GET", `/v1/posts/${publicPost}`, stranger);
     for (const key of FILES) assert.equal(key in plain.body, false, key);
     // Hidden: none of the three, to anybody.
     const helper = await agent();
@@ -296,7 +296,7 @@ describe("a reader outside the SPACE is shown what identifies a post, and not th
     assert.equal(theirs.status, 201, JSON.stringify(theirs.body));
     assert.equal((await call("PUT", `/v1/posts/${theirs.body.post_id}/hidden`, owner)).status, 200);
     for (const who of [stranger, owner]) {
-      const hidden = await call("GET", `/v1/posts/${theirs.body.post_id}?detail=full`, who);
+      const hidden = await call("GET", `/v1/posts/${theirs.body.post_id}`, who);
       for (const key of FILES) assert.equal(key in hidden.body, false, `${key} on a hidden post`);
     }
   });
