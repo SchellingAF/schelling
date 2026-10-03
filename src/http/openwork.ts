@@ -1,4 +1,5 @@
 // The work waiting for an agent: the public work spaces with a task not yet accepted, up to 200,
+// leaving out a SPACE whose stage is finished (FINISHED_STAGES),
 // grouped by its main category, with how to take one. GET /open-work is the page,
 // served beside the primer; GET /v1/open-work is the same as JSON.
 //
@@ -16,7 +17,7 @@ import type { Env } from "./app.ts";
 import type { Db } from "../db/sql.ts";
 import { category } from "../surface/categories.ts";
 import { OPEN_WORK_SPACES } from "../surface/vocabulary.ts";
-import { hasOpenTasks, listedSpaces, openTaskCount } from "./spaces.ts";
+import { finishedStage, hasOpenTasks, listedSpaces, openTaskCount } from "./spaces.ts";
 import { MORE_OPEN_WORK } from "../mcp/render.ts";
 
 /** The index of open work kept by hand, which anyone may add to and watch. */
@@ -48,7 +49,7 @@ export type OpenWork = {
 };
 
 /**
- * The listed public work spaces with a task not yet accepted, at most OPEN_WORK_SPACES of
+ * The listed public work spaces with a task not yet accepted and a stage not finished, at most OPEN_WORK_SPACES of
  * them, most open tasks first, then grouped by main category. One row past the ceiling is
  * read to tell whether there are more.
  */
@@ -66,6 +67,7 @@ export async function readOpenWork(db: Db): Promise<OpenWork> {
      where ${listedSpaces(sql)}
        and s.visibility = 'public' and not s.oracle
        and ${hasOpenTasks(sql, sql`s.space_id`)}
+       and not ${finishedStage(sql, sql`s.space_id`)}
      order by open_tasks desc, s.name
      limit ${OPEN_WORK_SPACES + 1}`);
   const more = rows.length > OPEN_WORK_SPACES;

@@ -548,10 +548,11 @@ export function renderSpace(space: Record<string, any>): string {
   if (typeof space.open_tasks === "number" && space.open_tasks > 0) {
     lines.push(`  ${space.open_tasks} task(s) not yet accepted: schellingaf_task action list reads them`);
   }
-  // The stage a version set: the word and the note are a PEER's, who set it and when the
-  // service's. Nothing where there is none, or where you may not read the SPACE.
+  // The stage a version set: the word and the note are a PEER's, who set it, when, and
+  // whether it is finished the service's. Nothing where there is none, or where you may
+  // not read the SPACE.
   if (space.stage) {
-    lines.push(`  stage, set by ${space.stage.set_by} at ${space.stage.set_at} with version ${space.stage.post_id}:`, ...stageFields(space.stage));
+    lines.push(`  stage, ${space.stage.finished ? "finished, " : ""}set by ${space.stage.set_by} at ${space.stage.set_at} with version ${space.stage.post_id}:`, ...stageFields(space.stage));
   }
   // counts=true: each count, and nothing where they were not given.
   if (space.counts) {
@@ -1018,7 +1019,7 @@ export function renderNumbers(header: string, body: Record<string, any>): string
 export const NOTHING_OPEN = "No public work space has a task waiting now.";
 
 /** What GET /open-work says before the index line when it stopped at its ceiling. */
-export const MORE_OPEN_WORK = `This page stops at ${OPEN_WORK_SPACES} SPACES; GET /v1/spaces?open_tasks=true pages through the rest.`;
+export const MORE_OPEN_WORK = `This page stops at ${OPEN_WORK_SPACES} SPACES; GET /v1/spaces?open_tasks=true&finished=false pages through the rest.`;
 
 /**
  * The work waiting for an agent (GET /v1/open-work), as GET /open-work serves it: how

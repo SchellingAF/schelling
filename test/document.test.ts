@@ -761,7 +761,7 @@ describe("a SPACE's stage, set by a version", () => {
     assert.equal(first.body.stage_set, undefined, "a version is not a go");
     const set = await stageOf(name);
     assert.deepEqual({ ...set, set_at: undefined }, {
-      word: "proposed", note: "First draft.", post_id: first.body.post_id, set_by: owner.peerId, set_at: undefined,
+      word: "proposed", note: "First draft.", post_id: first.body.post_id, set_by: owner.peerId, set_at: undefined, finished: false,
     });
     assert.ok(!Number.isNaN(Date.parse(set.set_at)));
 
@@ -771,7 +771,7 @@ describe("a SPACE's stage, set by a version", () => {
 
     const go = await post(coordinator, name, { kind: "go", body: "Sourced.", reply_to: proposal.body.post_id });
     assert.equal(go.status, 201, JSON.stringify(go.body));
-    assert.deepEqual(go.body.stage_set, { word: "accepted", note: null });
+    assert.deepEqual(go.body.stage_set, { word: "accepted", note: null, finished: false });
     const now = await stageOf(name);
     assert.equal(now.word, "accepted");
     assert.equal(now.post_id, proposal.body.post_id, "post_id leads to the proposer's version");
@@ -807,7 +807,7 @@ describe("a SPACE's stage, set by a version", () => {
     // is set, and the go hears that its own set nothing.
     const proposal = await staged(writer, name, "v3", { word: "accepted" }, second.body.post_id);
     const go = await post(owner, name, { kind: "go", body: "Yes.", reply_to: proposal.body.post_id, data: { stage: { word: "declined" } } });
-    assert.deepEqual(go.body.stage_set, { word: "accepted", note: null });
+    assert.deepEqual(go.body.stage_set, { word: "accepted", note: null, finished: false });
     assert.equal(go.body.hint, STAGE_HINT);
     assert.equal((await stageOf(name, owner)).word, "accepted");
 
@@ -890,7 +890,7 @@ describe("a SPACE's stage, set by a version", () => {
     assert.match(history.text, /sets stage once it is current:\n<<<peer stage word>>>\nmerged\n<<<end stage word>>>\n<<<peer stage note>>>\nPull request 12 merged\.\n<<<end stage note>>>/);
     const approved = await tool({ action: "approve", space: name, proposal: proposal.body.post_id, reason: "Checked." });
     assert.match(approved.text, /this made the SPACE's stage:\n<<<peer stage word>>>\nmerged\n<<<end stage word>>>/);
-    assert.deepEqual(approved.data.stage_set, { word: "merged", note: "Pull request 12 merged." });
+    assert.deepEqual(approved.data.stage_set, { word: "merged", note: "Pull request 12 merged.", finished: true });
     assert.equal((await stageOf(name, owner)).set_by, owner.peerId);
   });
 
@@ -905,7 +905,7 @@ describe("a SPACE's stage, set by a version", () => {
     const versions = await call("GET", `/v1/spaces/${name}/versions`, owner.token);
     assert.deepEqual(versions.body.items.find((v: { post_id: string }) => v.post_id === proposal.body.post_id).stage, { word: "merged", note: null });
     const go = await call("POST", `/v1/spaces/${name}/posts`, owner.token, { kind: "go", body: "Yes.", reply_to: proposal.body.post_id });
-    assert.deepEqual(go.body.stage_set, { word: "merged", note: null });
+    assert.deepEqual(go.body.stage_set, { word: "merged", note: null, finished: true });
     const now = await stageOf(name);
     assert.equal(now.set_by, owner.peerId, "set in the decider's name, which the decider saw first");
     assert.equal(now.post_id, proposal.body.post_id);

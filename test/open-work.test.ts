@@ -257,6 +257,61 @@ describe("the page of open work", () => {
   });
 });
 
+describe("a finished SPACE is not open work", () => {
+  // Made here, after the tests above have counted this file's SPACES: a merged proposal
+  // with two tasks not yet accepted, and one whose stage is not finished, with one.
+  const merged = `${P}-h-merged`;
+  const accepted = `${P}-i-accepted`;
+  before(async () => {
+    for (const [name, word] of [[merged, "merged"], [accepted, "accepted"]] as const) {
+      await made(name, { visibility: "public", categories: ["coding-agents"], document: true });
+      const version = await call("POST", `/v1/spaces/${name}/posts`, owner, { kind: "version", body: "v1", data: { stage: { word } } });
+      assert.equal(version.status, 201, JSON.stringify(version.body));
+    }
+    await addTask(merged, "Built, not yet checked");
+    assert.equal((await finishNext(merged)).state, "done");
+    await addTask(merged, "Never taken");
+    await addTask(accepted, "To build");
+  });
+
+  test("GET /v1/open-work and its page leave out a SPACE whose stage is finished, though its tasks are not yet accepted", async () => {
+    const out = await call("GET", "/v1/open-work");
+    assert.equal(out.status, 200, JSON.stringify(out.body));
+    const listed = out.body.categories.flatMap((g: any) => g.spaces).map((s: any) => s.name);
+    assert.ok(!listed.includes(merged), "a merged SPACE was listed as open work");
+    assert.ok(listed.includes(accepted), "a SPACE at a stage that is not finished was left out");
+    const page = await (await send(app, "GET", "/open-work")).text();
+    assert.ok(!page.includes(merged), page);
+    assert.ok(page.includes(accepted), page);
+    // What open_tasks counts is unchanged: the list says so, and finished=false is the list
+    // the page names.
+    const all = await call("GET", `/v1/spaces?open_tasks=true&q=${P}&limit=200`);
+    assert.equal(all.body.items.find((i: any) => i.name === merged).open_tasks, 2);
+    const active = await call("GET", `/v1/spaces?open_tasks=true&finished=false&q=${P}&limit=200`);
+    assert.deepEqual(active.body.items.map((i: any) => i.name), [S.coding, S.maths, S.empty, S.open, accepted]);
+    const done = await call("GET", `/v1/spaces?open_tasks=true&finished=true&q=${P}&limit=200`);
+    assert.deepEqual(done.body.items.map((i: any) => i.name), [merged]);
+  });
+
+  test("schellingaf_spaces list takes finished, forwards it, and says a stage is finished", async () => {
+    const call = async (args: Record<string, unknown>) => (await connector("tools/call", { name: "schellingaf_spaces", arguments: args })).message.result;
+    const kept = await call({ action: "list", q: P, open_tasks: true, finished: true });
+    assert.notEqual(kept.isError, true, JSON.stringify(kept));
+    assert.deepEqual(kept.structuredContent.items.map((i: any) => i.name), [merged]);
+    assert.match(kept.content[0].text, /stage, finished, set by [0-9a-f]{64} at /);
+    const left = await call({ action: "list", q: P, open_tasks: true, finished: false });
+    assert.deepEqual(left.structuredContent.items.map((i: any) => i.name), [S.coding, S.maths, S.empty, S.open, accepted]);
+    assert.match(left.content[0].text, /stage, set by [0-9a-f]{64} at /);
+    // Not a boolean: refused naming the field. Another action does not take it.
+    const bad = await call({ action: "list", finished: "false" });
+    assert.equal(bad.isError, true);
+    assert.match(bad.content[0].text, /^INVALID_REQUEST.*finished/);
+    const get = await call({ action: "get", name: merged, finished: true });
+    assert.equal(get.isError, true);
+    assert.match(get.content[0].text, /^INVALID_REQUEST.*finished/);
+  });
+});
+
 describe("the page is a read like any other", () => {
   test("GET /open-work spends the anonymous read allowance of the address that asks", async () => {
     resetReadWindows();
@@ -326,18 +381,19 @@ describe("past its ceiling", () => {
 
     const page = await (await send(app, "GET", "/open-work")).text();
     assert.ok(page.trimEnd().endsWith(`${MORE_OPEN_WORK}\n\n${INDEX_LINE}`), page.slice(-500));
-    assert.equal(MORE_OPEN_WORK, "This page stops at 200 SPACES; GET /v1/spaces?open_tasks=true pages through the rest.");
+    assert.equal(MORE_OPEN_WORK, "This page stops at 200 SPACES; GET /v1/spaces?open_tasks=true&finished=false pages through the rest.");
 
     // The list it names pages through every one, the SPACES past the ceiling included.
     const all: string[] = [];
     let after: string | null = null;
     do {
-      const res: any = await call("GET", `/v1/spaces?open_tasks=true&limit=200${after ? `&after=${after}` : ""}`);
+      const res: any = await call("GET", `/v1/spaces?open_tasks=true&finished=false&limit=200${after ? `&after=${after}` : ""}`);
       assert.equal(res.status, 200, JSON.stringify(res.body));
       all.push(...res.body.items.map((i: any) => i.name));
       after = res.body.next_after;
     } while (after);
     for (const name of [S.coding, S.maths, S.open, S.empty]) assert.ok(all.includes(name), name);
+    assert.ok(!all.includes(`${P}-h-merged`), "a finished SPACE is past no ceiling: it is not open work");
     assert.equal(all.filter((n) => n.startsWith("owcap-")).length, seeded);
   });
 });

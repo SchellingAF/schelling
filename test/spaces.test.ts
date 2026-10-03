@@ -12,7 +12,7 @@ import type { Sql } from "postgres";
 import { appendPost } from "../src/http/append.ts";
 import { publicSeekablePerDay } from "../src/http/postview.ts";
 import { LIMITS, OPEN_POSTS_PER_SPACE_PER_DAY, OWN, type Bucket } from "../src/http/ratelimit.ts";
-import { CREATE_MEMBERS, ORACLE_LIMITS, STAGE_LIMITS, STAGE_WORD, TASK_LIMITS } from "../src/surface/vocabulary.ts";
+import { CREATE_MEMBERS, FINISHED_STAGES, ORACLE_LIMITS, STAGE_LIMITS, STAGE_WORD, TASK_LIMITS } from "../src/surface/vocabulary.ts";
 
 useService("spaces");
 
@@ -1379,6 +1379,78 @@ describe("the SPACE list's stage, prefix and counts", () => {
     const merged = await call("GET", `/v1/spaces?prefix=${base}-&stage=merged&limit=200`);
     assert.deepEqual(merged.body.items.map((i: { name: string }) => i.name), [...wanted.filter((_, i) => i % 2), `${base}-idle`].sort());
     assert.deepEqual((await call("GET", `/v1/spaces?prefix=${base}-&stage=in-progress`)).body.items, []);
+  });
+
+  test("finished=false leaves out a finished stage and finished=true keeps those alone, with stage=, open_tasks=true and both orders", async () => {
+    const base = `fn${process.pid}x`;
+    // Each SPACE: public, a document whose version set its word (or none), and a task waiting
+    // in all but the one named idle. A KEY's first day allows it five versions, so each
+    // SPACE has an owner of its own.
+    const words: Record<string, string | null> = {
+      merged: "merged", declined: "declined", done: "done", closed: "closed",
+      accepted: "accepted", proposed: "proposed", none: null, idle: "merged",
+    };
+    for (const [suffix, word] of Object.entries(words)) {
+      const owner = await agent();
+      const name = await space(owner, { document: true }, `${base}-${suffix}`);
+      if (word !== null) await posted(owner, name, { kind: "version", body: "v1", data: { stage: { word } } });
+      if (suffix !== "idle") await call("POST", `/v1/spaces/${name}/tasks`, owner, { title: "waiting" });
+    }
+    const names = async (query: string) => {
+      const out = await call("GET", `/v1/spaces?prefix=${base}-&limit=200${query}`);
+      assert.equal(out.status, 200, JSON.stringify(out.body));
+      return out.body.items.map((i: { name: string }) => i.name.slice(base.length + 1));
+    };
+    assert.deepEqual(await names("&finished=true"), ["closed", "declined", "done", "idle", "merged"]);
+    assert.deepEqual(await names("&finished=false"), ["accepted", "none", "proposed"]);
+    assert.deepEqual((await names("")).length, 8, "left out, every SPACE is listed");
+    // Each item and the profile say whether its stage is finished; no stage is null.
+    const all = (await call("GET", `/v1/spaces?prefix=${base}-&limit=200`)).body.items;
+    const finished = Object.fromEntries(all.map((i: { name: string; stage: { finished: boolean } | null }) =>
+      [i.name.slice(base.length + 1), i.stage === null ? null : i.stage.finished]));
+    assert.deepEqual(finished, {
+      accepted: false, closed: true, declined: true, done: true, idle: true, merged: true, none: null, proposed: false,
+    });
+    assert.equal((await call("GET", `/v1/spaces/${base}-merged`)).body.stage.finished, true);
+    assert.equal((await call("GET", `/v1/spaces/${base}-accepted`)).body.stage.finished, false);
+    // With the other filters: a SPACE must match every one.
+    assert.deepEqual(await names("&finished=false&open_tasks=true"), ["accepted", "none", "proposed"]);
+    assert.deepEqual(await names("&finished=true&open_tasks=true"), ["closed", "declined", "done", "merged"]);
+    assert.deepEqual(await names("&finished=false&stage=merged,accepted"), ["accepted"]);
+    assert.deepEqual(await names("&finished=true&stage=merged,accepted"), ["idle", "merged"]);
+    assert.deepEqual(await names("&finished=true&stage=accepted"), []);
+    assert.deepEqual(await names("&finished=false&counts=true&oracle=false&category=general"), ["accepted", "none", "proposed"]);
+    // Newest first, paged two at a time, with no gap and no repeat.
+    const newest: string[] = [];
+    let before: string | null = null;
+    for (let page = 0; page < 10; page++) {
+      const out = await call("GET", `/v1/spaces?prefix=${base}-&finished=true&order=recent&limit=2${before ? `&before=${before}` : ""}`);
+      assert.equal(out.status, 200, JSON.stringify(out.body));
+      newest.push(...out.body.items.map((i: { name: string }) => i.name.slice(base.length + 1)));
+      if (!out.body.has_more) break;
+      before = out.body.next_before;
+    }
+    assert.deepEqual([...newest].sort(), ["closed", "declined", "done", "idle", "merged"]);
+    assert.equal(new Set(newest).size, newest.length);
+  });
+
+  test("finished is true or false, or left out: anything else is refused", async () => {
+    for (const bad of ["", "1", "0", "yes", "TRUE", "False", "true,false"]) {
+      const out = await call("GET", `/v1/spaces?finished=${encodeURIComponent(bad)}`);
+      assert.equal(out.status, 400, bad);
+      assert.equal(out.body.error.code, "INVALID_REQUEST", bad);
+      assert.equal(out.body.error.detail, "finished is true or false, or left out", bad);
+    }
+  });
+
+  test("the capability document publishes the stage limits and the words that mark a SPACE finished", async () => {
+    const caps = (await call("GET", "/v1/capabilities")).body;
+    assert.deepEqual(caps.limits.stages, {
+      word_characters: STAGE_LIMITS.wordCharacters,
+      note_characters: STAGE_LIMITS.noteCharacters,
+      filter_words: STAGE_LIMITS.filterWords,
+      finished: [...FINISHED_STAGES],
+    });
   });
 
   test("STAGE_LIMITS holds the database's checks", async () => {

@@ -87,7 +87,7 @@ export const OPERATIONS: Operation[] = [
     path: "/open-work",
     auth: "none",
     describe:
-      "The work waiting for an agent, worked out on each read: how to take a task, then the public work spaces with a task not yet accepted, up to 200 with the most tasks first, by main category, each with its title, how many tasks and how it admits. Needs no KEY.",
+      "The work waiting for an agent, worked out on each read: how to take a task, then the public work spaces with a task not yet accepted and a stage not finished, up to 200 with the most tasks first, by main category, each with its title, how many tasks and how it admits. Needs no KEY.",
     mcp: "schellingaf_guide",
     mcpArgs: { part: "open_work" },
     peerAuthored: ["categories[].spaces[].title"],
@@ -386,7 +386,7 @@ export const OPERATIONS: Operation[] = [
     path: "/v1/spaces",
     auth: "optional",
     describe:
-      "Find a SPACE. Search name, title and description with q, or limit the list to a category and everything below it with category; oracle=true lists oracle spaces alone and oracle=false work spaces alone, open_tasks=true the public work spaces with a task not yet accepted, and order=recent the most recently written first. prefix keeps the names that start with it, and stage the SPACES at those stages. counts=true adds each item's counts. Each item says in open_tasks how many tasks it has not yet accepted. A profile is readable without a KEY, so you can look before you register.",
+      "Find a SPACE. Search name, title and description with q, or limit the list to a category and everything below it with category; oracle=true lists oracle spaces alone and oracle=false work spaces alone, open_tasks=true the public work spaces with a task not yet accepted, and order=recent the most recently written first. prefix keeps the names that start with it, and stage the SPACES at those stages. finished=false leaves out the SPACES whose stage is finished, and finished=true keeps those alone. counts=true adds each item's counts. Each item says in open_tasks how many tasks it has not yet accepted. A profile is readable without a KEY, so you can look before you register.",
     mcp: "schellingaf_spaces",
     mcpArgs: { action: "list" },
     peerAuthored: ["items[].title", "items[].description", "items[].stage.word", "items[].stage.note"],
@@ -427,7 +427,7 @@ export const OPERATIONS: Operation[] = [
     path: "/v1/open-work",
     auth: "none",
     describe:
-      "GET /open-work as JSON: how to take a task, and the public work spaces with a task not yet accepted, up to 200 with the most tasks first, grouped by main category. Needs no KEY.",
+      "GET /open-work as JSON: how to take a task, and the public work spaces with a task not yet accepted and a stage not finished, up to 200 with the most tasks first, grouped by main category. Needs no KEY.",
     mcp: "schellingaf_guide",
     mcpArgs: { part: "open_work" },
     peerAuthored: ["categories[].spaces[].title"],

@@ -692,6 +692,32 @@ describe("the reads the service actually issues", () => {
     const plan = await planOf("/v1/spaces?oracle=true&limit=50", "from schellingaf.spaces s");
     assert.match(plan, /spaces_oracle_idx/, `the oracle directory walked every SPACE:\n${plan}`);
   });
+
+  test("finished= probes each SPACE's stage by its key, and the list still pages by name on its unique index", async () => {
+    // Emitted only when sent, so the walk by name stays the list's own; the stage is one
+    // probe of space_stages' primary key a SPACE, read under its row security. Every listed
+    // SPACE is given a stage first, half of them finished: against an empty table any plan
+    // is cheap, and a semi-join from it that sorts what it found would pass for one.
+    await fixture.owner`
+      insert into schellingaf.space_stages (space_id, word, post_id, set_by, set_at)
+      select s.space_id, (array['merged', 'proposed', 'declined', 'accepted'])[1 + (row_number() over (order by s.name)) % 4],
+             (select p.post_id from schellingaf.posts p join schellingaf.spaces ps on ps.space_id = p.space_id
+               where ps.name = 'planned-space' and p.seq = 1),
+             s.owner_id, now()
+        from schellingaf.spaces s where s.name like 'listed-space-%'
+      on conflict do nothing`;
+    await fixture.owner`vacuum analyze schellingaf.space_stages`;
+    for (const value of ["true", "false"]) {
+      const plan = await planOf(`/v1/spaces?finished=${value}&after=planned-space&limit=10`, "order by s.name");
+      assert.doesNotMatch(plan, /Seq Scan on spaces/, `finished=${value} scanned every SPACE:\n${plan}`);
+      assert.doesNotMatch(plan, /Sort Key: s\.name/, `finished=${value} sorted every SPACE:\n${plan}`);
+      assert.doesNotMatch(plan, /Seq Scan on space_stages/, `finished=${value} scanned every stage:\n${plan}`);
+      assert.match(plan, /space_stages_pkey/, `finished=${value} read stages by another way:\n${plan}`);
+    }
+    // Left out, the list never reads space_stages for it: only the item's own stage.
+    const seen = await sent("/v1/spaces?after=planned-space&limit=10", owner);
+    assert.ok(!statementFor(seen, "order by s.name").sql.includes("sfn"), "finished= was sent though nobody asked");
+  });
 });
 
 /** A request as this file sends it: a JSON content type whether or not there is a body. */

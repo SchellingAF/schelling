@@ -37,7 +37,7 @@ import { charge, emptyOf, LIMITS, openPostsPerDay, OWN, SHARED, spend } from "./
 import { connectorSignedWith, floorPlace, optionalBearer, requireBearer, type Env } from "./app.ts";
 import { receipt } from "./spaces.ts";
 import { firstDay } from "./auth.ts";
-import { ATTACHMENT_LIMITS } from "../surface/vocabulary.ts";
+import { ATTACHMENT_LIMITS, isFinishedStage } from "../surface/vocabulary.ts";
 import { headsOf, recordHeads, recordReturned } from "./log.ts";
 import { appendPost as append } from "./append.ts";
 import { readWaiting, spaceStream, waitSeconds } from "./wait.ts";
@@ -630,6 +630,9 @@ export function mountPosts(app: Hono<Env>, config: Config, db: Db, service: Serv
     // delivered is logged, never returned: who else received a copy is not the
     // author's business, and mailbox positions are private counters.
     const { delivered, ...rest } = receipt as Record<string, unknown> & { delivered?: unknown };
+    // The stage a go set carries finished, as every stage of a SPACE does, from its word.
+    const stageSet = rest.stage_set as { word: string; note: string | null } | undefined;
+    if (stageSet) rest.stage_set = { ...stageSet, finished: isFinishedStage(stageSet.word) };
     // The service's signed receipt, for a replay too: it describes the post the key
     // already made, which is exactly what a retry is asking about.
     // Slim unless asked: the answer's own space_id, seq, post_id, object_id, chain_hash

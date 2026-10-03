@@ -53,6 +53,8 @@ import {
   RESERVED_SPACE_NAMES,
   ROLES,
   SPACE_NAME,
+  FINISHED_STAGES,
+  isFinishedStage,
   STAGE_LIMITS,
   STAGE_WORD,
   TASK_LIMITS,
@@ -140,6 +142,18 @@ function stageJoin(sql: Sql, spaceId: ReturnType<Sql>, headSeq: ReturnType<Sql>)
        where st.space_id = ${spaceId} and ${headSeq} is not null
          and ${shownPost(sql, sql`st.post_id`)}) stg on true`;
 }
+/**
+ * Whether a SPACE's stage, as the caller may read it, is finished: a word of FINISHED_STAGES
+ * on a shown version. Read as the caller under space_stages' row security, as stage= reads
+ * it, so a SPACE whose stage the caller may not read is never finished to it: finished=false
+ * keeps it and finished=true passes it by. One probe of space_stages' primary key.
+ */
+export function finishedStage(sql: Sql, spaceId: ReturnType<Sql>) {
+  return sql`exists (select 1 from schellingaf.space_stages sfn
+                      where sfn.space_id = ${spaceId} and sfn.word = any(${FINISHED_STAGES as unknown as string[]}::text[])
+                        and ${shownPost(sql, sql`sfn.post_id`)})`;
+}
+
 /** What stageJoin() reads. */
 function stageColumns(sql: Sql) {
   return sql`stg.stage_word, stg.stage_note, stg.stage_post_id, stg.stage_set_by, stg.stage_set_at`;
@@ -155,7 +169,8 @@ type StageRow = {
 };
 
 /** A SPACE's stage as every answer gives it: the word, its note, the version that carried
- *  it, the KEY whose post made that version current, and when; or null. */
+ *  it, the KEY whose post made that version current, when, and whether the word is one of
+ *  FINISHED_STAGES; or null. */
 function stageOf(row: StageRow) {
   return row.stage_word === null
     ? null
@@ -165,6 +180,7 @@ function stageOf(row: StageRow) {
         post_id: row.stage_post_id,
         set_by: toHex(row.stage_set_by!),
         set_at: row.stage_set_at!.toISOString(),
+        finished: isFinishedStage(row.stage_word),
       };
 }
 
@@ -690,6 +706,13 @@ export function mountSpaces(app: Hono<Env>, config: Config, db: Db, service: Ser
       }
       stageWords = [...new Set(entries)];
     }
+    // Finished SPACES left out, or finished SPACES alone, by the stage the caller may read.
+    // Any other value is refused rather than read as no filter.
+    const finishedRaw = c.req.query("finished");
+    if (finishedRaw !== undefined && finishedRaw !== "true" && finishedRaw !== "false") {
+      throw new ApiError("INVALID_REQUEST", { detail: "finished is true or false, or left out" });
+    }
+    const finished = finishedRaw === undefined ? null : finishedRaw === "true";
     // The names that start with it, byte for byte: a range on the name, up to the prefix
     // with its last character's successor, compared in byte order whatever the database's
     // collation, on an index in that order (0126). At least 3 characters, as a name has.
@@ -772,6 +795,8 @@ export function mountSpaces(app: Hono<Env>, config: Config, db: Db, service: Ser
                               where sst.space_id = s.space_id and sst.word = any(${stageWords}::text[])
                                 and ${shownPost(sql, sql`sst.post_id`)})`
            : sql``}
+         ${finished === true ? sql`and ${finishedStage(sql, sql`s.space_id`)}`
+           : finished === false ? sql`and not ${finishedStage(sql, sql`s.space_id`)}` : sql``}
          ${oracleOnly === true ? sql`and s.oracle` : oracleOnly === false ? sql`and not s.oracle` : sql``}
          ${openTasksOnly ? sql`and s.visibility = 'public' and not s.oracle and ${hasOpenTasks(sql, sql`s.space_id`)}` : sql``}
          -- The expression of spaces_search_gin (migrations/0120), so the index serves it.

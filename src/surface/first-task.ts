@@ -15,9 +15,9 @@
 
 export const FIRST_TASK_TOKENS = {
   /** The plugin in Claude Code, at /mcp: the session-start hook's lines, the skill, the discovery answer and tool list, one tool call a step, and the stop hook's line. */
-  plugin: 21_378,
+  plugin: 21_420,
   /** A client that connects by address, at /mcp/connect with an app's token: the discovery answer and tool list, then one tool call a step. */
-  connector: 17_865,
+  connector: 17_906,
   /** Calls over HTTP: the primer, then each answer. */
   http: 6_382,
   /** A start over HTTP, with a KEY and its token held already: the start section, then
@@ -29,8 +29,8 @@ export const FIRST_TASK_TOKENS = {
   /** A toolset at /mcp?tools=<set> with a KEY's token: the discovery answer and the set's
    * tool list, then the matching start's steps through the set's tools. */
   toolset_tasks: 12_793,
-  toolset_research: 14_001,
-  toolset_coordinate: 16_603,
+  toolset_research: 14_042,
+  toolset_coordinate: 16_645,
 } as const;
 
 /**
@@ -41,11 +41,11 @@ export const FIRST_TASK_TOKENS = {
  * in the commit that changes the words.
  */
 export const TOOL_LIST_TOKENS = {
-  mcp: 12_067,
-  connect: 12_468,
+  mcp: 12_108,
+  connect: 12_509,
   tasks: 7_618,
-  research: 7_889,
-  coordinate: 10_784,
+  research: 7_931,
+  coordinate: 10_825,
 } as const;
 
 /**
@@ -79,4 +79,4 @@ export const PROPOSAL_ROUTINE = {
  * so any growth of a list item, of the counts or of the section read fails it. It moves
  * only on purpose, with the owner's approval, in the commit that changes what the answers carry.
  */
-export const SURVEY_BUDGET = { spaces: 20, calls: 2, bytes: 29_956 } as const;
+export const SURVEY_BUDGET = { spaces: 20, calls: 2, bytes: 30_291 } as const;

@@ -154,6 +154,8 @@ import {
   FINDING_DATA_KEYS,
   FINDING_LIMITS,
   FINDING_STATUSES,
+  FINISHED_STAGES,
+  STAGE_LIMITS,
   ATTACHMENT_LIMITS,
 } from "../surface/vocabulary.ts";
 import { mountSpaces, namedCode, receipt, startFor } from "./spaces.ts";
@@ -1285,6 +1287,14 @@ export function createApp(config: Config, db: Db): Hono<Env> {
         statuses: FINDING_STATUSES,
         confidences: FINDING_CONFIDENCES,
         data_keys: [...FINDING_DATA_KEYS, "sources"],
+      },
+      // A SPACE's stage: the word and note a version's data.stage carries, how many words
+      // the SPACE list's stage= takes, and the words that mark a SPACE finished.
+      stages: {
+        word_characters: STAGE_LIMITS.wordCharacters,
+        note_characters: STAGE_LIMITS.noteCharacters,
+        filter_words: STAGE_LIMITS.filterWords,
+        finished: FINISHED_STAGES,
       },
       // The files a POST carries: their sizes, how long uploaded bytes wait to be
       // attached, the daily bytes per KEY and a SPACE's attached bytes. bytes_per_post is

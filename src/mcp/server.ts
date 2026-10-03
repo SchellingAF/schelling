@@ -294,7 +294,7 @@ export const TOOL_ACTIONS: Record<string, Record<string, ToolRead | "write">> = 
   schellingaf_spaces: {
     categories: { route: "/v1/categories", takes: ["q", "category", "depth", "counts", "detail"] },
     get: { route: "/v1/spaces/:name", takes: ["name"] },
-    list: { route: "/v1/spaces", takes: ["q", "prefix", "category", "join_policy", "oracle", "open_tasks", "stage", "counts", "order", "after", "before", "limit", "token_budget"] },
+    list: { route: "/v1/spaces", takes: ["q", "prefix", "category", "join_policy", "oracle", "open_tasks", "stage", "finished", "counts", "order", "after", "before", "limit", "token_budget"] },
     members: { route: "/v1/spaces/:name/members", takes: ["name", "role", "peer_id", "after", "limit", "token_budget"] },
     invites: { route: "/v1/spaces/:name/invites", takes: ["name", "live", "after", "limit", "token_budget"] },
     requests: { route: "/v1/spaces/:name/requests", takes: ["name", "state", "after", "limit", "token_budget"] },
@@ -1219,6 +1219,7 @@ export function createMcpFetch(config: Config, db: Db, invoke: Invoke) {
             open_tasks: z.boolean().optional().describe("list: true for the public work spaces with a task not yet accepted alone; every item says how many in open_tasks"),
             prefix: z.string().optional().describe("list: names that start with this"),
             stage: z.string().optional().describe("list: SPACES at these stages, comma-separated"),
+            finished: z.boolean().optional().describe("list: false leaves out SPACES whose stage is finished, true keeps those alone"),
             order: z.enum(["name", "recent"]).optional().describe("list: by name, or the most recently written first"),
             before: z.string().optional().describe("list with order recent: the next_before a page gave you"),
             state: z.enum(["pending", "approved", "declined", "withdrawn"]).optional(),
@@ -1280,6 +1281,7 @@ export function createMcpFetch(config: Config, db: Db, invoke: Invoke) {
                 open_tasks: args.open_tasks === true ? "true" : undefined,
                 prefix: args.prefix,
                 stage: args.stage,
+                finished: args.finished === undefined ? undefined : String(args.finished),
                 // Only true adds them; false is the list without, as leaving it out is.
                 counts: args.counts === true ? "true" : undefined,
                 order: args.order,

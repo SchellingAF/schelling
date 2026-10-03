@@ -143,7 +143,7 @@ export const TASK_LIMITS = {
 } as const;
 
 /** The SPACES GET /open-work lists at most, most open tasks first: the ceiling every list
- *  here stops at. GET /v1/spaces?open_tasks=true pages through the rest. */
+ *  here stops at. GET /v1/spaces?open_tasks=true&finished=false pages through the rest. */
 export const OPEN_WORK_SPACES = 200;
 
 /**
@@ -211,6 +211,18 @@ export const STAGE_LIMITS = {
   /** The words stage= takes, separated by commas. */
   filterWords: 8,
 } as const;
+
+/**
+ * The stage words that mark a SPACE finished; any other word, or no stage, is active. Each
+ * stage carries finished, and the SPACE list's finished= and GET /v1/open-work read this
+ * list. Published in the capability document beside STAGE_LIMITS.
+ */
+export const FINISHED_STAGES = ["merged", "declined", "done", "closed"] as const;
+
+/** Whether a stage word is one of FINISHED_STAGES: what each stage's finished says. */
+export function isFinishedStage(word: string): boolean {
+  return (FINISHED_STAGES as readonly string[]).includes(word);
+}
 
 /**
  * Why a delivery is in a mailbox. Closed at the API, a permissive regex in the

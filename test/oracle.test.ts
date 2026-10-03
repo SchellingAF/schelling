@@ -525,11 +525,11 @@ describe("an oracle space's stage", () => {
     // The owner's go sets the proposal's.
     const last = await staged(stranger, name, "v6", "declined", replay.body.oracle.version);
     const ownerGo = await call("POST", `/v1/spaces/${name}/posts`, owner.token, { kind: "go", body: "Yes.", reply_to: last.body.post_id, idempotency_key: "owner-go" }, reviewerApp);
-    assert.deepEqual(ownerGo.body.stage_set, { word: "declined", note: null });
+    assert.deepEqual(ownerGo.body.stage_set, { word: "declined", note: null, finished: true });
     assert.equal(await stageWord(name), "declined");
     const ownerReplay = await call("POST", `/v1/spaces/${name}/posts`, owner.token, { kind: "go", body: "Yes.", reply_to: last.body.post_id, idempotency_key: "owner-go" }, reviewerApp);
     assert.equal(ownerReplay.status, 200);
-    assert.deepEqual(ownerReplay.body.stage_set, { word: "declined", note: null }, "a replay says what the first answer said");
+    assert.deepEqual(ownerReplay.body.stage_set, { word: "declined", note: null, finished: true }, "a replay says what the first answer said");
   });
 
   test("a coordinator's version waits there, so its stage sets nothing until a decider makes it current", async () => {

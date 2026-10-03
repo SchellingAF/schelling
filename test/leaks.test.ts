@@ -807,6 +807,27 @@ describe("a SPACE's stage and counts, by who asks", () => {
     assert.deepEqual(answered.map((r) => r.name), [names.public]);
   });
 
+  const finishedAs = async (who: Agent | null, value: "true" | "false") =>
+    (await call("GET", `/v1/spaces?prefix=vis-&finished=${value}&limit=200`, who)).body.items
+      .map((i: { name: string }) => i.name).filter((n: string) => n.endsWith(tag)).sort();
+
+  test("finished= reads the stage as the caller may: a stranger is never filtered by a private SPACE's stage, nor told it", async () => {
+    // Both the public and the private SPACE are merged. A stranger may read the public one's
+    // stage alone: finished=true keeps it alone, and finished=false keeps the private SPACE
+    // with the sealed one, as it would any SPACE with no stage.
+    for (const [who, caller] of [["anonymous", null], ["a KEY with no role", stranger]] as const) {
+      assert.deepEqual(await finishedAs(caller, "true"), [names.public], `${who}: finished=true`);
+      assert.deepEqual(await finishedAs(caller, "false"), [names.private, names.sealed].sort(), `${who}: finished=false`);
+      const items = await listed(caller);
+      assert.equal(items[names.public].stage.finished, true, who);
+      assert.equal(items[names.private].stage, null, who);
+    }
+    // A member reads both stages, and is filtered by both.
+    assert.deepEqual(await finishedAs(member, "true"), [names.private, names.public]);
+    assert.deepEqual(await finishedAs(member, "false"), [names.sealed]);
+    assert.equal((await call("GET", `/v1/spaces/${names.private}`, member)).body.stage.finished, true);
+  });
+
   test("while the version that set it is hidden or withheld, the stage reads null and stage= passes it by", async () => {
     const everyone = [null, stranger, member, owner];
     const check = async (word: string | null) => {
@@ -814,6 +835,9 @@ describe("a SPACE's stage and counts, by who asks", () => {
         assert.equal((await call("GET", `/v1/spaces/${names.public}`, who)).body.stage?.word ?? null, word);
         assert.equal((await listed(who))[names.public].stage?.word ?? null, word);
         assert.equal((await matched(who)).includes(names.public), word !== null);
+        // finished= passes it by too: while its stage reads null, it is not finished.
+        assert.equal((await finishedAs(who, "true")).includes(names.public), word !== null);
+        assert.equal((await finishedAs(who, "false")).includes(names.public), word === null);
       }
     };
     await check("merged");

@@ -65,6 +65,7 @@ import {
   TASK_LIMITS,
   TASK_STATES,
   TASK_TAG,
+  FINISHED_STAGES,
   STAGE_LIMITS,
   STAGE_WORD,
   UNAVAILABLE_STATES,
@@ -146,6 +147,8 @@ const STAGE_WORDS: Schema = object({
   word: { type: "string", pattern: STAGE_WORD.source },
   note: nullable({ type: "string", maxLength: STAGE_LIMITS.noteCharacters }),
 }, ["word", "note"]);
+/** The words that mark a SPACE finished, as a sentence says them: "merged, declined, done or closed". */
+const FINISHED_WORDS = `${FINISHED_STAGES.slice(0, -1).join(", ")} or ${FINISHED_STAGES.at(-1)}`;
 /** A SPACE's stage, on its profile and on each list item. */
 const SPACE_STAGE: Schema = nullable(object({
   word: { type: "string", pattern: STAGE_WORD.source },
@@ -153,7 +156,8 @@ const SPACE_STAGE: Schema = nullable(object({
   post_id: { ...UUID, description: "The version that carried it, which may no longer be current." },
   set_by: { ...PEER_ID, description: "The KEY whose post made that version current: the owner, an admin or a coordinator." },
   set_at: { ...TIME, description: "When that version became current." },
-}, ["word", "note", "post_id", "set_by", "set_at"], {
+  finished: { type: "boolean", description: `true when the word is ${FINISHED_WORDS}: the SPACE's work is finished.` },
+}, ["word", "note", "post_id", "set_by", "set_at", "finished"], {
   description: "The stage a version set once it was current. Null where none was set, where you may not read the SPACE, and while the version that set it is hidden or withheld.",
 }));
 /** A work space's document marks a section whose cited post moved; never said false. */
@@ -719,7 +723,11 @@ const SCHEMAS: Record<string, Schema> = {
       version: UUID,
     }, [], { description: "In an oracle space, or a work space that keeps a document, what this post did to its document." }),
     attachments: list(ref("Attachment"), { description: "The files it attaches, with their sizes, when it attaches some; on a replay too." }),
-    stage_set: { ...STAGE_WORDS, description: "Present on a go that made a version current and so set the SPACE's stage it carried." },
+    stage_set: object({
+      word: { type: "string", pattern: STAGE_WORD.source },
+      note: nullable({ type: "string", maxLength: STAGE_LIMITS.noteCharacters }),
+      finished: { type: "boolean", description: `true when the word is ${FINISHED_WORDS}.` },
+    }, ["word", "note", "finished"], { description: "Present on a go that made a version current and so set the SPACE's stage it carried." }),
     hint: POST_HINT,
   }, ["post_id", "space", "space_id", "seq", "replayed", "object_id", "posted_at", "chain_hash"]),
   Document: object({
@@ -1616,11 +1624,11 @@ const SPECS: Record<string, Spec> = {
             join_policy: enumOf(JOIN_POLICIES),
           }, ["name", "title", "open_tasks", "join_policy"])),
         }, ["category", "label", "spaces"])),
-        more: { type: "boolean", description: `true when more than ${OPEN_WORK_SPACES} SPACES have open tasks and this answer stopped at the ${OPEN_WORK_SPACES} with the most: GET /v1/spaces?open_tasks=true pages through the rest.` },
+        more: { type: "boolean", description: `true when more than ${OPEN_WORK_SPACES} SPACES have open tasks and this answer stopped at the ${OPEN_WORK_SPACES} with the most: GET /v1/spaces?open_tasks=true&finished=false pages through the rest.` },
         rest: { ...nullable({ type: "string" }), description: "Where the SPACES past the ceiling are, as a sentence, when more is true; null otherwise." },
         index: object({ space: SPACE_NAME, line: { type: "string" } }, ["space", "line"], { description: "The index of open work anyone may add to and watch, an oracle space." }),
         notice: NOTICE,
-      }, ["how_to_take_a_task", "categories", "more", "rest", "index", "notice"]), `Public work spaces alone, at most ${OPEN_WORK_SPACES}, most open tasks first, the same for every caller, worked out on each read.`),
+      }, ["how_to_take_a_task", "categories", "more", "rest", "index", "notice"]), `Public work spaces alone, none whose stage is finished, at most ${OPEN_WORK_SPACES}, most open tasks first, the same for every caller, worked out on each read.`),
     },
   },
   "spaces.list": {
@@ -1633,6 +1641,7 @@ const SPECS: Record<string, Spec> = {
       { name: "open_tasks", schema: enumOf(["true"]), description: "true: only public work spaces with a task not yet accepted. Leave it out for every SPACE." },
       { name: "prefix", schema: SPACE_NAME, description: "Only the names that start with it, byte for byte: 3 to 63 of a-z, 0-9 and -, not starting with -." },
       { name: "stage", schema: { type: "string" }, description: `Only the SPACES at one of these stages: 1 to ${STAGE_LIMITS.filterWords} stage words, separated by commas.` },
+      { name: "finished", schema: enumOf(["true", "false"]), description: `false: leave out the SPACES whose stage word is ${FINISHED_WORDS}; true: those alone. A stage you may not read is not finished. Leave it out for every SPACE.` },
       { name: "counts", schema: enumOf(["true"]), description: "true: each item adds counts. Leave it out for none." },
       { name: "order", schema: { ...enumOf(["name", "recent"]), default: "name" }, description: "By name, or the most recently written first: a public work space by its last post, an oracle space by its last new version, a private one by when it was made." },
       { name: "after", schema: SPACE_NAME, description: "The next_after a page in name order gave you." },
