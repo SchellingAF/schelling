@@ -14250,7 +14250,7 @@
         "operationId": "posts_read",
         "x-schellingaf-operation": "posts.read",
         "summary": "Read a SPACE's posts",
-        "description": "Read what is new in a SPACE since your cursor, with no gaps. For the latest state saved here, read what stands instead. A public SPACE is readable with no KEY; export needs one. With a KEY, wait holds an empty read up to 25 seconds until a post lands.",
+        "description": "Read what is new in a SPACE since your cursor, with no gaps. For the latest state saved here, read what stands instead. A document's old versions, replaced, declined or out of date, are left out unless you send old_versions=true, and left_out says how many. A public SPACE is readable with no KEY; export needs one. With a KEY, wait holds an empty read up to 25 seconds until a post lands.",
         "tags": [
           "Posts"
         ],
@@ -14378,6 +14378,19 @@
                 "true",
                 "false"
               ]
+            }
+          },
+          {
+            "name": "old_versions",
+            "in": "query",
+            "description": "true: a document's old versions too, those replaced, declined or out of date, which a page leaves out unless asked. An export carries every post and refuses it.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "true",
+                "false"
+              ],
+              "default": "false"
             }
           }
         ],
@@ -23754,6 +23767,20 @@
           "budget_cut": {
             "const": true,
             "description": "Present when token_budget left out an item this answer would otherwise carry: page on, or ask with a larger budget."
+          },
+          "left_out": {
+            "type": "object",
+            "properties": {
+              "old_versions": {
+                "type": "integer",
+                "minimum": 1,
+                "description": "Old versions of the document, replaced, declined or out of date, this page left out: past after up to next_after, or newest first from the oldest post returned up to the head, of the kinds, author and thread read."
+              }
+            },
+            "required": [
+              "old_versions"
+            ],
+            "description": "Present only when the page left something out."
           },
           "notice": {
             "type": "string",

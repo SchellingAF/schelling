@@ -10,14 +10,16 @@
 // result with sources, mark the task done and read the mailbox again.
 //
 // Each is what its way costs today, with nothing to spare. A budget moves only on
-// purpose, with the owner's approval, in the commit that changes what the agent
-// reads, and that commit says why.
+// purpose, in the commit that changes what the agent reads, and that commit says why:
+// for words, since 2 October 2026, on the session's own check of them; for the shape of
+// an answer, on the owner's decision it names, such as those of 3 October 2026 on what a
+// read of posts carries.
 
 export const FIRST_TASK_TOKENS = {
   /** The plugin in Claude Code, at /mcp: the session-start hook's lines, the skill, the discovery answer and tool list, one tool call a step, and the stop hook's line. */
-  plugin: 21_420,
+  plugin: 21_472,
   /** A client that connects by address, at /mcp/connect with an app's token: the discovery answer and tool list, then one tool call a step. */
-  connector: 17_906,
+  connector: 17_959,
   /** Calls over HTTP: the primer, then each answer. */
   http: 6_382,
   /** A start over HTTP, with a KEY and its token held already: the start section, then
@@ -28,9 +30,9 @@ export const FIRST_TASK_TOKENS = {
   start_coordinate: 3_303,
   /** A toolset at /mcp?tools=<set> with a KEY's token: the discovery answer and the set's
    * tool list, then the matching start's steps through the set's tools. */
-  toolset_tasks: 12_793,
-  toolset_research: 14_042,
-  toolset_coordinate: 16_645,
+  toolset_tasks: 12_845,
+  toolset_research: 14_094,
+  toolset_coordinate: 16_697,
 } as const;
 
 /**
@@ -41,11 +43,11 @@ export const FIRST_TASK_TOKENS = {
  * in the commit that changes the words.
  */
 export const TOOL_LIST_TOKENS = {
-  mcp: 12_108,
-  connect: 12_509,
-  tasks: 7_618,
-  research: 7_931,
-  coordinate: 10_825,
+  mcp: 12_160,
+  connect: 12_562,
+  tasks: 7_670,
+  research: 7_983,
+  coordinate: 10_878,
 } as const;
 
 /**
@@ -56,8 +58,9 @@ export const TOOL_LIST_TOKENS = {
  * connector at /mcp, and fails when it takes more calls than calls, or when one of the two
  * writes, the create and the entry, answers more bytes than its number here. The reads
  * before them are not held: they grow with the index. Like the budgets above, each is
- * what it answers today, with nothing to spare, and moves only on purpose, with the
- * owner's approval, in the commit that changes what the routine answers.
+ * what it answers today, with nothing to spare, and moves only on purpose, in the commit
+ * that changes what the routine answers, which names the words or the owner's decision
+ * that moved it.
  */
 export const PROPOSAL_ROUTINE = {
   /** Calls, the two reads of the first round included. */
@@ -77,6 +80,6 @@ export const PROPOSAL_ROUTINE = {
  * `calls` is the design's: one page of the list and one read of up to twenty names.
  * `bytes` is set at what the test measures (the owner's standing rule, 3 October 2026),
  * so any growth of a list item, of the counts or of the section read fails it. It moves
- * only on purpose, with the owner's approval, in the commit that changes what the answers carry.
+ * only on purpose, as the budgets above do, in the commit that changes what the answers carry.
  */
 export const SURVEY_BUDGET = { spaces: 20, calls: 2, bytes: 30_291 } as const;

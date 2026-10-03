@@ -377,6 +377,10 @@ export function renderPostPage(header: string, body: Record<string, any>): strin
   );
   if (body.notice) lines.push(body.notice);
   if (body.truncated_note) lines.push(body.truncated_note);
+  // A document's old versions the page left out, said only when it left some.
+  if (body.left_out?.old_versions > 0) {
+    lines.push(`${body.left_out.old_versions} old version(s) left out: pass old_versions true, or read the document's history.`);
+  }
   // SEEK's two category lines, only when the answer carries them.
   if (body.category) lines.push(`kept to ${categoryRef(body.category.id)} and everything below it`);
   if (Array.isArray(body.hit_categories) && body.hit_categories.length) {

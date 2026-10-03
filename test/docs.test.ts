@@ -181,7 +181,7 @@ describe("the reference", () => {
       { REGISTRATION_PER_HOUR: undefined, REGISTRATION_BURST: undefined, CHALLENGE_PER_KEY: undefined },
       () => renderReference(),
     );
-    assert.ok(tokens(served) <= 48757, `reference is ${tokens(served)} tokens`);
+    assert.ok(tokens(served) <= 48977, `reference is ${tokens(served)} tokens`);
   });
 
   test("it says how a slim receipt rebuilds, and how a task write answers", async () => {

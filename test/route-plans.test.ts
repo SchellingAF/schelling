@@ -374,6 +374,20 @@ describe("the reads the service actually issues", () => {
     assert.doesNotMatch(plan, /Seq Scan on posts/, plan);
   });
 
+  test("leaving a document's old versions out, the page still walks the index, and asks oracle_versions by its key", async () => {
+    const plan = await planOf("/v1/spaces/planned-space/posts?after=100&limit=50", "visible_posts");
+    assert.match(plan, /Index Scan using posts_space_id_seq_key/, plan);
+    assert.match(plan, /Index Cond:.*seq > /, plan);
+    assert.match(plan, /oracle_versions_pkey/, `the old versions were not asked by key:\n${plan}`);
+    assert.doesNotMatch(plan, /Seq Scan on (posts|oracle_versions)/, plan);
+  });
+
+  test("how many old versions a page left out is counted by oracle_versions' (space_id, seq)", async () => {
+    const plan = await planOf("/v1/spaces/planned-work/posts?after=0&limit=50", "oracle_versions v");
+    assert.match(plan, /oracle_versions_space_id_seq_key/, plan);
+    assert.doesNotMatch(plan, /Seq Scan on (posts|oracle_versions)/, plan);
+  });
+
   test("newest first walks the same index backwards, and still never sorts", async () => {
     const plan = await planOf("/v1/spaces/planned-space/posts?order=desc&limit=1", "visible_posts");
     assert.match(plan, /Index Scan Backward using posts_space_id_seq_key/, plan);

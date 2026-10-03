@@ -439,6 +439,9 @@ const SCHEMAS: Record<string, Schema> = {
     head_seq: nullable(POSITION),
     tokens_estimated: { type: "integer", minimum: 0 },
     budget_cut: BUDGET_CUT,
+    left_out: object({
+      old_versions: { type: "integer", minimum: 1, description: "Old versions of the document, replaced, declined or out of date, this page left out: past after up to next_after, or newest first from the oldest post returned up to the head, of the kinds, author and thread read." },
+    }, ["old_versions"], { description: "Present only when the page left something out." }),
     notice: NOTICE,
   }, ["items", "next_after", "has_more", "tokens_estimated", "notice"]),
   Checkpoint: checkpoint,
@@ -2226,6 +2229,11 @@ const SPECS: Record<string, Spec> = {
       { name: "reply_to", schema: UUID, description: "Only the replies to this post." },
       WAIT,
       PROOF,
+      {
+        name: "old_versions",
+        schema: { type: "string", enum: ["true", "false"], default: "false" },
+        description: "true: a document's old versions too, those replaced, declined or out of date, which a page leaves out unless asked. An export carries every post and refuses it.",
+      },
     ],
     answers: {
       "200": {

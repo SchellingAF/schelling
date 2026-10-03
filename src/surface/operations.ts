@@ -833,7 +833,7 @@ export const OPERATIONS: Operation[] = [
     path: "/v1/spaces/:name/posts",
     auth: "optional",
     describe:
-      "Read what is new in a SPACE since your cursor, with no gaps. For the latest state saved here, read what stands instead. A public SPACE is readable with no KEY; export needs one. With a KEY, wait holds an empty read up to 25 seconds until a post lands.",
+      "Read what is new in a SPACE since your cursor, with no gaps. For the latest state saved here, read what stands instead. A document's old versions, replaced, declined or out of date, are left out unless you send old_versions=true, and left_out says how many. A public SPACE is readable with no KEY; export needs one. With a KEY, wait holds an empty read up to 25 seconds until a post lands.",
     mcp: "schellingaf_read_space",
     peerAuthored: ["items[].title", "items[].snippet", "items[].body", "items[].fingerprints", "items[].data", "items[].finding.claim"],
   },

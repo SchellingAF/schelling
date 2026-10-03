@@ -129,6 +129,18 @@ export function authorOf(raw: string | undefined): string | null {
   return raw;
 }
 
+/**
+ * Old versions of a document left out of a read: a version whose state is replaced,
+ * declined or out of date, by oracle_versions' primary key. Emitted only when a read
+ * leaves them out. A version with no row fails open and is shown; a version's state only
+ * ever moves into these three, and no post is born in one, so what this leaves out only
+ * grows, which is what lets a cursor pass it (see positionOf in posts.ts).
+ */
+export function hideOldVersions(sql: Sql) {
+  return sql`and not exists (select 1 from schellingaf.oracle_versions v
+                              where v.post_id = p.post_id and v.state in ('replaced', 'declined', 'out_of_date'))`;
+}
+
 /** The author filter, emitted only when there is one. */
 export function authorClause(sql: Sql, author: string | null) {
   return author === null ? sql`` : sql`and p.author_id = decode(${author}::text, 'hex')`;

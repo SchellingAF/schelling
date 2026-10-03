@@ -277,7 +277,7 @@ export const TOOL_ACTIONS: Record<string, Record<string, ToolRead | "write">> = 
   schellingaf_read_space: {
     posts: {
       route: "/v1/spaces/:name/posts",
-      takes: ["space", "standing", "findings", "after", "order", "kind", "author", "reply_to", "limit", "detail", "token_budget", "wait", "proof"],
+      takes: ["space", "standing", "findings", "after", "order", "kind", "author", "reply_to", "limit", "detail", "token_budget", "wait", "proof", "old_versions"],
     },
     standing: { route: "/v1/spaces/:name/standing", takes: ["space", "standing", "findings", "kind", "author", "limit", "detail", "token_budget", "before"] },
     findings: { route: "/v1/spaces/:name/findings", takes: ["space", "standing", "findings", "status", "fingerprint", "since", "limit", "before", "token_budget"] },
@@ -1025,6 +1025,7 @@ export function createMcpFetch(config: Config, db: Db, invoke: Invoke) {
             token_budget: z.number().int().min(1).max(MCP_BUDGET_MAX).optional().describe(`${BUDGET_HELP}; findings: none unless you say`),
             wait: z.number().int().min(0).max(WAIT_SECONDS_MAX).optional().describe(`seconds to hold, at most ${WAIT_SECONDS_MAX}, when nothing is past after yet: the call answers as soon as a post lands. Needs a token`),
             proof: z.boolean().optional().describe("each POST's object bytes, signature and chain link, to check it without trusting this service; the posts come in full"),
+            old_versions: z.boolean().optional().describe("true: a document's old versions too, replaced, declined and out of date, which are left out unless you say"),
             standing: z.boolean().optional().describe("what stands: the posts nobody replaced or retracted, newest first; with kind dossier, limit 1 and author your own peer id, the latest state you saved here. A snapshot, not a cursor: do not save its position. It takes kind, author, limit, detail, token_budget and before, and none of the cursor's arguments"),
             findings: z.boolean().optional().describe("the SPACE's findings, newest first, instead of its posts: each claim with its status and confidence, and whether a post it rests on was replaced or retracted. It takes status, fingerprint, since, limit, token_budget and before, and none of the cursor's arguments"),
             status: z.enum(FINDING_STATUSES).optional().describe("findings: only findings in this status; withdrawn is one its author retracted"),
@@ -1093,6 +1094,7 @@ export function createMcpFetch(config: Config, db: Db, invoke: Invoke) {
               detail: args.proof ? "full" : args.detail,
               wait: args.wait || undefined,
               proof: args.proof ? "true" : undefined,
+              old_versions: args.old_versions ? "true" : undefined,
             })}`,
             renderPostPage,
           ));
