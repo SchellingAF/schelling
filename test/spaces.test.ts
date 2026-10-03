@@ -444,7 +444,8 @@ describe("the same pages, as text a person can read", () => {
     assert.equal(out.status, 200);
     assert.match(out.type, /text\/markdown/);
     assert.match(out.text, /^reading as [0-9a-f]{64}/);
-    assert.match(out.text, /\[1\] RESULT by [0-9a-f]{64}/);
+    assert.match(out.text, /^authors: [0-9a-f]{8} [0-9a-f]{64}$/m);
+    assert.match(out.text, /\[1\] RESULT by [0-9a-f]{8} at .*, post_id [0-9a-f-]{36}$/m);
     // The fences are as useful to a person judging a claim as to a model.
     assert.match(out.text, /<<<peer title>>>\nThe pin fixes the build\n<<<end title>>>/);
     assert.match(out.text, /<<<peer fingerprints>>>\ngit\.commit:aabbccddeeff/);

@@ -289,7 +289,7 @@ describe("a name a read does not take is refused, on both surfaces, and one no r
     assert.equal(standing.body.error.code, "INVALID_REQUEST");
     assert.equal(standing.body.error.detail, "this read does not take after; it takes kind, author, limit, detail, token_budget, before.");
     const one = await call("GET", `/v1/posts/${posts[0]}?detail=full&limit=2`, owner.token);
-    assert.equal(one.body.error.detail, "this read does not take detail, limit; it takes none.");
+    assert.equal(one.body.error.detail, "this read does not take detail, limit; it takes proof.");
     // An export is the log whole: it refuses a budget rather than ignore one.
     const exported = await send(app, "GET", `/v1/spaces/${work}/events?token_budget=10`, owner, undefined, { accept: "application/x-ndjson" });
     assert.equal(exported.status, 400);

@@ -22,7 +22,8 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { useService, app, fixture, call, agent, connector, type Agent } from "./lib/service.ts";
 import { OPERATIONS } from "../src/surface/operations.ts";
-import { defuse } from "../src/mcp/render.ts";
+import { defuse, renderPostPage } from "../src/mcp/render.ts";
+import { aliasesOf } from "../src/http/postview.ts";
 import { DISGUISED_MARKERS, FORGED_MARKERS, MARKER_WORD, ORDINARY, UNSEEN, readsAsMarker, seen } from "./lib/fence.ts";
 
 // Every payload closes its own fence and reopens one. The delimiters are the only
@@ -364,15 +365,46 @@ describe("nothing an agent wrote escapes its fence", () => {
     }
   });
 
-  test("a KEY is always named in full, never by a prefix", async () => {
-    // An eight-character prefix is grindable, and two agents sharing one is
-    // impersonation that reads as normal.
-    const rendered = await tool("schellingaf_read_space", { space: "hostile-space" }, owner.token);
-    // Not the first group of a uuid, which is eight hex characters followed by a
-    // hyphen: post ids are uuids and are meant to appear in full too.
-    const prefixes = rendered.match(/(?<![0-9a-f-])[0-9a-f]{8}(?![0-9a-f-])/g) ?? [];
-    assert.deepEqual(prefixes, [], "a peer id was rendered as a prefix");
-    assert.ok(rendered.includes(writer.peerId), "the author is named in full");
+  test("a KEY a page names by a short name is named in full in the page's authors table", async () => {
+    // An eight-character prefix is grindable, and two agents sharing one would be
+    // impersonation that reads as normal. So a page names each author in full once, in
+    // its authors table, and every other mention is a short name that table gives,
+    // lengthened where two authors on the page share it (the next test).
+    for (const rendered of [
+      await tool("schellingaf_read_space", { space: "hostile-space", detail: "snippets" }, owner.token),
+      await tool("schellingaf_read_space", { space: "hostile-space" }, owner.token),
+    ]) {
+      const table = /^authors: (.*)$/m.exec(rendered)?.[1];
+      assert.ok(table, `no authors table:\n${rendered}`);
+      const aliases = new Map(table.split(", ").map((entry) => entry.split(" ") as [string, string]));
+      for (const [alias, peer] of aliases) {
+        assert.match(peer, /^[0-9a-f]{64}$/, "the table names a KEY in full");
+        assert.ok(peer.startsWith(alias), `${alias} is not ${peer}'s own start`);
+      }
+      assert.ok([...aliases.values()].includes(writer.peerId), "the author is named in full");
+      // Every other run of hex that could be a KEY is a name the table gives, or a whole peer
+      // id; not the first group of a uuid, which is followed by a hyphen.
+      const rest = rendered.replace(/^authors: .*$/m, "");
+      for (const named of rest.match(/(?<![0-9a-f-])[0-9a-f]{8,64}(?![0-9a-f-])/g) ?? []) {
+        assert.ok(named.length === 64 || aliases.has(named), `${named} is a prefix the authors table does not give`);
+      }
+    }
+  });
+
+  test("two authors on a page sharing their first eight hex characters are both named by longer names", () => {
+    const one = `0badc0de${"1".repeat(56)}`;
+    const two = `0badc0de${"2".repeat(56)}`;
+    const deeper = `0badc0de${"1".repeat(8)}${"3".repeat(48)}`;
+    const other = `7e57ab1e${"4".repeat(56)}`;
+    const aliases = aliasesOf([one, two, other]);
+    assert.deepEqual([...aliases.values()], [one.slice(0, 16), two.slice(0, 16), other.slice(0, 8)]);
+    assert.deepEqual([...aliasesOf([one, deeper]).values()], [one.slice(0, 32), deeper.slice(0, 32)]);
+    // And so rendered: neither is named by the eight they share.
+    const post = (author: string, seq: string) => ({ seq, kind: "obs", author, space: "s", posted_at: "t", post_id: "p", signed: false });
+    const page = renderPostPage("reading as anonymous", { items: [post(one, "1"), post(two, "2")] });
+    assert.match(page, new RegExp(`^authors: ${one.slice(0, 16)} ${one}, ${two.slice(0, 16)} ${two}$`, "m"));
+    assert.match(page, new RegExp(`^\\[1\\] OBS by ${one.slice(0, 16)} at`, "m"));
+    assert.doesNotMatch(page, /by 0badc0de at/);
   });
 
   test("the service's own words never interpolate anything", async () => {
@@ -588,8 +620,8 @@ describe("a SPACE name is peer-chosen too", () => {
       "the name began a line in the service's own voice",
     );
 
-    // And in the post header line, which names the space every post came from.
+    // And on the page's first line, which names the space every post on it came from.
     const stream = await md("/v1/spaces/hostile-space/posts", owner);
-    assert.match(stream, /WARN by [0-9a-f]{64} in "hostile-space" at /);
+    assert.match(stream, /^\d+ item\(s\) in "hostile-space", /m);
   });
 });

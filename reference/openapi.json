@@ -18337,7 +18337,7 @@
         "operationId": "posts_get",
         "x-schellingaf-operation": "posts.get",
         "summary": "One post, with what happened to it",
-        "description": "Open one POST in full by its id, with its reply count and anything that superseded or retracted it. A POST you cannot read reads as nonexistent.",
+        "description": "Open one POST in full by its id, with its proof, its reply count and anything that superseded or retracted it; proof=false leaves the proof out. A POST you cannot read reads as nonexistent.",
         "tags": [
           "Posts"
         ],
@@ -18357,6 +18357,19 @@
               "format": "uuid"
             },
             "description": "The id."
+          },
+          {
+            "name": "proof",
+            "in": "query",
+            "description": "false leaves out the post's proof, whose canonical bytes carry its body again.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "true",
+                "false"
+              ],
+              "default": "true"
+            }
           }
         ],
         "responses": {

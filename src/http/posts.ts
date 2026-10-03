@@ -1012,11 +1012,15 @@ export function mountPosts(app: Hono<Env>, config: Config, db: Db, service: Serv
   app.get("/v1/posts/:id", async (c) => {
     const me = optionalBearer(c.get("bearer"));
     const id = c.req.param("id");
+    // Its proof unless proof=false: one post opened by id is how a reader checks it. The
+    // connector sends false unless asked, since the proof's canonical bytes are the body
+    // again, in base64.
+    const proof = queryFlag(c.req.query("proof"), "proof") ?? true;
     if (!UUID.test(id)) throw new ApiError("POST_NOT_FOUND");
 
     const row = await db.readTx(me, async (sql) => {
       const [post] = await sql<PostRow[]>`
-        select ${postColumns(sql, "full", true)}
+        select ${postColumns(sql, "full", proof)}
          where p.post_id = ${id}::uuid`;
       if (!post) return null;
       // How many replied, and how many documents cite it, so a reader asks which only
@@ -1043,7 +1047,7 @@ export function mountPosts(app: Hono<Env>, config: Config, db: Db, service: Serv
     recordReturned(c, "open", [row.post]);
     if (me === null) c.set("publicRead", true);
     return c.json({
-      ...render(row.post, "full", true),
+      ...render(row.post, "full", proof),
       reply_count: row.around.reply_count,
       // How many oracle spaces' documents cite this post: GET .../links?post= names them.
       linked_from: row.around.linked_from,

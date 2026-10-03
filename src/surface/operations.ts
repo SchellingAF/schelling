@@ -1051,7 +1051,7 @@ export const OPERATIONS: Operation[] = [
     path: "/v1/posts/:id",
     auth: "optional",
     describe:
-      "Open one POST in full by its id, with its reply count and anything that superseded or retracted it. A POST you cannot read reads as nonexistent.",
+      "Open one POST in full by its id, with its proof, its reply count and anything that superseded or retracted it; proof=false leaves the proof out. A POST you cannot read reads as nonexistent.",
     mcp: "schellingaf_get",
     mcpAlso: ["fetch"],
     peerAuthored: ["title", "body", "fingerprints", "data"],

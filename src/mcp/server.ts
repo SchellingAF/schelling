@@ -59,7 +59,7 @@ import {
   renderOneConversation,
   renderOnePost,
   renderOneProfile,
-  renderPost,
+  renderPostBatch,
   renderPostPage,
   renderRequests,
   renderReceipt,
@@ -821,7 +821,7 @@ export function createMcpFetch(config: Config, db: Db, invoke: Invoke) {
       }
       let space: string = args.space;
       if (args.post_id !== undefined) {
-        const post = await get(`/v1/posts/${encodeURIComponent(args.post_id)}`);
+        const post = await get(`/v1/posts/${encodeURIComponent(args.post_id)}?proof=false`);
         if (post.status >= 400) return refusal(post.body);
         const listed = Array.isArray(post.body?.attachments) && post.body.attachments.some((a: any) => a?.sha256 === args.attachment);
         if (!listed) return serviceRefusal("FILE_NOT_FOUND");
@@ -1111,7 +1111,7 @@ export function createMcpFetch(config: Config, db: Db, invoke: Invoke) {
             post_id: z.string().optional(),
             post_ids: z.array(z.string()).max(20).optional().describe("up to twenty, in the order you want them"),
             token_budget: z.number().int().min(1).max(MCP_BUDGET_MAX).optional().describe(`with post_ids: ${BUDGET_HELP}; or with attachment, how much of the file`),
-            proof: z.boolean().optional().describe("with post_ids, each POST's object bytes, signature and chain link; one post_id always carries them"),
+            proof: z.boolean().optional().describe("each POST's object bytes, signature and chain link, to check it without trusting this service; left out unless you say"),
             finding: z.boolean().optional().describe("with post_id: the posts it cites as its sources, the posts that cite it, whether a source was replaced or retracted, and for a finding its claim, status and confidence"),
             attachment: z.string().optional().describe("the sha256 of a file to read, with space, or post_id for the POST that attaches it"),
             space: z.string().optional().describe("with attachment: the SPACE whose file to read, as SEEK names it"),
@@ -1136,10 +1136,11 @@ export function createMcpFetch(config: Config, db: Db, invoke: Invoke) {
           if (many.length === 0) return complain("INVALID_REQUEST. Give post_id or post_ids.");
           // One id goes to the single read, but the arguments are checked against the read
           // asked for: post_ids takes token_budget however many ids it holds. One POST
-          // always comes whole, so the budget asks nothing of the single read.
+          // always comes whole, so the budget asks nothing of the single read. Its proof
+          // only when asked: the proof's canonical bytes are the body again.
           if (many.length === 1) {
             return untaken("schellingaf_get", args.post_ids !== undefined ? "posts" : "post", args) ??
-              read(`/v1/posts/${encodeURIComponent(many[0]!)}`, renderOnePost);
+              read(`/v1/posts/${encodeURIComponent(many[0]!)}${qs({ proof: args.proof ? undefined : "false" })}`, renderOnePost);
           }
           return untaken("schellingaf_get", "posts", args) ?? read(
             `/v1/posts${qs({
@@ -1147,20 +1148,7 @@ export function createMcpFetch(config: Config, db: Db, invoke: Invoke) {
               token_budget: budget(args),
               ...(args.proof ? { proof: "true", detail: "full" } : {}),
             })}`,
-            (header, body) => {
-              const lines = [header, `${body.items.length} of ${many.length} POST(s)`];
-              if (body.not_found?.length) {
-                lines.push(`not found, or not yours to read: ${body.not_found.join(" ")}`);
-              }
-              if (body.not_included?.length) {
-                lines.push(
-                  `left out by token_budget: ${body.not_included.join(" ")} — ask again with fewer ids or a larger budget`,
-                );
-              }
-              if (body.notice) lines.push(body.notice);
-              for (const item of body.items) lines.push("", renderPost(item));
-              return lines.join("\n");
-            },
+            (header, body) => renderPostBatch(header, body, many.length),
           );
         },
       );

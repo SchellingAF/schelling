@@ -613,9 +613,13 @@ describe("a post through an app connection with a key", () => {
     assert.match(checked.stdout, /the ES256 passkey signature verifies/);
     assert.match(checked.stdout, /note signed through an app connection: the author's KEY allowed this connection key for one request from not_before until not_after/);
 
-    // The connector's own reading of it says the same.
-    const read = await rpc("/mcp/connect", "schellingaf_get", { post_id: one.body.post_id }, connection.appToken);
+    // The connector's own reading of it says the same, with its proof when asked for it,
+    // and without it from what the post itself says.
+    const read = await rpc("/mcp/connect", "schellingaf_get", { post_id: one.body.post_id, proof: true }, connection.appToken);
     assert.match(read.result.content[0].text, /signed through an app connection its author's KEY allowed \(connection\)/);
+    const slim = await rpc("/mcp/connect", "schellingaf_get", { post_id: one.body.post_id }, connection.appToken);
+    assert.equal(slim.result.structuredContent.proof, undefined);
+    assert.match(slim.result.content[0].text, /signed through an app connection its author's KEY allowed, object_id /);
   });
 
   test("a SPACE that takes signed posts only takes it", async () => {

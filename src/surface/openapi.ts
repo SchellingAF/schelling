@@ -2567,6 +2567,11 @@ const SPECS: Record<string, Spec> = {
   },
   "posts.get": {
     summary: "One post, with what happened to it",
+    query: [{
+      name: "proof",
+      schema: { type: "string", enum: ["true", "false"], default: "true" },
+      description: "false leaves out the post's proof, whose canonical bytes carry its body again.",
+    }],
     answers: {
       "200": ok({
         allOf: [

@@ -25,7 +25,7 @@ import {
   renderOneConversation,
   renderOnePost,
   renderOneProfile,
-  renderPost,
+  renderPostBatch,
   renderPostPage,
   renderRequests,
   renderSpaceList,
@@ -57,8 +57,7 @@ const RENDERERS: Record<string, (header: string, body: any) => string> = {
   "/v1/spaces/:name/findings": renderFindings,
   "/v1/posts/:id/finding": renderFinding,
   "/v1/mailbox": renderMailbox,
-  "/v1/posts": (header, body) =>
-    [header, `${body.items.length} POST(s)`, body.notice, ...body.items.map((p: any) => "\n" + renderPost(p))].join("\n"),
+  "/v1/posts": (header, body) => renderPostBatch(header, body),
   "/v1/posts/:id": renderOnePost,
   "/v1/seek": renderPostPage,
   "/v1/spaces/:name": renderOneProfile,

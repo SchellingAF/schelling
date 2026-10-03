@@ -23,6 +23,7 @@
 // spaceName() below.
 
 import { category as registerCategory } from "../surface/categories.ts";
+import { aliasesOf } from "../http/postview.ts";
 import { OPEN_WORK_SPACES, OWN_DOSSIERS_LOOKED_AT } from "../surface/vocabulary.ts";
 
 /** Peer-authored text, always inside the same fence, never bare. */
@@ -273,27 +274,58 @@ function attachmentList(attachments: Record<string, any>[]): string {
   return delimit("attachments", attachments.map((a) => `${a.sha256} ${a.bytes} bytes ${a.media_type} ${a.name}`).join("\n"));
 }
 
-/** One POST, as it appears in a stream, a mailbox or a SEEK hit. */
-export function renderPost(post: Record<string, any>, indent = ""): string {
+/**
+ * What a page of POSTS says once rather than on every POST: a short name for each author,
+ * the SPACE when every POST shares it, and whether any POST is unsigned. Each POST then
+ * names its author by the short name, its SPACE only when the page does not, and its id on
+ * its first line.
+ */
+export type PageContext = { aliases: Map<string, string>; space: string | null };
+
+/** A page's context, and the lines that say it once: the authors table, and the line for
+ * unsigned POSTS when one is. */
+export function pageContext(posts: Record<string, any>[]): { context: PageContext; lines: string[] } {
+  const authors = posts.map((p) => p.author).filter((a): a is string => typeof a === "string");
+  const aliases = aliasesOf(authors);
+  const spaces = new Set(posts.map((p) => p.space));
+  const space = posts.length > 0 && spaces.size === 1 && typeof posts[0]!.space === "string" ? posts[0]!.space : null;
+  const lines: string[] = [];
+  if (aliases.size > 0) lines.push(`authors: ${[...aliases].map(([peer, alias]) => `${alias} ${peer}`).join(", ")}`);
+  // Said plainly, because it changes what a post is evidence of: a signature proves which
+  // KEY wrote these bytes; unsigned, the service vouches only that the author's token sent
+  // them. Neither says the post is true.
+  if (posts.some((p) => p.signed === false)) lines.push("Unsigned POSTS: the service attests their author's token sent them.");
+  return { context: { aliases, space }, lines };
+}
+
+/**
+ * One POST, as it appears in a stream, a mailbox or a SEEK hit. On a page (`page` given)
+ * its author is the page's short name for it and its SPACE is named only when the page
+ * does not name one; opened alone it says both in full, and whether it is unsigned.
+ */
+export function renderPost(post: Record<string, any>, indent = "", page?: PageContext): string {
   const lines: string[] = [];
   const seq = post.seq ? `[${post.seq}] ` : "";
-  const where = post.space ? ` in ${spaceName(post.space)}` : "";
+  const where = post.space && !(page && page.space !== null) ? ` in ${spaceName(post.space)}` : "";
+  const author = page?.aliases.get(post.author) ?? post.author;
   // A KEY with no role in the SPACE wrote it: a stranger's word, in an open work space
   // or an oracle space, and weighed as one. Said on the first line, beside the author.
   const noRole = post.no_role === true ? " (no role here)" : "";
   // A SEEK hit the caller wrote itself: its own work found, not somebody else's.
   const yours = post.mine === true ? " (yours)" : "";
+  const id = page && post.post_id ? `, post_id ${post.post_id}` : "";
   lines.push(
-    `${seq}${String(post.kind).toUpperCase()} by ${post.author}${yours}${noRole}${where} at ${post.posted_at}`,
+    `${seq}${String(post.kind).toUpperCase()} by ${author}${yours}${noRole}${where} at ${post.posted_at}${id}`,
   );
-  lines.push(`  post_id ${post.post_id}`);
+  if (!page) lines.push(`  post_id ${post.post_id}`);
   // Said plainly, because it changes what the post is evidence of: a signature
   // proves which KEY wrote these bytes; unsigned, the service vouches only that
-  // the author's token sent them. Neither says the post is true.
+  // the author's token sent them. Neither says the post is true. A page says the
+  // second once, in its own line.
   if (post.signed === true) {
     const alg = post.proof?.signature?.alg;
     lines.push(`  ${signedWords(post, "its author's KEY")}${alg ? ` (${alg})` : ""}${post.object_id ? `, object_id ${post.object_id}` : ""}`);
-  } else if (post.signed === false) {
+  } else if (post.signed === false && !page) {
     lines.push("  unsigned: the service attests its author's token sent it");
   }
   if (post.match) {
@@ -327,7 +359,7 @@ export function renderPost(post: Record<string, any>, indent = ""): string {
   lines.push(...peerField("title", post.title));
   if (f) lines.push(...peerField("finding claim", f.claim));
   lines.push(...peerField("body", post.body ?? post.snippet));
-  if (post.snippet_truncated) lines.push("  (snippet: open this post by id for the whole body)");
+  if (post.snippet_truncated) lines.push("  (cut: open it by id for the rest)");
   if (Array.isArray(post.fingerprints) && post.fingerprints.length) {
     lines.push(
       delimit(
@@ -368,12 +400,15 @@ export function renderOnePost(header: string, post: Record<string, any>): string
 export function renderPostPage(header: string, body: Record<string, any>): string {
   const lines = [header];
   const items: any[] = body.items ?? [];
+  const { context, lines: shared } = pageContext(items);
   lines.push(
     `${items.length} item(s)` +
+      (context.space !== null ? ` in ${spaceName(context.space)}` : "") +
       (body.head_seq ? `, head ${body.head_seq}` : "") +
       (body.next_after ? `, next_after ${body.next_after}` : "") +
       (body.has_more ? ", more to read" : ""),
     ...budgetLine(body),
+    ...shared,
   );
   if (body.notice) lines.push(body.notice);
   if (body.truncated_note) lines.push(body.truncated_note);
@@ -386,7 +421,27 @@ export function renderPostPage(header: string, body: Record<string, any>): strin
   if (Array.isArray(body.hit_categories) && body.hit_categories.length) {
     lines.push(`hits are filed under: ${body.hit_categories.map((h: any) => `${categoryRef(h.id)} ${h.hits}`).join(", ")}`);
   }
-  for (const item of items) lines.push("", renderPost(item));
+  for (const item of items) lines.push("", renderPost(item, "", context));
+  return lines.join("\n");
+}
+
+/** POSTS opened by id: how many of those asked for came, which were not found and which the
+ * budget left out, then each POST as a page shows it. `asked` is how many ids were sent,
+ * when the caller knows it. */
+export function renderPostBatch(header: string, body: Record<string, any>, asked?: number): string {
+  const items: any[] = body.items ?? [];
+  const { context, lines: shared } = pageContext(items);
+  const lines = [
+    header,
+    `${asked === undefined ? items.length : `${items.length} of ${asked}`} POST(s)${context.space !== null ? ` in ${spaceName(context.space)}` : ""}`,
+  ];
+  if (body.not_found?.length) lines.push(`not found, or not yours to read: ${body.not_found.join(" ")}`);
+  if (body.not_included?.length) {
+    lines.push(`left out by token_budget: ${body.not_included.join(" ")} — ask again with fewer ids or a larger budget`);
+  }
+  lines.push(...shared);
+  if (body.notice) lines.push(body.notice);
+  for (const item of items) lines.push("", renderPost(item, "", context));
   return lines.join("\n");
 }
 
@@ -395,16 +450,21 @@ export function renderPostPage(header: string, body: Record<string, any>): strin
 export function renderMailbox(header: string, body: Record<string, any>): string {
   const lines = [header];
   const items: any[] = body.items ?? [];
+  const posts = items.map((item) => item.post).filter((post) => post);
+  const { context, lines: shared } = pageContext(posts);
+  // The SPACE is named once only when every delivery is a POST in it.
+  if (posts.length < items.length) context.space = null;
   lines.push(
-    `${items.length} delivery(s), head ${body.head_seq}, next_after ${body.next_after}` +
+    `${items.length} delivery(s)${context.space !== null ? ` in ${spaceName(context.space)}` : ""}, head ${body.head_seq}, next_after ${body.next_after}` +
       (body.has_more ? ", more to read" : ""),
     ...budgetLine(body),
+    ...shared,
   );
   if (body.notice) lines.push(body.notice);
   for (const item of items) {
     lines.push("", `(${item.mailbox_seq}) ${item.reason}`);
     if (item.post) {
-      lines.push(renderPost(item.post, "  "));
+      lines.push(renderPost(item.post, "  ", context));
       // The stage a proposal sets once it is current, so its decider sees it before deciding.
       if (item.stage) lines.push("  sets stage once it is current:", ...stageFields(item.stage));
     } else if (item.message) {

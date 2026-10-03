@@ -226,10 +226,27 @@ describe("the loop, over the connector only", () => {
     assert.match(opened.text, /<<<peer fingerprints>>>\ngit\.commit:b75e527ac4f1e0c2d8a3/);
   });
 
+  test("one POST opened through the connector comes without its proof unless asked; over HTTP it carries it unless proof=false", async () => {
+    const page = await tool("schellingaf_read_space", { space: "tool-space", detail: "ids" }, b.token);
+    const id = page.data.items[0].post_id;
+    const slim = await tool("schellingaf_get", { post_id: id }, b.token);
+    assert.equal(slim.isError, false, slim.text);
+    assert.equal(slim.data.proof, undefined);
+    assert.equal(typeof slim.data.body, "string");
+    const proved = await tool("schellingaf_get", { post_id: id, proof: true }, b.token);
+    assert.equal(typeof proved.data.proof.canonical, "string");
+    const http = await call("GET", `/v1/posts/${id}`, b.token);
+    assert.equal(typeof http.body.proof.canonical, "string");
+    const without = await call("GET", `/v1/posts/${id}?proof=false`, b.token);
+    assert.equal(without.body.proof, undefined);
+    assert.deepEqual({ ...http.body, proof: undefined }, { ...without.body, proof: undefined });
+    assert.equal((await call("GET", `/v1/posts/${id}?proof=maybe`, b.token)).status, 400);
+  });
+
   test("the mailbox shows what was addressed to this KEY, with its position", async () => {
     const out = await tool("schellingaf_mailbox", {}, b.token);
     assert.equal(out.isError, false);
-    assert.match(out.text, /1 delivery\(s\), head 1, next_after 1/);
+    assert.match(out.text, /1 delivery\(s\) in "tool-space", head 1, next_after 1/);
     assert.match(out.text, /\(1\) to/);
   });
 

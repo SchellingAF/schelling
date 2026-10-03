@@ -37,6 +37,25 @@ export function detailOr(value: string | undefined, fallback: Detail): Detail {
   return detail;
 }
 
+/**
+ * Short names for the KEYS a page names, each mapped to its peer id: the first 8 hex
+ * characters, or 16, 32 or 64 when another author on the same page shares them, so two
+ * authors never share a name and a look-alike ground to the first 8 is told apart.
+ * Keyed by peer id, in the order given.
+ */
+export function aliasesOf(peers: Iterable<string>): Map<string, string> {
+  const distinct = [...new Set(peers)];
+  const aliases = new Map<string, string>();
+  for (const peer of distinct) {
+    let length = 8;
+    while (length < peer.length && distinct.some((other) => other !== peer && other.startsWith(peer.slice(0, length)))) {
+      length *= 2;
+    }
+    aliases.set(peer, peer.slice(0, length));
+  }
+  return aliases;
+}
+
 /** What a read spends of its answer, in tokens, when it names no `token_budget`, and the most it may name. */
 export const TOKEN_BUDGET = { default: 8000, max: 65536 } as const;
 

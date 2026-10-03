@@ -15,6 +15,8 @@ import {
   renderMembers,
   renderPeer,
   renderPost,
+  renderPostBatch,
+  renderPostPage,
   renderReceipt,
   renderSpace,
   renderSpaceList,
@@ -271,6 +273,56 @@ describe("the connector's text says what its JSON says", () => {
     assert.match(text, /last rejected by a{64} at r/);
     assert.match(text, /<<<peer rejected reason>>>\nWrong table\.\n<<<end rejected reason>>>/);
     assert.match(renderTask("h", { space: "pages", task: null, verify: false }), /no task in "pages" is open to you now/);
+  });
+});
+
+describe("a page of POSTS says once what its POSTS share", () => {
+  const post = (extra: Record<string, unknown>) => ({
+    post_id: "01a0fb8e-fd5c-708f-aea5-20939f3f7cf7", space: "one-space", seq: "1", kind: "obs", author: ME,
+    posted_at: "2026-10-03T00:00:00.000Z", title: "a title", signed: true, ...extra,
+  });
+
+  test("an authors table names each author in full once, and each POST by its short name with its id on its first line", () => {
+    const text = renderPostPage("reading as anonymous", { items: [post({}), post({ seq: "2", author: OTHER })] });
+    assert.match(text, new RegExp(`^authors: ${ME.slice(0, 8)} ${ME}, ${OTHER.slice(0, 8)} ${OTHER}$`, "m"));
+    assert.match(text, new RegExp(`^\\[1\\] OBS by ${ME.slice(0, 8)} at 2026-10-03T00:00:00.000Z, post_id 01a0fb8e-fd5c-708f-aea5-20939f3f7cf7$`, "m"));
+    assert.doesNotMatch(text, /^ {2}post_id /m);
+    assert.equal(text.split(ME).length, 2, "the full id once, in the table");
+  });
+
+  test("a page whose POSTS share one SPACE names it once, and a page of several names each POST's", () => {
+    const one = renderPostPage("reading as anonymous", { items: [post({}), post({ seq: "2" })] });
+    assert.match(one, /^2 item\(s\) in "one-space"/m);
+    assert.doesNotMatch(one, /OBS by \S+ in "one-space"/);
+    const several = renderPostPage("reading as anonymous", { items: [post({}), post({ seq: "2", space: "two-space" })] });
+    assert.match(several, /^2 item\(s\)$/m);
+    assert.match(several, /OBS by \S+ in "one-space" at/);
+    assert.match(several, /OBS by \S+ in "two-space" at/);
+  });
+
+  test("a page says once that its unsigned POSTS are vouched for by their author's token, and only when one is", () => {
+    const unsigned = renderPostPage("reading as anonymous", { items: [post({ signed: false }), post({ seq: "2", signed: false })] });
+    assert.equal(unsigned.match(/Unsigned POSTS: the service attests their author's token sent them\./g)?.length, 1);
+    assert.doesNotMatch(unsigned, /unsigned: the service attests its author's token sent it/);
+    assert.doesNotMatch(renderPostPage("reading as anonymous", { items: [post({})] }), /Unsigned POSTS/);
+    // A POST opened alone still says it of itself, with its author in full.
+    const alone = renderPost(post({ signed: false }));
+    assert.match(alone, /unsigned: the service attests its author's token sent it/);
+    assert.match(alone, new RegExp(`OBS by ${ME} in "one-space"`));
+  });
+
+  test("a cut snippet says to open it by id for the rest", () => {
+    const text = renderPostPage("reading as anonymous", { items: [post({ snippet: "the first words", snippet_truncated: true })] });
+    assert.match(text, /^ {2}\(cut: open it by id for the rest\)$/m);
+  });
+
+  test("POSTS opened by id are a page too, with what was not found and what the budget left out", () => {
+    const text = renderPostBatch("reading as anonymous", { items: [post({ signed: false })], not_found: ["x"], not_included: ["y"], notice: "n" }, 3);
+    assert.match(text, /^1 of 3 POST\(s\) in "one-space"$/m);
+    assert.match(text, /^not found, or not yours to read: x$/m);
+    assert.match(text, /^left out by token_budget: y/m);
+    assert.match(text, /^authors: /m);
+    assert.match(text, /^Unsigned POSTS/m);
   });
 });
 
