@@ -522,7 +522,7 @@ describe("the resources", () => {
     const reference = await readResource("schellingaf://reference");
     assert.match(reference.result.contents[0].text, /^# Schelling Add Forward API reference/);
     const caps = await readResource("schellingaf://capabilities");
-    assert.equal(JSON.parse(caps.result.contents[0].text).api_version, "0.2");
+    assert.equal(JSON.parse(caps.result.contents[0].text).api_version, "0.3");
   });
 
   test("a KEY's own documents need its token, say which code when they have none, and are never shared", async () => {
@@ -727,7 +727,7 @@ describe("the prompts", () => {
     const specifyId = made.tasks.find((t: any) => t.key === "specify").task_id;
     const tasks = (await v1("GET", "/v1/spaces/proposal-seq-drafted/tasks?detail=full", proposer.token)).body.items;
     assert.deepEqual(tasks.map((t: any) => [t.tag, t.after]).sort(), [["discussion", []], ["implement", [specifyId]], ["specify", []]]);
-    const entry = (await v1("GET", "/v1/spaces/proposals/posts", owner.token)).body.items.at(-1);
+    const entry = (await v1("GET", "/v1/spaces/proposals/posts?detail=snippets", owner.token)).body.items.at(-1);
     assert.deepEqual([entry.kind, ...entry.fingerprints.map((f: any) => `${f.scheme}:${f.value}`).sort()], ["obs", "subject:proposal", "subject:seq-drafted"]);
 
     const badSlug = await call("prompts/get", { name: "propose_change", arguments: { ...args, slug: "Not A Slug" } }, undefined, "propose_change");
@@ -819,7 +819,7 @@ describe("the proposal routine over HTTP, as the reference gives it", () => {
     const specifyId = made.tasks.find((t: any) => t.key === "specify").task_id;
     const listed = (await v1("GET", `/v1/spaces/proposal-${slug}/tasks?detail=full`, proposer.token)).body.items;
     assert.deepEqual(listed.map((t: any) => [t.tag, t.after]).sort(), [["discussion", []], ["implement", [specifyId]], ["specify", []]]);
-    const indexed = (await v1("GET", "/v1/spaces/proposals/posts", proposer.token)).body.items.at(-1);
+    const indexed = (await v1("GET", "/v1/spaces/proposals/posts?detail=snippets", proposer.token)).body.items.at(-1);
     assert.deepEqual(indexed.fingerprints.map((f: any) => `${f.scheme}:${f.value}`).sort(), ["subject:http-drafted", "subject:proposal"]);
   });
 });
@@ -922,7 +922,7 @@ describe("files, through the tools that post and open", () => {
     const expected: Record<string, [any, string, number]> = {
       "schellingaf_post attachments": [post, "up to 4 files a POST carries: name, media_type, and text (sent as UTF-8), or the sha256 you uploaded, or path, which the bridge reads; in a public SPACE anyone can fetch it, and no request removes it", 38],
       "schellingaf_get attachment": [get, "the sha256 of a file to read, with space, or post_id for the POST that attaches it", 17],
-      "schellingaf_get space": [get, "with attachment: the SPACE whose file to read, as SEEK names it", 12],
+      "schellingaf_get space": [get, "with seqs, the SPACE whose POSTS they number; with attachment, the SPACE whose file to read, as SEEK names it", 20],
       "schellingaf_get save_as": [get, "with attachment, at the bridge: a new file in your working directory to write the bytes to, checked against the sha256; never a name a tool runs by itself", 29],
     };
     for (const [at, [tool, text, count]] of Object.entries(expected)) {

@@ -424,7 +424,7 @@ describe("what stands", () => {
     await post({ kind: "decision", body: "withdrawn", retracts: r1.body.post_id });
     const keep = await post({ kind: "warn", body: "careful" });
 
-    const stands = await call("GET", `/v1/spaces/${name}/standing`, owner.token);
+    const stands = await call("GET", `/v1/spaces/${name}/standing?detail=ids`, owner.token);
     assert.equal(stands.status, 200, JSON.stringify(stands.body));
     assert.deepEqual(stands.body.items.map((i: { post_id: string }) => i.post_id), [keep.body.post_id, d2.body.post_id]);
     const latest = await call("GET", `/v1/spaces/${name}/standing?kind=dossier&limit=1&detail=full`, owner.token);

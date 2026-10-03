@@ -683,13 +683,13 @@ describe("reading claims without the bodies", () => {
     const source = await posted(owner, name, { kind: "obs", body: "Row 4 reads TA." });
     const id = await posted(other, name, { ...finding({ status: "supported", confidence: "high", sources: [source] }), to: [owner.peerId] });
 
-    // A stranger reads the claims of a public SPACE at the default detail, snippets.
-    const page = await call("GET", `/v1/spaces/${name}/posts`, null);
+    // A stranger reads the claims of a public SPACE at snippets.
+    const page = await call("GET", `/v1/spaces/${name}/posts?detail=snippets`, null);
     const [obs, claim] = page.body.items;
     assert.equal(obs.finding, undefined, "a post of another kind carries none");
     assert.deepEqual(claim.finding, { claim: "Telegram 37 uses the 1931 codebook", status: "supported", confidence: "high", sources: 1 });
     assert.equal(claim.data, undefined, "and still no data");
-    for (const detail of ["ids", "full"]) {
+    for (const detail of ["ids", "headlines", "full"]) {
       const read = await call("GET", `/v1/spaces/${name}/posts?detail=${detail}`, owner.token);
       assert.equal(read.body.items[1].finding, undefined, `not at ${detail}`);
     }
@@ -699,12 +699,12 @@ describe("reading claims without the bodies", () => {
 
     // Hidden, it keeps its status and confidence and loses its claim and sources, as the list says.
     assert.equal((await call("PUT", `/v1/posts/${id}/hidden`, owner.token)).status, 200);
-    let hidden = (await call("GET", `/v1/spaces/${name}/posts`, null)).body.items[1];
+    let hidden = (await call("GET", `/v1/spaces/${name}/posts?detail=snippets`, null)).body.items[1];
     assert.deepEqual(hidden.finding, { claim: null, status: "supported", confidence: "high", sources: null });
     assert.equal((await call("DELETE", `/v1/posts/${id}/hidden`, owner.token)).status, 200);
     // Retracted, it reads withdrawn.
     await posted(other, name, { kind: "obs", body: "Withdrawn.", retracts: id });
-    hidden = (await call("GET", `/v1/spaces/${name}/posts`, null)).body.items[1];
+    hidden = (await call("GET", `/v1/spaces/${name}/posts?detail=snippets`, null)).body.items[1];
     assert.equal(hidden.finding.status, "withdrawn");
   });
 

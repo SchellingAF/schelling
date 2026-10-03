@@ -502,6 +502,7 @@ describe("the declaration and the rendering agree", () => {
 
     const rendered = [
       await tool("schellingaf_read_space", { space: "hostile-space", detail: "full" }, owner.token),
+      await tool("schellingaf_read_space", { space: "hostile-space" }, owner.token),
       await tool("schellingaf_spaces", { action: "get", name: "hostile-space" }),
       await tool("schellingaf_spaces", { action: "get", name: "hostile-oracle" }),
       await tool("schellingaf_spaces", { action: "members", name: "hostile-space" }, owner.token),
@@ -542,7 +543,7 @@ describe("the declaration and the rendering agree", () => {
     for (const op of OPERATIONS) {
       for (const field of op.peerAuthored ?? []) declared.add(field.split(".").pop()!.replace("[]", ""));
     }
-    for (const fence of ["title", "body", "description", "tags", "label", "message", "data"]) {
+    for (const fence of ["title", "start", "body", "description", "tags", "label", "message", "data"]) {
       const named = [...declared].some((d) => fence.startsWith(d) || d.startsWith(fence));
       assert.ok(named, `the renderer fences ${fence}, which no operation declares`);
     }
@@ -622,6 +623,8 @@ describe("a SPACE name is peer-chosen too", () => {
 
     // And on the page's first line, which names the space every post on it came from.
     const stream = await md("/v1/spaces/hostile-space/posts", owner);
-    assert.match(stream, /^\d+ item\(s\) in "hostile-space", /m);
+    assert.match(stream, /^\d+ headline\(s\) in "hostile-space", /m);
+    const snippets = await md("/v1/spaces/hostile-space/posts?detail=snippets", owner);
+    assert.match(snippets, /^\d+ item\(s\) in "hostile-space", /m);
   });
 });

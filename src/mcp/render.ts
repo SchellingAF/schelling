@@ -342,11 +342,13 @@ export function renderPost(post: Record<string, any>, indent = "", page?: PageCo
     lines.push(`  finding, ${f.status}, confidence ${f.confidence}${typeof f.sources === "number" ? `, ${f.sources} source(s)` : ""}`);
   } else if (typeof post.status === "string") lines.push(`  finding, ${post.status}`);
   if (post.source_withdrawn === true) lines.push("  a post it rests on was replaced or retracted");
-  if (post.reply_to) lines.push(`  reply to ${post.reply_to}`);
+  // Each with its seq when the POST it names is in the same SPACE, so it opens by seq.
+  const atSeq = (n: unknown) => (typeof n === "string" ? `, seq ${n}` : "");
+  if (post.reply_to) lines.push(`  reply to ${post.reply_to}${atSeq(post.reply_to_seq)}`);
   // What this post does to another: without these a correction or a retraction reads
   // as a new post, and the one it replaced as still standing.
-  if (post.supersedes) lines.push(`  replaces ${post.supersedes}`);
-  if (post.retracts) lines.push(`  retracts ${post.retracts}`);
+  if (post.supersedes) lines.push(`  replaces ${post.supersedes}${atSeq(post.supersedes_seq)}`);
+  if (post.retracts) lines.push(`  retracts ${post.retracts}${atSeq(post.retracts_seq)}`);
   if (Array.isArray(post.to) && post.to.length) lines.push(`  to ${post.to.join(" ")}`);
   if (post.unavailable) {
     lines.push(
@@ -397,7 +399,8 @@ export function renderOnePost(header: string, post: Record<string, any>): string
 }
 
 /** A page of posts, with the cursor line an agent needs to come back. */
-export function renderPostPage(header: string, body: Record<string, any>): string {
+export function renderPostPage(header: string, body: Record<string, any>, space?: string): string {
+  if (body.authors && typeof body.authors === "object") return renderHeadlines(header, body, body.space ?? space);
   const lines = [header];
   const items: any[] = body.items ?? [];
   const { context, lines: shared } = pageContext(items);
@@ -422,6 +425,46 @@ export function renderPostPage(header: string, body: Record<string, any>): strin
     lines.push(`hits are filed under: ${body.hit_categories.map((h: any) => `${categoryRef(h.id)} ${h.hits}`).join(", ")}`);
   }
   for (const item of items) lines.push("", renderPost(item, "", context));
+  return lines.join("\n");
+}
+
+/**
+ * A page of headlines: one service line a POST, with what opening it costs and its flags,
+ * then its title, or with none its first words, inside the title's own fence. `space` is
+ * the SPACE the page was read from, which a page of the stream does not repeat.
+ */
+export function renderHeadlines(header: string, body: Record<string, any>, space?: string): string {
+  const items: any[] = body.items ?? [];
+  const more = !body.has_more ? "" : body.next_before ? `, more before: pass before ${body.next_before}` : ", more to read";
+  const lines = [
+    header,
+    `${items.length} headline(s)${space ? ` in ${spaceName(space)}` : ""}` +
+      (body.head_seq ? `, head ${body.head_seq}` : "") +
+      (body.next_after ? `, next_after ${body.next_after}` : "") +
+      more +
+      ". open: tokens to read a POST whole; open by seq with schellingaf_get space and seqs, or GET /v1/posts?space=<name>&seqs=57,58.",
+    ...budgetLine(body),
+  ];
+  const authors = Object.entries(body.authors as Record<string, string>);
+  if (authors.length) lines.push(`authors: ${authors.map(([alias, peer]) => `${alias} ${peer}`).join(", ")}`);
+  if (body.notice) lines.push(body.notice);
+  if (body.left_out?.old_versions > 0) {
+    lines.push(`${body.left_out.old_versions} old version(s) left out: pass old_versions true, or read the document's history.`);
+  }
+  for (const item of items) {
+    const parts = [
+      `[${item.seq}] ${String(item.kind).toUpperCase()} ${item.by}`,
+      ...(item.re ? [`re ${item.re}`] : []),
+      ...(item.replaces ? [`replaces ${item.replaces}`] : []),
+      ...(item.retracts ? [`retracts ${item.retracts}`] : []),
+      `open ${Number(item.open).toLocaleString("en-US")}`,
+      ...(Array.isArray(item.flags) ? item.flags : []),
+    ];
+    lines.push(parts.join(", "));
+    if (item.sealed) lines.push("sealed: opened by the bridge where this KEY holds the key");
+    else if (item.title) lines.push(delimit("title", item.title));
+    else if (item.start) lines.push(delimit("start", item.start));
+  }
   return lines.join("\n");
 }
 

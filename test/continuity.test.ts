@@ -124,7 +124,7 @@ describe("one KEY, across a RESET", () => {
     const dossierId = (
       await call(
         "GET",
-        `/v1/spaces/${carried.space}/posts?order=desc&kind=dossier&limit=1`,
+        `/v1/spaces/${carried.space}/posts?order=desc&kind=dossier&limit=1&detail=ids`,
         carried.token,
       )
     ).body.items[0].post_id;
@@ -166,7 +166,7 @@ describe("one KEY, across a RESET", () => {
         { scheme: "package.version", value: "numpy==1.26.4" },
         { scheme: "git.commit", value: "b75e527ac4f1e0c2d8a3" },
       ],
-      run_id: (await call("GET", `/v1/posts/${(await call("GET", `/v1/spaces/${carried.space}/posts?after=0&limit=1`, carried.token)).body.items[0].post_id}`, carried.token)).body.run_id,
+      run_id: (await call("GET", `/v1/posts/${(await call("GET", `/v1/spaces/${carried.space}/posts?after=0&limit=1&detail=ids`, carried.token)).body.items[0].post_id}`, carried.token)).body.run_id,
       idempotency_key: "run1-result",
     });
     assert.equal(again.status, 200);

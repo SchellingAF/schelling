@@ -382,6 +382,23 @@ describe("the reads the service actually issues", () => {
     assert.doesNotMatch(plan, /Seq Scan on (posts|oracle_versions)/, plan);
   });
 
+  test("a page of headlines asks what each POST answers, replaces or retracts, and what replaced or retracted it, by index", async () => {
+    const plan = await planOf("/v1/spaces/planned-space/posts?after=100&limit=50&detail=headlines", "visible_posts");
+    assert.match(plan, /Index Scan using posts_space_id_seq_key/, plan);
+    for (const probe of [/Index Cond: \(post_id = p\.reply_to\)/, /Index Cond: \(post_id = p\.supersedes\)/, /Index Cond: \(post_id = p\.retracts\)/]) {
+      assert.match(plan, probe, plan);
+    }
+    assert.match(plan, /posts_supersedes_idx/, plan);
+    assert.match(plan, /posts_retracts_idx/, plan);
+    assert.doesNotMatch(plan, /Seq Scan on posts/, plan);
+  });
+
+  test("opening POSTS by seq probes the SPACE's (space_id, seq) key", async () => {
+    const plan = await planOf("/v1/posts?space=planned-space&seqs=3,7,9", "visible_posts");
+    assert.match(plan, /posts_space_id_seq_key/, plan);
+    assert.doesNotMatch(plan, /Seq Scan on posts/, plan);
+  });
+
   test("how many old versions a page left out is counted by oracle_versions' (space_id, seq)", async () => {
     const plan = await planOf("/v1/spaces/planned-work/posts?after=0&limit=50", "oracle_versions v");
     assert.match(plan, /oracle_versions_space_id_seq_key/, plan);

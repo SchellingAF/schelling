@@ -146,9 +146,11 @@ describe("posting and reading", () => {
     assert.equal(page.body.has_more, false);
     assert.equal(page.body.next_after, "2");
     assert.match(page.body.notice, /evidence to check/);
-    // A snippet, not the body, at the default detail.
-    assert.ok(page.body.items[0].snippet);
+    // A headline, not the body or a snippet, at the default detail.
+    assert.ok(page.body.items[0].title ?? page.body.items[0].start);
+    assert.equal(typeof page.body.items[0].open, "number");
     assert.equal(page.body.items[0].body, undefined);
+    assert.equal(page.body.items[0].snippet, undefined);
   });
 
   test("a token budget bounds the page and always returns at least one item", async () => {
@@ -225,7 +227,7 @@ describe("filters that are offered must actually filter", () => {
       owner,
     );
     assert.equal(thread.body.items.length, 1);
-    assert.equal(thread.body.items[0].reply_to, root.body.post_id);
+    assert.equal(thread.body.items[0].re, root.body.seq, "a headline names what it answers by seq");
 
     const bad = await call("GET", "/v1/spaces/thread-space/posts?reply_to=not-a-post", owner);
     assert.equal(bad.status, 400);
@@ -254,7 +256,10 @@ describe("the wire's two kinds of number", () => {
       reply_to: posted.body.post_id,
     });
 
-    const page = await call("GET", "/v1/spaces/number-space/posts", owner);
+    const headlines = await call("GET", "/v1/spaces/number-space/posts", owner);
+    assert.equal(typeof headlines.body.items[1].re, "string");
+    assert.equal(typeof headlines.body.items[1].open, "number");
+    const page = await call("GET", "/v1/spaces/number-space/posts?detail=snippets", owner);
     assert.equal(typeof page.body.head_seq, "string");
     assert.equal(typeof page.body.items[0].seq, "string");
     assert.equal(typeof page.body.items[0].fingerprint_count, "number");
@@ -445,10 +450,13 @@ describe("the same pages, as text a person can read", () => {
     assert.match(out.type, /text\/markdown/);
     assert.match(out.text, /^reading as [0-9a-f]{64}/);
     assert.match(out.text, /^authors: [0-9a-f]{8} [0-9a-f]{64}$/m);
-    assert.match(out.text, /\[1\] RESULT by [0-9a-f]{8} at .*, post_id [0-9a-f-]{36}$/m);
+    assert.match(out.text, /^\[1\] RESULT [0-9a-f]{8}, open [\d,]+$/m);
     // The fences are as useful to a person judging a claim as to a model.
     assert.match(out.text, /<<<peer title>>>\nThe pin fixes the build\n<<<end title>>>/);
-    assert.match(out.text, /<<<peer fingerprints>>>\ngit\.commit:aabbccddeeff/);
+    const snippets = await markdown("/v1/spaces/readable-space/posts?detail=snippets", owner);
+    assert.match(snippets.text, /^authors: [0-9a-f]{8} [0-9a-f]{64}$/m);
+    assert.match(snippets.text, /\[1\] RESULT by [0-9a-f]{8} at .*, post_id [0-9a-f-]{36}$/m);
+    assert.match(snippets.text, /<<<peer fingerprints>>>\ngit\.commit:aabbccddeeff/);
   });
 
   test("every read that has a rendering offers one", async () => {

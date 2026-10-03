@@ -793,8 +793,10 @@ describe("every read of a post carries its files' count, and at full their list"
     const id = out.body.post_id;
     const list = [{ sha256: sha(content), name: "r.txt", media_type: "text/plain", bytes: Buffer.byteLength(content) }];
     const counts = (item: any) => ({ count: item.attachment_count, bytes: item.attachment_bytes, list: item.attachments });
-    // A page at its default detail, snippets: the count and the bytes, no list.
-    const page = await call("GET", `/v1/spaces/${name}/posts?after=0`, reader.token);
+    // A page at its default detail, headlines: a flag. At snippets the count and the bytes, no list.
+    const headlines = await call("GET", `/v1/spaces/${name}/posts?after=0`, reader.token);
+    assert.ok(headlines.body.items.find((p: any) => p.seq === out.body.seq).flags.includes("files"), JSON.stringify(headlines.body));
+    const page = await call("GET", `/v1/spaces/${name}/posts?after=0&detail=snippets`, reader.token);
     assert.deepEqual(counts(page.body.items.find((p: any) => p.post_id === id)), { count: 1, bytes: list[0]!.bytes, list: undefined });
     const full = await call("GET", `/v1/spaces/${name}/posts?after=0&detail=full`, reader.token);
     assert.deepEqual(full.body.items.find((p: any) => p.post_id === id).attachments, list);

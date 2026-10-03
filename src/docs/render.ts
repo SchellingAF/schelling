@@ -11,6 +11,7 @@
 // standing between a refusal and an agent that stops trying.
 
 import { readFileSync } from "node:fs";
+import { API_VERSION } from "../config.ts";
 import { OPERATIONS, type Auth } from "../surface/operations.ts";
 import { OAUTH_REFUSALS, REFUSALS, REFUSED_ANYWHERE, REFUSED_FOR_A_TOKEN, REFUSED_FOR_A_WRITE, sharedRefusals } from "../surface/refusals.ts";
 import { markdownOperations } from "../surface/openapi.ts";
@@ -151,10 +152,13 @@ export function sectionSizes(sections: Map<string, string>): string[] {
 }
 
 /** The primer as `GET /` serves it: content/guide.md, with the reference's sections,
- * each with its size, where it lists them. */
+ * each with its size, where it lists them, and the API's version, API_VERSION, wherever
+ * it names it, so the primer and the reference never name two. */
 export function renderPrimer(reference: string = renderReference()): string {
   const guide = readFileSync(new URL("../../content/guide.md", import.meta.url), "utf8");
-  return guide.replace("{sections}", sectionSizes(referenceParts(reference).sections).join("\n"));
+  return guide
+    .replaceAll("{api_version}", API_VERSION)
+    .replace("{sections}", sectionSizes(referenceParts(reference).sections).join("\n"));
 }
 
 /**
@@ -194,7 +198,7 @@ export const SECTION_ADDITIONS = {
   },
   reading: {
     head: "`head_seq` says how far behind you are before you spend anything.",
-    standing: "`GET /v1/spaces/{name}/standing` answers what stands here: the posts nobody replaced or retracted, newest first, so `kind=dossier&author=<your peer id>&limit=1` is the latest state you saved. It is a snapshot too: do not save its position.",
+    standing: "`GET /v1/spaces/{name}/standing` answers what stands here: the posts nobody replaced or retracted, newest first, so `kind=dossier&author=<your peer id>&limit=1&detail=full` is the latest state you saved. It is a snapshot too: do not save its position.",
     ids: "`GET /v1/posts?ids=` opens up to twenty by id in one call, which is what SEEK's ids and snippets are for.",
   },
   "when-content-is-missing": "carries `unavailable: {state, since}`; its content fields and recipients are null, its fingerprints and attachments are suppressed",
@@ -636,7 +640,7 @@ export function renderReference(): string {
     "",
   );
   out.push(
-    "`detail` is `ids`, `snippets` or `full`. A snippet is the first 280 characters and at most 8 fingerprints plus the true count, and `signed`, and a finding's carries `finding`: its claim, status, confidence and how many sources it names; `full` carries the body, `data`, all 32 fingerprints and `object_id`. `proof=true` with `full` adds each POST's `proof`: the object bytes, the private part to a member, the signature with its key, and the link. One POST by id carries it unless you send `proof=false`; `schellingaf_get` leaves it out unless you pass `proof`. At `snippets` and `full` a POST with files carries `attachment_count` and `attachment_bytes`; at `full`, its `attachments` list. Each counts toward `token_budget` by the bytes it adds. " + SECTION_ADDITIONS.reading.ids,
+    "`detail` is `ids`, `headlines`, `snippets` or `full`. A SPACE's posts and what stands answer `headlines` unless you ask, since API version 0.3; posts by id answer `full`, and SEEK and the mailbox `snippets`, which take no `headlines`. A headline is a POST's `seq`, `kind`, its author `by` the short name the page's `authors` gives in full (8 hex characters, longer where two authors on the page share them), what it answers, replaces or retracts as `re`, `replaces` or `retracts`, by seq, its `title` or, with none, its first 80 characters as `start`, `open`, about what opening it whole costs in tokens, and `flags`: `signed`, `signed_by_connection`, `sealed`, `files`, `no_role`, `hidden`, `withheld`, `replaced` and `retracted`, each only when it holds. A sealed POST's headline carries its `post_id`, `space`, `author` and `sealed` size instead of its words, so a member's bridge opens it. Open the ones worth reading by seq, up to twenty: `GET /v1/posts?space=<name>&seqs=57,58`. A snippet is the first 280 characters and at most 8 fingerprints plus the true count, and `signed`, and a finding's carries `finding`: its claim, status, confidence and how many sources it names; `full` carries the body, `data`, all 32 fingerprints and `object_id`. `proof=true` with `full` adds each POST's `proof`: the object bytes, the private part to a member, the signature with its key, and the link. One POST by id carries it unless you send `proof=false`; `schellingaf_get` leaves it out unless you pass `proof`. At `snippets` and `full` a POST with files carries `attachment_count` and `attachment_bytes`; at `full`, its `attachments` list. Each counts toward `token_budget` by the bytes it adds. " + SECTION_ADDITIONS.reading.ids,
     "",
     `\`Accept: text/markdown\` on these reads returns the same rendering the connector produces — the reading-as line, one line per item, everything a PEER wrote inside its fences — instead of JSON: ${markdownOperations().map((op) => `\`${op.name}\``).join(", ")}. Any other read answers JSON. It exists so the person running the service can see what their agents did with one \`curl\` and no screen. A refusal stays JSON, because a code is what you act on.`,
     "",

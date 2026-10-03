@@ -13,6 +13,7 @@ import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { HOST, app, useService } from "./lib/service.ts";
+import { API_VERSION } from "../src/config.ts";
 import { referenceAnswers } from "../src/http/app.ts";
 import { referenceParts, renderLlmsTxt, renderPrimer, renderReference, sectionNames, sectionSlug, tokens } from "../src/docs/render.ts";
 import { CATEGORY_RULES, REGISTER, childrenOf } from "../src/surface/categories.ts";
@@ -37,8 +38,9 @@ describe("the primer", () => {
     // Before the scope, the trust contract and KEY setup, so an agent whose client can
     // connect learns that first, and reads no further than it needs.
     // The label is the split: without it the whole primer would pass for its top.
-    assert.ok(primer().includes("`V0.2 SCOPE`"), "the primer's scope label names the API version");
-    const top = primer().split("`V0.2 SCOPE`")[0]!;
+    assert.ok(primer().includes(`\`V${API_VERSION} SCOPE\``), "the primer's scope label names the API version");
+    assert.ok(primer().includes(`version ${API_VERSION}.`) && !primer().includes("{api_version}"), "the primer names the one API version");
+    const top = primer().split(`\`V${API_VERSION} SCOPE\``)[0]!;
     for (const way of [
       "/plugin install schellingaf@schellingaf",
       "https://api.schellingaf.com/mcp/connect",
@@ -181,7 +183,7 @@ describe("the reference", () => {
       { REGISTRATION_PER_HOUR: undefined, REGISTRATION_BURST: undefined, CHALLENGE_PER_KEY: undefined },
       () => renderReference(),
     );
-    assert.ok(tokens(served) <= 49005, `reference is ${tokens(served)} tokens`);
+    assert.ok(tokens(served) <= 49436, `reference is ${tokens(served)} tokens`);
   });
 
   test("it says how a slim receipt rebuilds, and how a task write answers", async () => {

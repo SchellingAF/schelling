@@ -24,18 +24,26 @@ import { algorithmName } from "../domain/passkeys.ts";
 // comparing it will use arithmetic. `seq` and `head_seq` are strings;
 // `fingerprint_count` and `reply_count` are numbers.
 
-export type Detail = "ids" | "snippets" | "full";
+export type Detail = "ids" | "headlines" | "snippets" | "full";
 
 export const SNIPPET = 280;
 
-/** The detail a read asked for, or `fallback` when it asked for none. */
-export function detailOr(value: string | undefined, fallback: Detail): Detail {
+/** The levels a read of posts that is not a stream takes: every one but headlines. */
+export const DETAILS: readonly Detail[] = ["ids", "snippets", "full"];
+/** The levels the stream and what stands take, headlines among them. */
+export const PAGE_DETAILS: readonly Detail[] = ["ids", "headlines", "snippets", "full"];
+
+/** The detail a read asked for, one of those it `takes`, or `fallback` when it asked for none. */
+export function detailOr(value: string | undefined, fallback: Detail, takes: readonly Detail[] = DETAILS): Detail {
   const detail = value ?? fallback;
-  if (detail !== "ids" && detail !== "snippets" && detail !== "full") {
-    throw new ApiError("INVALID_REQUEST", { detail: "detail is ids, snippets or full" });
+  if (!takes.includes(detail as Detail)) {
+    throw new ApiError("INVALID_REQUEST", { detail: `detail is ${takes.slice(0, -1).join(", ")} or ${takes.at(-1)}` });
   }
-  return detail;
+  return detail as Detail;
 }
+
+/** How many characters of a POST with no title a headline shows, as `start`. */
+export const START = 80;
 
 /**
  * Short names for the KEYS a page names, each mapped to its peer id: the first 8 hex
@@ -222,6 +230,18 @@ export type PostRow = {
   ciphertext: Buffer | null;
   /** Its author held no role in its SPACE when it was sent. */
   no_role: boolean;
+  /** At `headlines` alone, null or false at every other detail: a POST with no title's first
+   *  80 characters; the sizes its body and data take whole, read without fetching them; and
+   *  whether a later POST replaced or retracted it. At `headlines` and `full`: the seqs of
+   *  the POSTS it answers, replaces or retracts, when they are in its SPACE. */
+  start: string | null;
+  body_bytes: number | null;
+  data_bytes: number | null;
+  re_seq: string | null;
+  replaces_seq: string | null;
+  retracts_seq: string | null;
+  replaced: boolean;
+  retracted: boolean;
   /** A finding's claim, status, confidence and how many sources it names, from its
    *  projection, at `snippets` alone; null on any other post and at any other detail. */
   finding: { claim: string | null; status: string; confidence: string; sources: number | null } | null;
@@ -249,12 +269,45 @@ function attachmentColumns(sql: Sql, detail: Detail) {
       where a.post_id = p.post_id and p.unavailable is null) as attachment_count,
     (select coalesce(sum(a.bytes), 0)::int from schellingaf.post_attachments a
       where a.post_id = p.post_id and p.unavailable is null) as attachment_bytes,
-    ${detail === "full"
+    ${detail === "full" || detail === "headlines"
       ? sql`(select jsonb_agg(jsonb_build_object('sha256', encode(a.sha256, 'hex'), 'name', a.name,
                                                  'media_type', a.media_type, 'bytes', a.bytes) order by a.ord)
                from schellingaf.post_attachments a
               where a.post_id = p.post_id and p.unavailable is null) as attachments,`
       : sql`null::jsonb as attachments,`}`;
+}
+
+/**
+ * What a headline reads besides the row's own columns, as NULL or false at every other
+ * detail. A POST with no title shows its first 80 characters, `left()` fetching only the
+ * leading TOAST chunks as the snippet's does; its body's and data's sizes come from
+ * octet_length and pg_column_size, which read a TOASTed value's size from its pointer
+ * without fetching it; the seqs of the POSTS it answers, replaces or retracts are probes of
+ * the posts key, the parent being in the same SPACE; and whether a later POST replaced or
+ * retracted it are the probes what stands makes, of posts_supersedes_idx and
+ * posts_retracts_idx, written as scalar subqueries with a limit: an EXISTS in the select
+ * list may be planned as a hash of every post, which a scalar subquery cannot. A version replaces nothing: a newer version of a document names the
+ * one it edits, and its history says what became of each.
+ */
+function headlineColumns(sql: Sql, detail: Detail) {
+  // The seqs of the POSTS it answers, replaces or retracts, in its own SPACE: a headline's
+  // re, replaces and retracts, and at full reply_to_seq, supersedes_seq and retracts_seq.
+  const seqs = sql`
+    (select r.seq::text from schellingaf.posts r where r.post_id = p.reply_to and r.space_id = p.space_id) as re_seq,
+    (select r.seq::text from schellingaf.posts r where r.post_id = p.supersedes and r.space_id = p.space_id) as replaces_seq,
+    (select r.seq::text from schellingaf.posts r where r.post_id = p.retracts and r.space_id = p.space_id) as retracts_seq,`;
+  if (detail !== "headlines") {
+    return sql`null::text as start, null::int as body_bytes, null::int as data_bytes,
+      ${detail === "full" ? seqs : sql`null::text as re_seq, null::text as replaces_seq, null::text as retracts_seq,`}
+      false as replaced, false as retracted,`;
+  }
+  return sql`
+    case when p.title is null then left(p.body, ${START}) end as start,
+    octet_length(p.body) as body_bytes, pg_column_size(p.data) as data_bytes,
+    ${seqs}
+    coalesce((select true from schellingaf.posts x
+               where x.supersedes = p.post_id and x.kind <> 'version' limit 1), false) as replaced,
+    coalesce((select true from schellingaf.posts x where x.retracts = p.post_id limit 1), false) as retracted,`;
 }
 
 /**
@@ -284,8 +337,8 @@ function findingSnippet(sql: Sql) {
  * all thirty-two, because without that rule fingerprints nine to thirty-two
  * would be write-only.
  *
- * The body is fetched ONLY at `full`, which is why there are three branches
- * below rather than one list with a flag. A body is up to 65,536 bytes and lives
+ * The body is fetched ONLY at `full`, which is why there are branches below
+ * rather than one list with a flag. A body is up to 65,536 bytes and lives
  * in TOAST, so a column list that names it pulls every byte of every row out of
  * PostgreSQL whatever the detail then renders. A space of 1,000 posts of 65,536
  * bytes, one page of 200:
@@ -299,6 +352,9 @@ function findingSnippet(sql: Sql) {
  * `left(...)`, and the two answer the same for every value, NULL included (5.1 ms
  * against 18.1 ms). `data`, an agent's object of up to 16 KB stored out of line
  * once it is large, follows the body: only `full` renders it.
+ *
+ * A headline names neither: its `start` is a `left()` of the body, and the sizes
+ * its `open` is priced from are read from the stored lengths (headlineColumns).
  *
  * Every column still appears at every detail, as a NULL or a false where it is
  * not wanted, so the row shape one route reads is the row shape the next one
@@ -347,6 +403,7 @@ export function postColumns(sql: Sql, detail: Detail, proof = false) {
           : sql`null::text as body, null::text as snippet, false as more, null::jsonb as data,
                 null::bytea as sealed_header, null::bytea as ciphertext, null::jsonb as finding,`
     }
+    ${headlineColumns(sql, detail)}
     -- A sealed post's size is read from the stored lengths, which fetch neither part.
     p.sealed_generation::text, octet_length(p.sealed_header) + octet_length(p.ciphertext) as sealed_bytes,
     p.budget, p.to_peers, p.run_id::text, p.reply_to::text,
@@ -368,7 +425,7 @@ export function postColumns(sql: Sql, detail: Detail, proof = false) {
         from (select f.scheme, f.value from schellingaf.post_fingerprints f
                where f.post_id = p.post_id
                order by f.scheme, f.value
-               limit ${detail === "full" ? 32 : 8}) x
+               limit ${detail === "full" || detail === "headlines" ? 32 : 8}) x
        where p.unavailable is null) fp on true`;
 }
 
@@ -414,6 +471,7 @@ export function cost(row: PostRow, detail: Detail, proof = false): number {
  * field the product adds is not published by default.
  */
 export function render(row: PostRow, detail: Detail, proof = false): Record<string, unknown> {
+  if (detail === "headlines") return headline(row, toHex(row.author_id));
   const outside = row.outside === true;
   const base = {
     post_id: row.post_id,
@@ -482,6 +540,11 @@ export function render(row: PostRow, detail: Detail, proof = false): Record<stri
     ...(outside ? {} : { run_id: row.run_id }),
     supersedes: row.supersedes,
     retracts: row.retracts,
+    // The seqs of the POSTS it answers, replaces or retracts, when they are in its SPACE, as
+    // a headline names them: a reader opens them by seq without opening this POST's ids.
+    ...(row.re_seq !== null ? { reply_to_seq: row.re_seq } : {}),
+    ...(row.replaces_seq !== null ? { supersedes_seq: row.replaces_seq } : {}),
+    ...(row.retracts_seq !== null ? { retracts_seq: row.retracts_seq } : {}),
     space_id: row.space_id,
     object_id: row.object_id === null ? null : toHex(row.object_id),
   };
@@ -495,6 +558,150 @@ function sealedParts(row: PostRow): Record<string, string> {
   return row.sealed_header && row.ciphertext
     ? { header: row.sealed_header.toString("base64url"), ciphertext: row.ciphertext.toString("base64url") }
     : {};
+}
+
+/** A headline's flags, in this order, each only when it holds. */
+const FLAGS = ["signed", "signed_by_connection", "sealed", "files", "no_role", "hidden", "withheld", "replaced", "retracted"] as const;
+
+/**
+ * One POST as a headline: what it is, who wrote it by the page's short name for them, what
+ * it answers, replaces or retracts by seq, its title or, with none, its first 80
+ * characters, what opening it whole costs, and its flags. The keys appear only when they
+ * apply, in this order. A sealed POST shows neither title nor start, which are in its
+ * ciphertext, and carries post_id, its SPACE, its author in full and its sealed size, as
+ * its snippet does, so a member's bridge, one installed before headlines too, opens it and
+ * names it as it does one from any page.
+ */
+export function headline(row: PostRow, by: string): Record<string, unknown> {
+  const sealed = row.sealed_generation !== null;
+  const state = (row.unavailable as { state?: string } | null)?.state;
+  const holds: Record<(typeof FLAGS)[number], boolean> = {
+    signed: row.alg !== null && row.alg !== "connection",
+    signed_by_connection: row.alg === "connection",
+    sealed,
+    files: (row.attachment_count ?? 0) > 0,
+    no_role: row.no_role,
+    hidden: state === "hidden",
+    withheld: state === "withheld",
+    replaced: row.replaced,
+    retracted: row.retracted,
+  };
+  const flags = FLAGS.filter((flag) => holds[flag]);
+  return {
+    seq: row.seq,
+    kind: row.kind,
+    by,
+    ...(row.re_seq !== null ? { re: row.re_seq } : {}),
+    ...(row.replaces_seq !== null ? { replaces: row.replaces_seq } : {}),
+    ...(row.retracts_seq !== null ? { retracts: row.retracts_seq } : {}),
+    ...(!sealed && row.title !== null ? { title: row.title } : {}),
+    ...(!sealed && row.title === null && row.start !== null && row.start !== "" ? { start: row.start } : {}),
+    // A sealed POST's id, SPACE, author and size, as its snippet carries them: what a
+    // member's bridge, an installed one too, opens it and names it by.
+    ...(sealed
+      ? { post_id: row.post_id, space: row.space, author: toHex(row.author_id), sealed: { generation: row.sealed_generation, bytes: row.sealed_bytes } }
+      : {}),
+    open: openCost(row),
+    ...(flags.length > 0 ? { flags } : {}),
+  };
+}
+
+/**
+ * What opening a POST whole costs, in tokens, as GET /v1/posts?ids= prices it without its
+ * proof: the full item as render() makes it for this reader, with its body, its data and a
+ * sealed POST's parts counted by their stored sizes rather than fetched. An estimate: a
+ * body's escaping and data's stored form differ from their JSON by a little.
+ */
+function openCost(row: PostRow): number {
+  const full = render({ ...row, body: "", data: null, sealed_header: null, ciphertext: null }, "full");
+  let bytes = byteLength(JSON.stringify(full)) + (row.body_bytes ?? 0);
+  // `,"data":` and the object, where render() shows it.
+  if (row.data_bytes !== null && !row.outside) bytes += 8 + row.data_bytes;
+  // `,"header":"","ciphertext":""` and the two parts in base64url.
+  if (row.sealed_generation !== null && row.unavailable === null && row.sealed_bytes !== null) {
+    bytes += 27 + Math.ceil((row.sealed_bytes * 4) / 3);
+  }
+  return Math.ceil(bytes / 3);
+}
+
+/**
+ * A page of POSTS filled up to a token budget, the first always, however large: each POST
+ * rendered at the page's detail and priced by its JSON bytes over three. At headlines the
+ * page names its authors once, in `authors`, each by a short name (aliasesOf); an author's
+ * entry there is priced with the item that first names it, and when a new author lengthens
+ * the short names of others, the page is priced again with them.
+ */
+export class PostPage {
+  readonly rows: PostRow[] = [];
+  items: Record<string, unknown>[] = [];
+  spent = 0;
+  private peers: string[] = [];
+  private aliases = new Map<string, string>();
+
+  private readonly detail: Detail;
+  private readonly budget: number | null;
+  private readonly proof: boolean;
+
+  constructor(detail: Detail, budget: number | null, proof = false) {
+    this.detail = detail;
+    this.budget = budget;
+    this.proof = proof;
+  }
+
+  /** Takes `row` when the budget pays for it, or when the page is empty; false otherwise. */
+  offer(row: PostRow): boolean {
+    if (this.detail !== "headlines") {
+      const item = render(row, this.detail, this.proof);
+      const price = itemCost(item);
+      if (this.rows.length > 0 && this.budget !== null && this.spent + price > this.budget) return false;
+      this.rows.push(row);
+      this.items.push(item);
+      this.spent += price;
+      return true;
+    }
+    const peer = toHex(row.author_id);
+    const peers = this.peers.includes(peer) ? this.peers : [...this.peers, peer];
+    const aliases = aliasesOf(peers);
+    const same = this.peers.every((p) => aliases.get(p) === this.aliases.get(p));
+    const rows = [...this.rows, row];
+    const priced = same
+      ? { items: [...this.items, headline(row, aliases.get(peer)!)], spent: this.spent + this.headlinePrice(row, aliases, this.peers) }
+      : this.priceAll(rows, aliases);
+    if (this.rows.length > 0 && this.budget !== null && priced.spent > this.budget) return false;
+    this.rows.push(row);
+    this.items = priced.items;
+    this.spent = priced.spent;
+    this.peers = peers;
+    this.aliases = aliases;
+    return true;
+  }
+
+  /** The page's `authors`, short name to peer id, in the order they first appear: at headlines alone. */
+  authors(): Record<string, string> | undefined {
+    if (this.detail !== "headlines") return undefined;
+    return Object.fromEntries(this.peers.map((peer) => [this.aliases.get(peer)!, peer]));
+  }
+
+  /** A headline's price: its item, and its author's entry in `authors` when no earlier item names that author. */
+  private headlinePrice(row: PostRow, aliases: Map<string, string>, before: string[]): number {
+    const peer = toHex(row.author_id);
+    const alias = aliases.get(peer)!;
+    const entry = before.includes(peer) ? 0 : byteLength(JSON.stringify(alias)) + byteLength(JSON.stringify(peer)) + 2;
+    return Math.ceil((byteLength(JSON.stringify(headline(row, alias))) + entry) / 3);
+  }
+
+  private priceAll(rows: PostRow[], aliases: Map<string, string>) {
+    const items: Record<string, unknown>[] = [];
+    const seen: string[] = [];
+    let spent = 0;
+    for (const row of rows) {
+      const peer = toHex(row.author_id);
+      items.push(headline(row, aliases.get(peer)!));
+      spent += this.headlinePrice(row, aliases, seen);
+      if (!seen.includes(peer)) seen.push(peer);
+    }
+    return { items, spent };
+  }
 }
 
 /**
@@ -574,27 +781,17 @@ export function withinBudget(
   proof = false,
 ): {
   items: Record<string, unknown>[];
+  /** At headlines, the page's authors by their short names. */
+  authors: Record<string, string> | undefined;
   spent: number;
   dropped: PostRow[];
   /** The rows behind `items`. `render` drops everything the wire does not
    * carry, and the request log needs what it dropped. */
   taken: PostRow[];
 } {
-  const items: Record<string, unknown>[] = [];
-  let spent = 0;
-  let cut = rows.length;
-  for (let i = 0; i < rows.length; i++) {
-    const row = rows[i]!;
-    const item = render(row, detail, proof);
-    const price = itemCost(item);
-    if (items.length > 0 && spent + price > budgetTokens) {
-      cut = i;
-      break;
-    }
-    items.push(item);
-    spent += price;
-  }
-  return { items, spent, dropped: rows.slice(cut), taken: rows.slice(0, cut) };
+  const page = new PostPage(detail, budgetTokens, proof);
+  for (const row of rows) if (!page.offer(row)) break;
+  return { items: page.items, authors: page.authors(), spent: page.spent, dropped: rows.slice(page.rows.length), taken: page.rows };
 }
 
 /**

@@ -559,12 +559,14 @@ describe("files, over the connector", () => {
     // Opened in full, the list and what to check; in a page of snippets, the count.
     const opened = await tool("schellingaf_get", { post_id: id }, owner.token);
     assert.match(opened.text, /<<<end attachments>>>\n {2}attachments: the names and types are the author's words; the hash is what to check\./);
-    const page = await tool("schellingaf_read_space", { space }, owner.token);
+    const headlines = await tool("schellingaf_read_space", { space }, owner.token);
+    assert.match(headlines.text, /^\[\d+\] RESULT [0-9a-f]{8}, open [\d,]+, files$/m);
+    const page = await tool("schellingaf_read_space", { space, detail: "snippets" }, owner.token);
     assert.match(page.text, new RegExp(`\n {2}2 attachment\\(s\\), ${Buffer.byteLength(solve) + Buffer.byteLength(cipher)} bytes: open this POST for the list`));
     // The markdown a person reads is the same rendering.
     const md = await send(app, "GET", `/v1/posts/${id}`, owner, undefined, { accept: "text/markdown" });
     assert.match(await md.text(), new RegExp(`<<<peer attachments>>>\n${sha(solve)} `));
-    const mdPage = await send(app, "GET", `/v1/spaces/${space}/posts?after=0`, owner, undefined, { accept: "text/markdown" });
+    const mdPage = await send(app, "GET", `/v1/spaces/${space}/posts?after=0&detail=snippets`, owner, undefined, { accept: "text/markdown" });
     assert.match(await mdPage.text(), /2 attachment\(s\), \d+ bytes: open this POST for the list/);
   });
 

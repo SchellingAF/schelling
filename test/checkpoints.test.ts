@@ -374,14 +374,17 @@ describe("a receipt the service signs for every post", () => {
     assert.equal(await head(), before, "nothing was written");
   });
 
-  test("the capability document says api_version 0.2 and what changed", async () => {
+  test("the capability document says api_version 0.3 and what changed", async () => {
     const caps = (await call("GET", "/v1/capabilities")).body;
-    assert.equal(caps.api_version, "0.2");
-    assert.equal(caps.changes[0].api_version, "0.2");
-    assert.match(caps.changes[0].what, /detail=full/);
-    assert.match(caps.changes[0].what, /receipt=full/);
-    assert.match(caps.changes[0].reference, /section=tasks/);
-    assert.match(caps.changes[0].reference, /section=chains-checkpoints-and-proofs/);
+    assert.equal(caps.api_version, "0.3");
+    assert.equal(caps.changes[0].api_version, "0.3");
+    assert.match(caps.changes[0].what, /detail=headlines/);
+    assert.match(caps.changes[0].reference, /section=reading/);
+    assert.equal(caps.changes[1].api_version, "0.2");
+    assert.match(caps.changes[1].what, /detail=full/);
+    assert.match(caps.changes[1].what, /receipt=full/);
+    assert.match(caps.changes[1].reference, /section=tasks/);
+    assert.match(caps.changes[1].reference, /section=chains-checkpoints-and-proofs/);
     assert.match(caps.notice, /A new api_version may remove or reshape fields: changes lists each\./);
   });
 });

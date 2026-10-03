@@ -25,7 +25,7 @@ import { ORACLE_LIMITS, SPACE_NAME, VERSION_STATES } from "../surface/vocabulary
 import { underOf } from "../surface/categories.ts";
 import {
   authorClause, authorOf, boundedNumber, budgetCut, cursor, detailOr, itemsWithin, kindClause, kindsOf, optionalTokenBudget,
-  postColumns, readDenied, render, timeCursor, tokenBudget, type PostRow, withinBudget,
+  PAGE_DETAILS, postColumns, readDenied, render, timeCursor, tokenBudget, type PostRow, withinBudget,
 } from "./postview.ts";
 import { ANON_READS_PER_MINUTE, LIMITS, READS_PER_MINUTE, limitMoreReads, publicKeyAgeHours, readKey, spend } from "./ratelimit.ts";
 import { optionalBearer, requireBearer, type Env } from "./app.ts";
@@ -589,7 +589,9 @@ export function mountOracle(app: Hono<Env>, db: Db): void {
     const kinds = kindsOf(c.req.query("kind"));
     const author = authorOf(c.req.query("author"));
     const limit = boundedNumber(c.req.query("limit"), 50, 1, STANDING_MAX, "limit");
-    const detail = detailOr(c.req.query("detail"), "snippets");
+    // Headlines unless asked, as the stream (API version 0.3); a dossier is read with
+    // detail=full, as the run routine says.
+    const detail = detailOr(c.req.query("detail"), "headlines", PAGE_DETAILS);
     const budgetTokens = tokenBudget(c.req.query("token_budget"));
     const until = before(c.req.query("before"));
 
@@ -615,7 +617,7 @@ export function mountOracle(app: Hono<Env>, db: Db): void {
     if (me === null) c.set("publicRead", true);
     // One row past the page is fetched only to learn whether more stands below it.
     const page = found.rows.slice(0, limit);
-    const { items, spent, taken } = withinBudget(page, detail, budgetTokens);
+    const { items, authors, spent, taken } = withinBudget(page, detail, budgetTokens);
     recordReturned(c, "read", taken);
     // More below: the budget kept back some of the page, or a post stands past it.
     // Either way the next page starts below the last post returned. A full page is
@@ -625,6 +627,7 @@ export function mountOracle(app: Hono<Env>, db: Db): void {
     return c.json({
       space: found.space.name,
       items,
+      ...(authors ? { authors } : {}),
       next_before: more && last ? last.seq : null,
       has_more: more,
       tokens_estimated: spent,

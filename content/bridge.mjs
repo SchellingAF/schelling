@@ -1568,18 +1568,18 @@ async function openAnswer(m) {
   const lines = [];
   for (const { kind, item } of found) {
     try {
-      const content = kind === "post"
-        ? await openPost(posts.get(item.post_id) ?? refuse("the post's sealed parts could not be read"))
-        : await openMessage(item);
+      const full = kind === "post" ? posts.get(item.post_id) ?? refuse("the post's sealed parts could not be read") : null;
+      const content = full ? await openPost(full) : await openMessage(item);
       item.opened = content;
-      lines.push(renderOpened(kind, item, content));
+      // Named from the post read whole, which a headline may not repeat.
+      lines.push(renderOpened(kind, full ? { ...item, author: full.author, space: full.space } : item, content));
     } catch (error) {
       item.opened = null;
       item.open_error = error.message;
       lines.push(`${kind} ${item.post_id ?? item.message_id}: not opened here: ${error.message}`);
     }
   }
-  const notes = [...new Set(found.filter((f) => f.kind === "post").map((f) => f.item.space))].map(firstNote).filter(Boolean);
+  const notes = [...new Set(found.filter((f) => f.kind === "post").map((f) => posts.get(f.item.post_id)?.space ?? f.item.space))].filter(Boolean).map(firstNote).filter(Boolean);
   m.result.content = [
     ...(m.result.content ?? []),
     {

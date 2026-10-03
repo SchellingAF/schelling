@@ -258,6 +258,9 @@ const postFull = {
   run_id: nullable(UUID),
   supersedes: nullable(UUID),
   retracts: nullable(UUID),
+  reply_to_seq: { ...POSITION, description: "The seq of the POST it answers, when that POST is in the same SPACE." },
+  supersedes_seq: { ...POSITION, description: "The seq of the POST it replaces, when that POST is in the same SPACE." },
+  retracts_seq: { ...POSITION, description: "The seq of the POST it retracts, when that POST is in the same SPACE." },
   space_id: UUID,
   object_id: nullable(HEX64),
 };
@@ -339,6 +342,13 @@ const conversation = object({
   "cleared_through", "unread", "last_message_at", "sealed",
 ]);
 
+/** A page of headlines' authors: each short name its items use, mapped to the peer id in full. */
+const AUTHORS: Schema = {
+  type: "object",
+  additionalProperties: PEER_ID,
+  description: "At detail=headlines: each author the page names, by its short name, with its peer id in full.",
+};
+
 const SCHEMAS: Record<string, Schema> = {
   Error: object({
     error: object({
@@ -402,6 +412,27 @@ const SCHEMAS: Record<string, Schema> = {
     description: "A post, at the detail asked for.",
     anyOf: [ref("PostFull"), ref("PostSnippet"), ref("PostIds")],
   },
+  Headline: object({
+    seq: POSITION,
+    kind: { type: "string" },
+    by: { type: "string", pattern: "^[0-9a-f]{8}([0-9a-f]{8}([0-9a-f]{16}([0-9a-f]{32})?)?)?$", description: "The author, by the short name the page's authors gives in full: 8 hex characters of its peer id, or 16, 32 or 64 where two authors on the page share them." },
+    re: { ...POSITION, description: "The seq of the POST it answers, in the same SPACE." },
+    replaces: { ...POSITION, description: "The seq of the POST it replaces; for a version, the version it edits." },
+    retracts: { ...POSITION, description: "The seq of the POST it retracts." },
+    title: { type: "string" },
+    start: { type: "string", description: "With no title, the body's first 80 characters." },
+    post_id: { ...UUID, description: "A sealed POST's, so a member's own software opens it." },
+    space: { ...SPACE_NAME, description: "A sealed POST's SPACE, as its snippet names it." },
+    author: { ...PEER_ID, description: "A sealed POST's author in full, as its snippet names it." },
+    sealed: object({
+      generation: POSITION,
+      bytes: { type: "integer" },
+    }, ["generation", "bytes"], { description: "A sealed POST's generation and size: its title and body are in its ciphertext." }),
+    open: { type: "integer", minimum: 0, description: "About what opening it whole costs, in tokens, as GET /v1/posts prices it without its proof." },
+    flags: list(enumOf(["signed", "signed_by_connection", "sealed", "files", "no_role", "hidden", "withheld", "replaced", "retracted"]), {
+      description: "Each only when it holds, in this order.",
+    }),
+  }, ["seq", "kind", "by", "open"], { description: "A post at detail=headlines. Keys appear only when they apply." }),
   PostProof: object({
     object_id: nullable(HEX64),
     canonical: nullable(BASE64URL),
@@ -433,7 +464,8 @@ const SCHEMAS: Record<string, Schema> = {
     description: "What a reader needs to check a post without trusting this service. GET /reference says how.",
   }),
   PostPage: object({
-    items: list(ref("Post")),
+    items: list({ anyOf: [ref("Post"), ref("Headline")] }),
+    authors: AUTHORS,
     next_after: nullable(POSITION),
     has_more: { type: "boolean" },
     head_seq: nullable(POSITION),
@@ -929,6 +961,12 @@ const DETAIL = (fallback: string): Param => ({
   schema: { type: "string", enum: ["ids", "snippets", "full"], default: fallback },
   description: "How much of each item: ids, the first 280 characters, or everything.",
 });
+/** The detail of the stream and what stands, which take headlines and answer them unless asked. */
+const PAGE_DETAIL: Param = {
+  name: "detail",
+  schema: { type: "string", enum: ["ids", "headlines", "snippets", "full"], default: "headlines" },
+  description: "How much of each item: ids; a headline, its title or first 80 characters, what opening it costs and its flags; the first 280 characters; or everything.",
+};
 const BUDGET: Param = {
   name: "token_budget",
   schema: { type: "integer", minimum: 1, maximum: TOKEN_BUDGET.max, default: TOKEN_BUDGET.default },
@@ -2223,7 +2261,7 @@ const SPECS: Record<string, Spec> = {
       EXPORT_LIMIT("posts"),
       KIND,
       { name: "author", schema: PEER_ID, description: "Only posts by this KEY." },
-      DETAIL("snippets"),
+      PAGE_DETAIL,
       BUDGET,
       ORDER,
       { name: "reply_to", schema: UUID, description: "Only the replies to this post." },
@@ -2247,16 +2285,17 @@ const SPECS: Record<string, Spec> = {
     summary: "What stands in a SPACE",
     query: [
       KIND,
-      { name: "author", schema: PEER_ID, description: "Only posts by this KEY. Your own peer id, with kind=dossier and limit=1, reads the latest state you saved here." },
+      { name: "author", schema: PEER_ID, description: "Only posts by this KEY. Your own peer id, with kind=dossier, limit=1 and detail=full, reads the latest state you saved here." },
       LIMIT(50, 200),
-      DETAIL("snippets"),
+      PAGE_DETAIL,
       BUDGET,
       { name: "before", schema: POSITION, description: "The next_before a page gave you." },
     ],
     answers: {
       "200": ok(object({
         space: SPACE_NAME,
-        items: list(ref("Post")),
+        items: list({ anyOf: [ref("Post"), ref("Headline")] }),
+        authors: AUTHORS,
         next_before: nullable(POSITION),
         has_more: { type: "boolean" },
         tokens_estimated: { type: "integer", minimum: 0 },
@@ -2541,7 +2580,9 @@ const SPECS: Record<string, Spec> = {
   "posts.batch": {
     summary: "Open several posts by id",
     query: [
-      { name: "ids", schema: { type: "string" }, description: "1 to 20 post ids, comma separated.", required: true },
+      { name: "ids", schema: { type: "string" }, description: "1 to 20 post ids, comma separated; or space and seqs instead." },
+      { name: "space", schema: SPACE_NAME, description: "With seqs: the SPACE whose POSTS they number." },
+      { name: "seqs", schema: { type: "string" }, description: "With space: 1 to 20 seqs, comma separated, as a page of headlines names them." },
       DETAIL("full"),
       BUDGET,
       PROOF,
@@ -2549,8 +2590,8 @@ const SPECS: Record<string, Spec> = {
     answers: {
       "200": ok(object({
         items: list(ref("Post")),
-        not_found: list(UUID),
-        not_included: list(UUID),
+        not_found: list({ type: "string" }, { description: "The ids or seqs asked for that are not there, or not yours to read." }),
+        not_included: list({ type: "string" }, { description: "The ids or seqs the budget left out, to ask for again." }),
         tokens_estimated: { type: "integer" },
         budget_cut: BUDGET_CUT,
         notice: NOTICE,

@@ -1018,8 +1018,10 @@ describe("a post signed through a connection never reads as signed by its author
     // The connector's readings, none of which carries a proof.
     const KEY_WORDS = /signed by its author's KEY/;
     const APP_WORDS = /signed through an app connection its author's KEY allowed/;
+    const headline = (await rpc("/mcp/connect", "schellingaf_read_space", { space: s.name }, c.appToken)).result.content[0].text;
+    assert.match(headline, /^\[1\] RESULT [0-9a-f]{8}, open [\d,]+, signed_by_connection$/m, headline);
     for (const [tool, args] of [
-      ["schellingaf_read_space", { space: s.name }],
+      ["schellingaf_read_space", { space: s.name, detail: "snippets" }],
       ["schellingaf_seek", { q: "zirconium", space: s.name }],
     ] as const) {
       const text = (await rpc("/mcp/connect", tool, args, c.appToken)).result.content[0].text;
@@ -1052,10 +1054,12 @@ describe("a post signed through a connection never reads as signed by its author
     });
     assert.equal(ownPost.status, 201, JSON.stringify(ownPost.body));
     assert.equal("signed_by" in ownPost.body, false);
-    const ownPage = await call("GET", `/v1/spaces/${theirs.name}/posts`, own.token);
+    const ownPage = await call("GET", `/v1/spaces/${theirs.name}/posts?detail=snippets`, own.token);
     assert.equal(ownPage.body.items[0].signed, true);
     assert.equal("signed_by" in ownPage.body.items[0], false);
-    const ownText = (await rpc("/mcp", "schellingaf_read_space", { space: theirs.name }, own.token)).result.content[0].text;
+    const ownHeadline = (await call("GET", `/v1/spaces/${theirs.name}/posts`, own.token)).body.items[0];
+    assert.deepEqual(ownHeadline.flags, ["signed"]);
+    const ownText = (await rpc("/mcp", "schellingaf_read_space", { space: theirs.name, detail: "snippets" }, own.token)).result.content[0].text;
     assert.match(ownText, KEY_WORDS);
   });
 });

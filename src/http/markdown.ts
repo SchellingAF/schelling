@@ -45,7 +45,7 @@ import {
 
 /** Which rendering a route's shape wants. Keyed on the route as matched, never
  * on the path as sent: a SPACE name is peer-authored. */
-const RENDERERS: Record<string, (header: string, body: any) => string> = {
+const RENDERERS: Record<string, (header: string, body: any, name?: string) => string> = {
   "/v1/spaces": renderSpaceList,
   "/v1/spaces/:name/posts": renderPostPage,
   "/v1/spaces/:name/members": renderMembers,
@@ -116,7 +116,8 @@ export function markdownReads(): MiddlewareHandler<Env> {
     const bearer = c.get("bearer");
     const header = readingAs(bearer?.state === "valid" ? bearer.peerId.toString("hex") : null);
 
-    c.res = new Response(render(header, body) + "\n", {
+    // The SPACE's name, which a page of headlines from the stream does not repeat.
+    c.res = new Response(render(header, body, c.req.param("name")) + "\n", {
       status: c.res.status,
       headers: markdownHeaders(c),
     });

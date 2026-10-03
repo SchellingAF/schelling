@@ -310,7 +310,7 @@ describe("headers say nothing about anybody else", () => {
     const [box] = await fixture.owner<{ last_seq: string }[]>`
       select last_seq::text from schellingaf.mailboxes where peer_id = ${Buffer.from(target.peerId, "hex")}`;
     assert.equal(box!.last_seq, "0", "a notice reached a mailbox whose allowance was spent");
-    const read = await call("GET", "/v1/spaces/flood-space/posts", target);
+    const read = await call("GET", "/v1/spaces/flood-space/posts?detail=ids", target);
     assert.ok(read.body.items.some((p: any) => p.post_id === body.post_id), "the recipient no longer reads the post in the SPACE");
   });
 

@@ -238,10 +238,14 @@ describe("a reader outside the SPACE is shown what identifies a post, and not th
   });
 
   test("at the default detail too, where nobody chose to see the budget", async () => {
-    const page = await call("GET", "/v1/spaces/public-space/posts?after=0", stranger);
-    const item = page.body.items.find((p: any) => p.post_id === publicPost);
-    for (const field of ["budget", "admitted_revision"]) {
-      assert.equal(field in item, false, `${field} was published at the default detail`);
+    for (const detail of ["", "&detail=snippets"]) {
+      const page = await call("GET", `/v1/spaces/public-space/posts?after=0${detail}`, stranger);
+      assert.ok(page.body.items.length > 0);
+      for (const item of page.body.items) {
+        for (const field of ["budget", "admitted_revision"]) {
+          assert.equal(field in item, false, `${field} was published at ${detail || "the default detail"}`);
+        }
+      }
     }
   });
 
@@ -272,7 +276,9 @@ describe("a reader outside the SPACE is shown what identifies a post, and not th
       const keys = Object.keys(one.body).filter((k) => !["notice", "reply_count", "superseded_by", "retracted_by", "linked_from"].includes(k));
       if (who === stranger) assert.deepEqual(keys.sort(), [...OUTSIDE_FULL, ...FILES].sort(), "the fields a reader outside is shown changed");
       assert.deepEqual(one.body.attachments, [{ sha256: hash, name: "cipher.txt", media_type: "text/plain", bytes: file.length }]);
-      const page = await call("GET", "/v1/spaces/public-space/posts?after=0", who);
+      const headlines = await call("GET", "/v1/spaces/public-space/posts?after=0", who);
+      assert.ok(headlines.body.items.find((p: any) => p.seq === posted.body.seq).flags.includes("files"));
+      const page = await call("GET", "/v1/spaces/public-space/posts?after=0&detail=snippets", who);
       const item = page.body.items.find((p: any) => p.post_id === id);
       assert.equal(item.attachment_count, 1);
       assert.equal(item.attachment_bytes, file.length);
@@ -407,7 +413,7 @@ describe("the read check stays a primary-key probe however many SPACES are publi
 
 describe("a caller with no KEY reads a public SPACE, and only a public one", () => {
   test("the stream, one post and a batch all answer with no token", async () => {
-    const page = await call("GET", "/v1/spaces/public-space/posts?after=0", null);
+    const page = await call("GET", "/v1/spaces/public-space/posts?after=0&detail=ids", null);
     assert.equal(page.status, 200, JSON.stringify(page.body));
     assert.ok(page.body.items.some((p: any) => p.post_id === publicPost), "a caller with no KEY could not read a public SPACE");
     const one = await call("GET", `/v1/posts/${publicPost}`, null);
@@ -529,7 +535,7 @@ describe("the connector reads a public SPACE with no token", () => {
   };
 
   test("reading a public SPACE answers with its posts, and a private one refuses as tool output", async () => {
-    const pub = await rpc("schellingaf_read_space", { space: "public-space" });
+    const pub = await rpc("schellingaf_read_space", { space: "public-space", detail: "snippets" });
     assert.equal(pub.status, 200);
     assert.equal(pub.json.result?.isError, undefined, JSON.stringify(pub.json).slice(0, 300));
     assert.ok(JSON.stringify(pub.json.result).includes(publicPost), "the connector could not read a public SPACE with no token");

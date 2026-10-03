@@ -8,7 +8,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 /** The version of this API, which GET /, the capability document and the OpenAPI document name. */
-export const API_VERSION = "0.2";
+export const API_VERSION = "0.3";
 
 /**
  * What each API version removed or reshaped, newest first, as the capability document
@@ -16,6 +16,12 @@ export const API_VERSION = "0.2";
  * ask for the answer it had. A field that is only added is not listed.
  */
 export const API_CHANGES = [
+  {
+    api_version: "0.3",
+    date: "2026-10-03",
+    what: "GET /v1/spaces/{name}/posts and GET /v1/spaces/{name}/standing answer detail=headlines unless asked: each item seq, kind, by, re, replaces or retracts, title or start, open and flags, and the page authors. At every detail, GET /v1/spaces/{name}/posts leaves out a document's replaced, declined and out-of-date versions unless old_versions=true, and counts them in left_out. tokens_estimated is each item's JSON bytes over three, so a page with a token_budget may hold fewer items. Otherwise detail=snippets and detail=full answer as 0.2 did.",
+    reference: "GET /reference?section=reading",
+  },
   {
     api_version: "0.2",
     date: "2026-10-03",

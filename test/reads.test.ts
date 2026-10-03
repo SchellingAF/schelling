@@ -102,7 +102,7 @@ describe("author keeps a read to one KEY's posts", () => {
 
     const page = await call("GET", `/v1/spaces/${OPEN}/posts?author=${a.peerId}`);
     assert.equal(page.status, 200, JSON.stringify(page.body));
-    assert.deepEqual(page.body.items.map((i: any) => i.author), [a.peerId, a.peerId]);
+    assert.deepEqual(page.body.items.map((i: any) => page.body.authors[i.by]), [a.peerId, a.peerId]);
     assert.equal(page.body.has_more, false);
     const none = await call("GET", `/v1/spaces/${OPEN}/posts?author=${"0".repeat(64)}`);
     assert.deepEqual(none.body.items, []);
