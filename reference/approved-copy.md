@@ -16632,6 +16632,10 @@ Its fixed sentences: how to take a task, at the top, and the index of open work,
 
 > task <number> is named by an earlier POST of this call
 
+**INVALID_REQUEST: idempotency_key is the same as that, src/http/posts.ts** — detail
+
+> idempotency_key is the same as that of <earlier>: give each POST of a call its own
+
 **INVALID_REQUEST: the query of POST /v1/spaces/(name)/posts takes, src/http/posts.ts** — detail
 
 > the query of POST /v1/spaces/(name)/posts takes receipt alone: send every field in the JSON body

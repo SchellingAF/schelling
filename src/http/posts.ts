@@ -334,13 +334,11 @@ function exportNdjson(
  * holds it to its statement's not_after.
  */
 async function readSignedPost(
-  db: Db, config: Config, spaceName: string, author: Buffer, signed: SignedPostRequest, sealed: SealedPost | null,
+  db: Db, config: Config, spaceIdOf: () => Promise<string>, author: Buffer, signed: SignedPostRequest, sealed: SealedPost | null,
   connector: { signedWith: Buffer | null; tokenHash: Buffer },
 ) {
-  const [space] = await db.read<{ space_id: string }[]>`
-    select space_id::text from schellingaf.spaces where name = ${spaceName}`;
-  if (!space) throw new ApiError("SPACE_NOT_FOUND");
-  const fields = readPostObject(signed.canonical, signed.private, { spaceId: space.space_id, author: toHex(author), sealed });
+  const spaceId = await spaceIdOf();
+  const fields = readPostObject(signed.canonical, signed.private, { spaceId, author: toHex(author), sealed });
   const objectId = objectIdOf(signed.canonical);
 
   if (signed.signature.alg === "ed25519") {
@@ -410,7 +408,7 @@ async function readSignedPost(
     const [again] = await db.readTx(toHex(author), (sql) => sql<{ one: number }[]>`
       select 1 as one from schellingaf.posts p
         join schellingaf.post_objects o on o.post_id = p.post_id
-       where p.space_id = ${space.space_id}::uuid and p.author_id = ${author}
+       where p.space_id = ${spaceId}::uuid and p.author_id = ${author}
          and p.idempotency_key = ${fields.idempotencyKey}
          and o.object_id = ${objectId}
          and o.webauthn->>'authenticator_data' = ${assertion.authenticatorData.toString("base64url")}`);
@@ -419,6 +417,20 @@ async function readSignedPost(
     }
   }
   return fields;
+}
+
+/**
+ * The SPACE's id, as a signed POST's canonical names it: read at most once a call, by the
+ * first signed POST that asks, however many POSTS the call sends.
+ */
+function spaceIdOnce(db: Db, name: string): () => Promise<string> {
+  let id: Promise<string> | null = null;
+  return () => (id ??= (async () => {
+    const [space] = await db.read<{ space_id: string }[]>`
+      select space_id::text from schellingaf.spaces where name = ${name}`;
+    if (!space) throw new ApiError("SPACE_NOT_FOUND");
+    return space.space_id;
+  })());
 }
 
 /** A post's receipt=full: the whole receipt, or left out for the slim one. */
@@ -716,13 +728,19 @@ type Item = {
 /** What may sit beside posts, at the top of a call that sends several POSTS. */
 const BATCH_FIELDS = ["posts", "idempotency_key", "dry_run"];
 
+/** Whether PostgreSQL ended this write as a deadlock's victim: rolled back whole, and safe
+ * to write again. */
+const deadlocked = (error: unknown) => (error as { code?: unknown } | null)?.code === "40P01";
+
 /**
  * A refusal met while reading or writing item i of posts, as the same refusal naming it
  * first: posts[i], with its key in brackets when it has one, then its own detail when the
- * envelope would carry that and the whole fits 200 characters, else the name alone.
+ * envelope would carry that and the whole fits 200 characters, else the name alone. A fault
+ * of the service's own is thrown on as it came, so the exception log keeps its SQLSTATE.
  */
-function atItem(i: number, key: string | null, error: unknown): ApiError {
+export function atItem(i: number, key: string | null, error: unknown): unknown {
   const refused = toApiError(error);
+  if (refused.code === "INTERNAL") return error;
   const at = `posts[${i}]${key === null ? "" : ` (${key})`}`;
   const own = renderableDetail(refused.detail);
   const detail = own !== undefined && `${at}: ${own}`.length <= 200 ? `${at}: ${own}` : at;
@@ -736,7 +754,7 @@ function atItem(i: number, key: string | null, error: unknown): ApiError {
  * the rules every POST meets, and its task last.
  */
 async function readItem(
-  db: Db, config: Config, c: Context<Env>, name: string, author: Buffer, input: Record<string, unknown>, inPosts: boolean,
+  db: Db, config: Config, c: Context<Env>, spaceIdOf: () => Promise<string>, author: Buffer, input: Record<string, unknown>, inPosts: boolean,
 ): Promise<Omit<Item, "key" | "replyKey">> {
   // A sealed SPACE takes no files, and a sealed post naming any is refused before any
   // other field is read: plain bytes would sit beside its ciphertext.
@@ -755,7 +773,7 @@ async function readItem(
   let attachments: Attachment[];
   let post: PostInput;
   if (signed !== null) {
-    post = await readSignedPost(db, config, name, author, signed, sealed, {
+    post = await readSignedPost(db, config, spaceIdOf, author, signed, sealed, {
       signedWith: connectorSignedWith(c),
       tokenHash: requireBearer(c.get("bearer")).hash,
     });
@@ -804,7 +822,7 @@ async function readItem(
  * position; a signed or sealed one keeps the key inside its canonical.
  */
 async function readBatch(
-  db: Db, config: Config, c: Context<Env>, name: string, author: Buffer, input: Record<string, unknown>,
+  db: Db, config: Config, c: Context<Env>, spaceIdOf: () => Promise<string>, author: Buffer, input: Record<string, unknown>,
 ): Promise<{ items: Item[]; dryRun: boolean }> {
   if (Object.keys(input).some((field) => !BATCH_FIELDS.includes(field))) {
     throw new ApiError("INVALID_REQUEST", { detail: "beside posts go only idempotency_key and dry_run: send the fields of each POST inside its item" });
@@ -828,6 +846,7 @@ async function readBatch(
   const items: Item[] = [];
   const keys = new Map<string, number>();
   const tasks = new Set<number>();
+  const idempotencyKeys = new Map<string, number>();
   for (const [i, value] of list.entries()) {
     if (typeof value !== "object" || value === null || Array.isArray(value)) throw atItem(i, null, new ApiError("INVALID_REQUEST"));
     const { key: rawKey, ...fields } = value as Record<string, unknown>;
@@ -859,7 +878,7 @@ async function readBatch(
         replyKey = earlier;
         delete fields.reply_to;
       }
-      const read = await readItem(db, config, c, name, author, fields, true);
+      const read = await readItem(db, config, c, spaceIdOf, author, fields, true);
       if (read.task !== null) {
         if (tasks.has(read.task.number)) {
           throw new ApiError("INVALID_REQUEST", { detail: `task ${read.task.number} is named by an earlier POST of this call` });
@@ -868,6 +887,18 @@ async function readBatch(
       }
       // The key it is posted under: the call's and its own, or its position.
       if (read.signed === null && callKey !== null) read.post = { ...read.post, idempotencyKey: `${callKey}:${key ?? i}` };
+      // Each POST under its own: a second POST under one key would read as the first one's
+      // resend, so two signed POSTS with one key in canonical, or an unsigned one whose key
+      // a signed one carries, are refused here, naming both.
+      const idempotencyKey = read.post.idempotencyKey;
+      if (idempotencyKey !== null) {
+        const same = idempotencyKeys.get(idempotencyKey);
+        if (same !== undefined) {
+          const earlier = `posts[${same}]${items[same]!.key === null ? "" : ` (${items[same]!.key})`}`;
+          throw new ApiError("INVALID_REQUEST", { detail: `idempotency_key is the same as that of ${earlier}: give each POST of a call its own` });
+        }
+        idempotencyKeys.set(idempotencyKey, i);
+      }
       items.push({ key, replyKey, ...read });
     } catch (error) {
       throw atItem(i, key, error);
@@ -902,7 +933,7 @@ export function mountPosts(app: Hono<Env>, config: Config, db: Db, service: Serv
     let items: Item[];
     let dryRun: boolean;
     if (batch) {
-      ({ items, dryRun } = await readBatch(db, config, c, name, bearer.peerId, input));
+      ({ items, dryRun } = await readBatch(db, config, c, spaceIdOnce(db, name), bearer.peerId, input));
     } else {
       // A dry run checks this POST and writes nothing. It is no field of a signed or sealed
       // POST, beside or inside canonical, so no signature ever covers it, and a signed POST
@@ -913,7 +944,7 @@ export function mountPosts(app: Hono<Env>, config: Config, db: Db, service: Serv
       }
       if (input.key !== undefined) throw new ApiError("INVALID_REQUEST", { detail: "key names an item of posts: a single POST takes none" });
       if (namesDryRunIn(input.task)) refuseDryRunHere();
-      items = [{ key: null, replyKey: null, ...(await readItem(db, config, c, name, bearer.peerId, input, false)) }];
+      items = [{ key: null, replyKey: null, ...(await readItem(db, config, c, spaceIdOnce(db, name), bearer.peerId, input, false)) }];
     }
 
     // Every field read as the POST's own are: from here a dry run reads, and writes nothing.
@@ -1143,26 +1174,39 @@ export function mountPosts(app: Hono<Env>, config: Config, db: Db, service: Serv
 
     // A POST with neither attachments nor a task is the one statement it always was. Any
     // other call is written in one transaction: every POST and its task, or nothing.
-    let results: Wrote[];
-    if (!batch && single.attachments.length === 0 && single.task === null) {
-      const [row] = await appendPost(db.write, single, 0);
-      const receipt = row!.receipt;
-      let attached: unknown[] = [];
-      // A retry that drops the list of a post that had one is a conflict, not a replay.
-      if (receipt.replayed === true) {
-        const [compared] = await attachFiles(db.write, receipt.post_id, [], true);
-        attached = compared!.list;
+    //
+    // Either is written again, up to twice, when PostgreSQL ends it as a deadlock's victim.
+    // append_post locks one POST's mailboxes in ascending peer id, but a batch writes its
+    // POSTS in order, so across POSTS it takes mailboxes in the order its items name them,
+    // and a POST's task part locks more after its POST's: two calls can wait on each other.
+    // Locking every mailbox before the first POST would take them before append_post takes
+    // the SPACE row and its buckets, an inversion of its own, so the victim is retried. It
+    // rolled back whole, and nothing it spent outside the write is spent again or lost: the
+    // write allowance and a version's proposals were spent above, once; a passkey's counter
+    // moved while its POST was read; the notices each recipient may take were counted above;
+    // pending files are attached inside the write; and nothing is told or charged until it
+    // commits. So a retry answers what one clean run would. A third deadlock is BUSY.
+    const writeOnce = async (): Promise<Wrote[]> => {
+      if (!batch && single.attachments.length === 0 && single.task === null) {
+        const [row] = await appendPost(db.write, single, 0);
+        const receipt = row!.receipt;
+        let attached: unknown[] = [];
+        // A retry that drops the list of a post that had one is a conflict, not a replay.
+        if (receipt.replayed === true) {
+          const [compared] = await attachFiles(db.write, receipt.post_id, [], true);
+          attached = compared!.list;
+        }
+        return [{ receipt, attached, task: null, delivered: null }];
       }
-      results = [{ receipt, attached, task: null, delivered: null }];
-    } else {
-      results = await db.write.begin(async (tx) => {
+      return await db.write.begin(async (tx) => {
         const sql = tx as unknown as typeof db.write;
         const done: Wrote[] = [];
         for (const [i, item] of items.entries()) {
           try {
             done.push(await writeItem(sql, item, i, done));
           } catch (error) {
-            throw batch ? atItem(i, item.key, error) : error;
+            // A deadlock is the call's, not the item's: thrown on as it came, to be retried.
+            throw batch && !deadlocked(error) ? atItem(i, item.key, error) : error;
           }
         }
         // All replayed, or none: a resend of a call that committed whole. A mix is one key
@@ -1177,6 +1221,16 @@ export function mountPosts(app: Hono<Env>, config: Config, db: Db, service: Serv
         }
         return done;
       }) as Wrote[];
+    };
+    let results: Wrote[];
+    for (let attempt = 0; ; attempt++) {
+      try {
+        results = await writeOnce();
+        break;
+      } catch (error) {
+        if (attempt < 2 && deadlocked(error)) continue;
+        throw error;
+      }
     }
     const replayed = results.every((w) => w.receipt.replayed === true);
     state.wrote = !replayed;

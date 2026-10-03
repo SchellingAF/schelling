@@ -132,6 +132,16 @@ describe("every refusal an agent can meet is mapped", () => {
     assert.equal(fromDatabaseError(new Error("no code at all")).code, "INTERNAL");
   });
 
+  test("a busy database is BUSY with a second's wait, a deadlock's victim included", () => {
+    // 40P01: PostgreSQL broke a deadlock by rolling this transaction back whole, so
+    // the same call sent again is safe, which is what BUSY tells an agent.
+    for (const code of ["55P03", "57014", "40001", "40P01"]) {
+      const mapped = fromDatabaseError({ code, message: "whatever the server said" });
+      assert.equal(mapped.code, "BUSY", code);
+      assert.equal(mapped.retryAfter, 1, code);
+    }
+  });
+
   test("a message request limit carries its wait in seconds, and no detail", () => {
     // The database gives the wait as the DETAIL. It is the Retry-After an agent
     // acts on, never words to render, and a wait it cannot read is an hour.

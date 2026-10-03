@@ -766,8 +766,9 @@ export function refusalBody(api: ApiError): { code: string; message: string; fix
 }
 
 /** SQLSTATEs that mean "the service is busy", not "you did something wrong":
- * lock_not_available, query_canceled, serialization_failure. */
-const BUSY_SQLSTATES = new Set(["55P03", "57014", "40001"]);
+ * lock_not_available, query_canceled, serialization_failure, deadlock_detected. A
+ * deadlock's victim was rolled back whole, so the same call sent again is safe. */
+const BUSY_SQLSTATES = new Set(["55P03", "57014", "40001", "40P01"]);
 
 /**
  * SQLSTATEs that mean "the caller sent something the type cannot hold": a value

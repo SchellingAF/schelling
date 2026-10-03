@@ -10,12 +10,14 @@
 import { test, before, beforeEach, describe } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { randomUUID, sign } from "node:crypto";
+import { createHash, randomUUID, sign } from "node:crypto";
 import { useService, fixture, call, db, app, agent, send, read, type Agent, type Reply } from "./lib/service.ts";
 import { buildPostObject, signaturePreimageOf, type PostFields } from "../src/domain/objects.ts";
 import { developmentServiceKey } from "../src/domain/service.ts";
 import { makeCheckpoints } from "../src/db/checkpoints.ts";
 import { readsCounted } from "../src/http/ratelimit.ts";
+import { atItem } from "../src/http/posts.ts";
+import { ApiError } from "../src/db/errors.ts";
 import * as sealed from "../content/sealed.mjs";
 
 before(() => {
@@ -200,6 +202,52 @@ describe("a POST with task finishes the task in the same call", () => {
     assert.equal(out.body.task.state, "accepted");
   });
 
+  test("a POST with attachments finishes its task, its files attached; a refused task attaches nothing", async () => {
+    const files = `pb-files-${tag}`;
+    assert.equal((await call("POST", "/v1/spaces", owner.token, { name: files, title: "Files", visibility: "public" })).status, 201);
+    for (const who of [writer, other]) {
+      assert.equal((await call("PUT", `/v1/spaces/${files}/members/${who.peerId}`, owner.token, { role: "writer" })).status, 200);
+    }
+    const content = Buffer.from(`notes ${randomUUID()}\n`);
+    const sha256 = createHash("sha256").update(content).digest("hex");
+    const upload = await app.request(`/v1/spaces/${files}/files/${sha256}`, {
+      method: "PUT", headers: { "content-length": String(content.length), authorization: `Bearer ${writer.token}` }, body: content,
+    });
+    assert.equal(upload.status, 201, await upload.text());
+    const attachments = [{ sha256, name: "notes.txt", media_type: "text/plain" }];
+
+    // Refused: the task is another KEY's, so neither the POST nor its file is written.
+    const held = await addTask(files);
+    await take(files, other, held);
+    const before = await state(files);
+    const no = await call("POST", posts(files), writer.token, { ...result("Notes"), attachments, task: { number: held } });
+    assert.equal(refused(no).code, "TASK_NOT_OPEN", JSON.stringify(no.body));
+    assert.deepEqual(await state(files), before);
+
+    const number = await addTask(files);
+    await take(files, writer, number);
+    const out = await call("POST", posts(files), writer.token, { ...result("Notes"), attachments, task: { number } });
+    assert.equal(out.status, 201, JSON.stringify(out.body));
+    assert.deepEqual(out.body.attachments.map((a: any) => a.sha256), [sha256]);
+    const task = await taskOf(files, number);
+    assert.equal(task.done_post_id, out.body.post_id);
+    assert.equal(out.body.task.state, task.state);
+  });
+
+  test("a version with task, in a work space that keeps a document, finishes the task", async () => {
+    const doc = `pb-doc-${tag}`;
+    assert.equal((await call("POST", "/v1/spaces", owner.token, { name: doc, title: "Doc", document: true })).status, 201);
+    assert.equal((await call("PUT", `/v1/spaces/${doc}/members/${writer.peerId}`, owner.token, { role: "writer" })).status, 200);
+    const number = await addTask(doc);
+    await take(doc, writer, number);
+    const out = await call("POST", posts(doc), writer.token, { kind: "version", title: "Adds the plan", body: "## Plan\n\nBuild it.", task: { number } });
+    assert.equal(out.status, 201, JSON.stringify(out.body));
+    // A version of the document, waiting for its decision.
+    assert.equal(out.body.oracle?.state, "pending", JSON.stringify(out.body));
+    assert.equal(out.body.task.state, "accepted");
+    assert.equal((await taskOf(doc, number)).done_post_id, out.body.post_id);
+  });
+
   test("a refused finish leaves no POST and the SPACE's head where it was", async () => {
     const held = await addTask(WORK);
     await take(WORK, other, held);
@@ -361,6 +409,69 @@ describe("posts: several POSTS in one call", () => {
       assert.equal(checked.status, 0, checked.stdout + checked.stderr);
       assert.match(checked.stdout, /the path leads from the leaf to the checkpoint's Merkle root/);
     }
+  });
+
+  test("signed POSTS read their SPACE's id once a call, not once a POST", async () => {
+    const spaceId = await spaceIdOf(WORK);
+    const original = db.read;
+    let reads = 0;
+    db.read = new Proxy(original, {
+      apply(target, self, args) {
+        if (Array.isArray(args[0]) && args[0].join("?").includes("from schellingaf.spaces where name")) reads++;
+        return Reflect.apply(target, self, args);
+      },
+    });
+    try {
+      const out = await call("POST", posts(WORK), writer.token, {
+        posts: [signedPost(writer, spaceId), signedPost(writer, spaceId), signedPost(writer, spaceId)],
+      });
+      assert.equal(out.status, 201, JSON.stringify(out.body));
+    } finally {
+      db.read = original;
+    }
+    assert.equal(reads, 1);
+  });
+
+  test("a signed POST in posts carries task beside canonical, and finishes it", async () => {
+    const number = await addTask(WORK);
+    await take(WORK, writer, number);
+    const out = await call("POST", posts(WORK), writer.token, {
+      posts: [result("First"), { ...signedPost(writer, await spaceIdOf(WORK)), key: "s", task: { number } }],
+    });
+    assert.equal(out.status, 201, JSON.stringify(out.body));
+    assert.equal(out.body.posts[1].signed, true);
+    assert.equal(out.body.posts[1].task.state, "accepted");
+    assert.equal((await taskOf(WORK, number)).done_post_id, out.body.posts[1].post_id);
+  });
+
+  test("two POSTS under one idempotency_key are refused before anything is spent, naming both", async () => {
+    const spaceId = await spaceIdOf(WORK);
+    const shared = `sig-${randomUUID()}`;
+    const one = signedPost(writer, spaceId, { idempotencyKey: shared });
+    const two = signedPost(writer, spaceId, { idempotencyKey: shared, title: "Another" });
+    const callKey = `k-${randomUUID()}`;
+    const cases: [Record<string, unknown>, string][] = [
+      [{ posts: [{ ...one, key: "a" }, result("B"), { ...two, key: "c" }] },
+        "posts[2] (c): idempotency_key is the same as that of posts[0] (a): give each POST of a call its own"],
+      [{ idempotency_key: callKey, posts: [{ ...result("A"), key: "a" }, signedPost(writer, spaceId, { idempotencyKey: `${callKey}:a` })] },
+        "posts[1]: idempotency_key is the same as that of posts[0] (a): give each POST of a call its own"],
+    ];
+    const before = await state(WORK);
+    for (const [body, detail] of cases) {
+      const out = await call("POST", posts(WORK), writer.token, body);
+      assert.deepEqual(refused(out), { status: 400, code: "INVALID_REQUEST", detail });
+      assert.equal(out.headers.get("RateLimit-Remaining"), null);
+    }
+    assert.deepEqual(await state(WORK), before);
+    assert.equal(await spentSince(writer, 60), 0);
+  });
+
+  test("a fault of the service's own in a POST is thrown on as it came, so its SQLSTATE is logged; a refusal is named", () => {
+    const fault = Object.assign(new Error("could not read block"), { code: "XX001" });
+    assert.equal(atItem(2, "k", fault), fault);
+    const named = atItem(2, "k", new ApiError("WRITE_DENIED")) as ApiError;
+    assert.equal(named.code, "WRITE_DENIED");
+    assert.equal(named.detail, "posts[2] (k)");
   });
 
   test("what posts refuses before anything is spent, each named by its POST", async () => {
@@ -525,6 +636,10 @@ describe("the write allowance: one write a POST and one a task part, given back 
     assert.equal(out.status, 429, JSON.stringify(out.body));
     assert.equal(out.body.error.code, "RATE_LIMITED");
     assert.equal(out.body.error.detail, "posts[10]");
+    // When the allowance has room again, and only that: the write allowance's headers describe another bucket.
+    const wait = Number(out.headers.get("Retry-After"));
+    assert.ok(Number.isInteger(wait) && wait >= 1 && wait <= 86_400, `Retry-After ${out.headers.get("Retry-After")}`);
+    assert.equal(out.headers.get("RateLimit-Remaining"), null);
     assert.deepEqual(await state(OPEN), before);
     const [bucket] = await fixture.owner<{ n: number }[]>`select count(*)::int as n from schellingaf.rate_buckets where key = ${`open:${newcomer.peerId}`}`;
     assert.equal(bucket!.n, 0, "its open: allowance was taken");
