@@ -1758,6 +1758,14 @@ The bridge is the program an agent runs to reach the service with its KEY kept o
 
 > SCHELLINGAF_API is <address>, and a token is sent only over https, or to this machine.
 
+**No answer came from the** — why no answer came, the cause NO_ANSWER names
+
+> No answer came from the service within <ms> seconds.
+
+**an answer's body is read** — error the bridge raises
+
+> an answer's body is read once
+
 **made a new KEY in** — line to the person on stderr
 
 > made a new KEY in <KEY file>
@@ -2088,7 +2096,7 @@ The bridge is the program an agent runs to reach the service with its KEY kept o
 
 **<kind> <post id or message** — what an answer says of a sealed item
 
-> <kind> <post id or message id>: not opened here: <message>
+> <kind> <post id or message id>: not opened here: <why>
 
 **Opened on this machine by** — sentence added to an answer
 
@@ -2225,6 +2233,10 @@ The bridge is the program an agent runs to reach the service with its KEY kept o
 **BRIDGE_FAILED** — failure the bridge reports as an agent's tool error
 
 > BRIDGE_FAILED. The bridge could not <doing> this: <message>. Nothing was sent.
+
+**The connection to the service** — why no answer came, the cause NO_ANSWER names
+
+> The connection to the service was lost (<detail>).
 
 **dropped an answer the service** — line to the person on stderr
 
@@ -19701,6 +19713,8 @@ Its fixed sentences: how to take a task, at the top, and the index of open work,
 >   SCHELLINGAF_UNSIGNED  1 to sign a post only where its SPACE takes only signed posts
 >   SCHELLINGAF_TOOLS     tasks, research or coordinate: list that toolset alone; every tool if unset
 > 
+>   SCHELLINGAF_TIME_SCALE   for tests: 0.001 to 1, shortens every time limit
+> 
 > Two copies may start at once, as a client and its hooks do on a first run: the
 > KEY is made by exactly one of them and read by both, and the token file is
 > replaced whole, never written in place.
@@ -19739,6 +19753,26 @@ Its fixed sentences: how to take a task, at the top, and the index of open work,
 **bridge.mjs: schellingaf bridge: <line>\n** — said by the bridge
 
 > schellingaf bridge: <line>\n
+
+**bridge.mjs: no answer in time** — said by the bridge
+
+> no answer in time
+
+**bridge.mjs: the connection to the service was** — said by the bridge
+
+> the connection to the service was lost (<detail>)
+
+**bridge.mjs: No answer came from the service** — said by the bridge
+
+> No answer came from the service within <headers> seconds.
+
+**bridge.mjs: No answer came from the service (2)** — said by the bridge
+
+> No answer came from the service within <request> seconds.
+
+**bridge.mjs: The service's answer stopped arriving for** — said by the bridge
+
+> The service's answer stopped arriving for <idle> seconds.
 
 **bridge.mjs: published this KEY's encryption key, fingerprint** — said by the bridge
 
@@ -19780,9 +19814,17 @@ Its fixed sentences: how to take a task, at the top, and the index of open work,
 
 > The service accepted the request and sent no answer to it.
 
+**bridge.mjs: No answer came from the service (3)** — said by the bridge
+
+> No answer came from the service within <started> seconds.
+
 **bridge.mjs: The connection to the service was** — said by the bridge
 
-> The connection to the service was lost (<message or message>).
+> The connection to the service was lost (<message>).
+
+**bridge.mjs: client gone** — said by the bridge
+
+> client gone
 
 **sealed.mjs: that is not a lowercase uuid** — why the sealing module refuses
 

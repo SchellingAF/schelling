@@ -68,6 +68,8 @@
 //   SCHELLINGAF_UNSIGNED  1 to sign a post only where its SPACE takes only signed posts
 //   SCHELLINGAF_TOOLS     tasks, research or coordinate: list that toolset alone; every tool if unset
 //
+//   SCHELLINGAF_TIME_SCALE   for tests: 0.001 to 1, shortens every time limit
+//
 // Two copies may start at once, as a client and its hooks do on a first run: the
 // KEY is made by exactly one of them and read by both, and the token file is
 // replaced whole, never written in place.
@@ -78,6 +80,7 @@
 // conversations, and a file an agent asks it to save; it reads no file of yours but
 // one a post attaches by path; and it sends nothing anywhere but SCHELLINGAF_API.
 
+import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash, createHmac, createPrivateKey, createPublicKey, generateKeyPairSync, randomBytes as nodeRandomBytes, sign } from "node:crypto";
 import { chmodSync, closeSync, existsSync, fstatSync, linkSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -96,6 +99,51 @@ const RENEW_BEFORE_MS = 7 * 24 * 60 * 60 * 1000;
 /** The refusals that mean the token itself is the problem. */
 const TOKEN_CODES = /^(TOKEN_EXPIRED|TOKEN_REVOKED|TOKEN_INVALID|TOKEN_MISSING)\b/;
 
+// ── time limits ─────────────────────────────────────────────────────────────
+//
+// No request waits without end. In milliseconds; SCHELLINGAF_TIME_SCALE, for tests, takes
+// a number from 0.001 to 1 and multiplies each, but UPLOAD_FLOOR, by it. Anything else
+// reads as 1: it can only shorten. A Retry-After, and a wait an agent gave, are never scaled.
+
+const SCALE = (() => {
+  const given = Number(process.env.SCHELLINGAF_TIME_SCALE);
+  return given >= 0.001 && given <= 1 ? given : 1;
+})();
+const scaled = (ms) => ms * SCALE;
+/** Connect plus headers, for one request to /v1: every route answers headers in well under a second. */
+const HEADERS_MS = scaled(20_000);
+/** Silence between two chunks of one answer's body. */
+const BODY_IDLE_MS = scaled(30_000);
+/** One /v1 request, headers and body; inside a call, the call's deadline bounds it too. */
+const REQUEST_MS = scaled(60_000);
+/** Added to /mcp's headers and idle limits: the service may hold a tool call's answer this
+ *  long (WAIT_SECONDS_MAX in its src/http/wait.ts). */
+const WAIT_ALLOWANCE_MS = scaled(25_000);
+/** A request's deadline, from when the bridge reads it: the reads before /mcp, the call, one
+ *  resend and the way back. A tools/call adds the wait it gives. */
+const CALL_MS = scaled(90_000);
+/** No request but a listen ever waits longer, whatever its wait or its files ask. */
+const CALL_CEILING_MS = scaled(600_000);
+/** A write is sent again only with this much of its deadline left. */
+const RESEND_LEFT_MS = scaled(30_000);
+/** The way back, once the result for the id arrived: opening sealed items needs reads. */
+const OPEN_MS = scaled(30_000);
+/** The shared token mint: a challenge and its verify. */
+const MINT_MS = scaled(30_000);
+/** The shared tools/list under a toolset. */
+const LISTING_MS = scaled(30_000);
+/** The shared encryption-key publish: GET /v1/me, then the PUT. */
+const PUBLISH_MS = scaled(30_000);
+/** A subscriptions/listen stream: the service ends every one within 900 seconds. */
+const LISTEN_MS = scaled(960_000);
+/** Silence on a listen stream: the service sends a keep-alive every 15 seconds. */
+const LISTEN_IDLE_MS = scaled(45_000);
+/** Bytes a second a file transfer may be slow: 256 KiB on a slow link is 32 seconds. */
+const UPLOAD_FLOOR = 8192;
+
+/** Whole seconds, as an answer says a limit. */
+const seconds = (ms) => Math.max(1, Math.ceil(ms / 1000));
+
 function say(line) {
   process.stderr.write(`schellingaf bridge: ${line}\n`);
 }
@@ -113,6 +161,195 @@ if (Number(process.versions.node.split(".")[0]) < 22) {
     say(`SCHELLINGAF_API is ${API}, and a token is sent only over https, or to this machine.`);
     process.exit(2);
   }
+}
+
+// ── calls and their limits ───────────────────────────────────────────────────
+//
+// Each request the client sends runs inside a call: one signal and one deadline that every
+// request it makes to the service shares, the reads before /mcp, /mcp itself and the reads
+// on the way back. Work that several calls wait on (the token's mint, the tools/list under a
+// toolset, the encryption key's publish, the passkey site) runs outside any call, under a
+// limit of its own: a call that stops waiting never cancels it for the others.
+
+const calls = new AsyncLocalStorage();
+
+/** Why a call ended before its answer: "cancelled" by the client, the "client gone" with a
+ *  listen open, or its "deadline". Only the deadline is answered. */
+class CallEnd extends Error {
+  constructor(why) {
+    super(why === "deadline" ? "no answer in time" : why);
+    this.why = why;
+  }
+}
+
+/** Why no answer came from the service: the cause the NO_ANSWER answer names, a whole
+ *  sentence. `lost` marks an answer that may have been lost on its way, after which a
+ *  write the service dedupes may be sent once more. */
+class NoAnswer extends Error {
+  constructor(cause, { lost = false } = {}) {
+    super(cause);
+    this.lost = lost;
+  }
+}
+
+/** A connection that failed or reset under a request, with what the network said. */
+class Lost extends Error {
+  constructor(error) {
+    const detail = String(error?.cause?.code ?? error?.cause?.message ?? error?.message ?? error);
+    super(`the connection to the service was lost (${detail})`);
+    this.detail = detail;
+  }
+}
+
+/**
+ * A call's signal and deadline, `ms` from now and at most `ceiling` from now however it is
+ * extended. At its deadline the signal aborts with what `ends` makes: a CallEnd for a
+ * client's request, a NoAnswer for shared work.
+ */
+function callContext(ms, { ceiling = ms, ends = () => new CallEnd("deadline") } = {}) {
+  const controller = new AbortController();
+  const started = Date.now();
+  const ctx = {
+    signal: controller.signal,
+    started,
+    deadline: started + ms,
+    ceilingAt: started + Math.max(ms, ceiling),
+    /** The service's result for the request arrived: the deadline cannot turn it into NO_ANSWER. */
+    inHand: false,
+    timer: null,
+    end(reason) {
+      if (!controller.signal.aborted) controller.abort(reason);
+      clearTimeout(ctx.timer);
+    },
+    arm() {
+      clearTimeout(ctx.timer);
+      if (!controller.signal.aborted) ctx.timer = setTimeout(() => ctx.end(ends()), Math.max(0, ctx.deadline - Date.now()));
+    },
+    /** More time for a transfer that keeps moving, never past the ceiling. */
+    extend(more) {
+      ctx.deadline = Math.min(ctx.deadline + more, ctx.ceilingAt);
+      ctx.arm();
+    },
+    /** The result for the id is here: the way back gets OPEN_MS at least. */
+    resultInHand() {
+      ctx.inHand = true;
+      ctx.deadline = Math.max(ctx.deadline, Date.now() + OPEN_MS);
+      ctx.arm();
+    },
+    close() {
+      clearTimeout(ctx.timer);
+    },
+  };
+  ctx.ended = new Promise((_, reject) => controller.signal.addEventListener("abort", () => reject(controller.signal.reason), { once: true }));
+  ctx.ended.catch(() => {});
+  ctx.arm();
+  return ctx;
+}
+
+/** A promise the current call waits on, raced against the call's own end: a waiter that gives
+ *  up never cancels what it waited on, and another call's end never fails this one's wait. */
+function within(promise) {
+  const ctx = calls.getStore();
+  return ctx ? Promise.race([promise, ctx.ended]) : promise;
+}
+
+/** Work several calls may wait on, run outside any call, ended after `ms` with a NoAnswer. */
+function shared(ms, work) {
+  const ctx = callContext(ms, { ends: () => new NoAnswer(`No answer came from the service within ${seconds(ms)} seconds.`) });
+  const done = calls.run(ctx, () => Promise.race([Promise.resolve().then(work), ctx.ended]));
+  void done.finally(() => ctx.close()).catch(() => {});
+  return done;
+}
+
+/** A pause the current call gives up when it ends. */
+const pauseHere = (ms) => within(pause(ms));
+
+/**
+ * The one way the bridge reaches the service: a fetch that ends when the call's signal does,
+ * when the headers do not arrive within `headers` ms, when the body sends nothing for `idle`
+ * ms, or, unless `request` is 0, when the whole request takes `request` ms. It reads the body
+ * itself, restarting the idle limit as each chunk arrives, so time the caller spends between
+ * chunks is not counted. A limit is a NoAnswer that may have lost the answer; the call's end
+ * is its CallEnd; a failed connection is Lost.
+ */
+async function timed(url, init, { headers = HEADERS_MS, idle = BODY_IDLE_MS, request = REQUEST_MS } = {}) {
+  const ctx = calls.getStore();
+  if (ctx?.signal.aborted) throw ctx.signal.reason;
+  const local = new AbortController();
+  const signal = ctx ? AbortSignal.any([ctx.signal, local.signal]) : local.signal;
+  const timers = new Set();
+  const limit = (ms, cause) => {
+    const t = setTimeout(() => local.abort(new NoAnswer(cause, { lost: true })), ms);
+    timers.add(t);
+    return t;
+  };
+  const clear = () => {
+    for (const t of timers) clearTimeout(t);
+  };
+  const why = (error) => {
+    clear();
+    if (local.signal.aborted) return local.signal.reason;
+    if (ctx?.signal.aborted) return ctx.signal.reason;
+    return error instanceof NoAnswer || error instanceof CallEnd ? error : new Lost(error);
+  };
+  const waiting = limit(headers, `No answer came from the service within ${seconds(headers)} seconds.`);
+  if (request > 0) limit(request, `No answer came from the service within ${seconds(request)} seconds.`);
+  let res;
+  try {
+    res = await fetch(url, { ...init, signal });
+  } catch (error) {
+    throw why(error);
+  }
+  clearTimeout(waiting);
+  timers.delete(waiting);
+  const reader = res.body?.getReader() ?? null;
+  let read = false;
+  async function* chunks() {
+    if (read) throw new Error("an answer's body is read once");
+    read = true;
+    if (reader === null) return clear();
+    let done = false;
+    try {
+      for (;;) {
+        const silent = limit(idle, `The service's answer stopped arriving for ${seconds(idle)} seconds.`);
+        let step;
+        try {
+          step = await reader.read();
+        } finally {
+          clearTimeout(silent);
+          timers.delete(silent);
+        }
+        if (step.done) {
+          done = true;
+          return;
+        }
+        yield step.value;
+      }
+    } catch (error) {
+      throw why(error);
+    } finally {
+      clear();
+      if (!done) reader.cancel().catch(() => {});
+    }
+  }
+  const bytes = async () => {
+    const parts = [];
+    for await (const chunk of chunks()) parts.push(chunk);
+    return Buffer.concat(parts);
+  };
+  return {
+    status: res.status,
+    ok: res.ok,
+    headers: res.headers,
+    chunks,
+    bytes,
+    text: async () => (await bytes()).toString("utf8"),
+    /** Nothing more of this answer is read. */
+    cancel: () => {
+      clear();
+      if (!read && reader) reader.cancel().catch(() => {});
+    },
+  };
 }
 
 // ── the KEY ─────────────────────────────────────────────────────────────────
@@ -176,12 +413,17 @@ async function loadKey() {
 // ── the token ───────────────────────────────────────────────────────────────
 
 async function call(path, body) {
-  const res = await fetch(`${API}${path}`, {
+  const res = await timed(`${API}${path}`, {
     method: "POST",
     headers: { "content-type": "application/json", accept: "application/json" },
     body: JSON.stringify(body),
   });
-  const json = await res.json().catch(() => ({}));
+  let json = {};
+  try {
+    json = JSON.parse(await res.text());
+  } catch (error) {
+    if (error instanceof NoAnswer || error instanceof CallEnd || error instanceof Lost) throw error;
+  }
   if (!res.ok) {
     const e = json.error ?? {};
     throw new Error(`${e.code ?? res.status}: ${e.message ?? "the service refused"} ${e.fix ?? ""}`.trim());
@@ -255,11 +497,12 @@ async function token({ fresh = false } = {}) {
     current ??= keptToken(identity);
     if (current) return current.token;
   }
-  minting ??= mint(identity).then(
+  // Shared by every call that needs a token meanwhile, under a limit of its own.
+  minting ??= shared(MINT_MS, () => mint(identity)).then(
     (kept) => { current = kept; minting = null; return kept; },
     (error) => { minting = null; throw error; },
   );
-  return (await minting).token;
+  return (await within(minting)).token;
 }
 
 // ── the sealing module ──────────────────────────────────────────────────────
@@ -1372,7 +1615,7 @@ const PEER_ID_SHAPE = /^[0-9a-f]{64}$/;
 /** A call to the service as this KEY, with one fresh token if the kept one stopped working. */
 async function api(method, path, body) {
   const send = async (bearer) =>
-    fetch(`${API}${path}`, {
+    timed(`${API}${path}`, {
       method,
       headers: {
         accept: "application/json",
@@ -1382,13 +1625,20 @@ async function api(method, path, body) {
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
     });
   let res = await send(await token());
-  if (res.status === 401 && !process.env.SCHELLINGAF_TOKEN) res = await send(await token({ fresh: true }));
+  if (res.status === 401 && !process.env.SCHELLINGAF_TOKEN) {
+    res.cancel();
+    res = await send(await token({ fresh: true }));
+  }
   // Told to slow down, it waits as long as the service says, a minute at most each time:
   // a keeper handing a large SPACE's key on meets its write allowance, and a change of
-  // key that stopped there would wait a round for nothing.
+  // key that stopped there would wait a round for nothing. Inside a call, only a wait that
+  // leaves room for the answer before the call's deadline: else the refusal is said at once.
+  const ctx = calls.getStore();
   for (let tries = 0; res.status === 429 && tries < 8; tries++) {
-    await res.text();
-    await pause(Math.min(Math.max(Number(res.headers.get("retry-after")) || 1, 1), 60) * 1000);
+    const wait = Math.min(Math.max(Number(res.headers.get("retry-after")) || 1, 1), 60) * 1000;
+    if (ctx && Date.now() + wait + HEADERS_MS > ctx.deadline) break;
+    res.cancel();
+    await pauseHere(wait);
     res = await send(await token());
   }
   const text = await res.text();
@@ -1420,15 +1670,26 @@ function refusedBy(json, status, headers) {
  *  stopped working: a file uploaded with its length, or a file fetched. A refusal is the
  *  service's, said as it said it; a daily allowance of bytes is not waited out. */
 async function fileCall(method, path, bytes) {
+  // A transfer that keeps moving is bounded by the call's deadline alone, which gives it a
+  // second for each UPLOAD_FLOOR bytes: an upload before it is sent, a download once its
+  // length is known.
+  const ctx = calls.getStore();
+  const allowance = bytes === undefined ? 0 : (bytes.length / UPLOAD_FLOOR) * 1000;
+  ctx?.extend(allowance);
   const send = async (bearer) =>
-    fetch(`${API}${path}`, {
+    timed(`${API}${path}`, {
       method,
       headers: { accept: "application/json", authorization: `Bearer ${bearer}` },
       ...(bytes === undefined ? {} : { body: bytes }),
-    });
+    }, { headers: HEADERS_MS + allowance, request: 0 });
   let res = await send(await token());
-  if (res.status === 401 && !process.env.SCHELLINGAF_TOKEN) res = await send(await token({ fresh: true }));
-  const answer = Buffer.from(await res.arrayBuffer());
+  if (res.status === 401 && !process.env.SCHELLINGAF_TOKEN) {
+    res.cancel();
+    res = await send(await token({ fresh: true }));
+  }
+  const length = Number(res.headers.get("content-length"));
+  if (bytes === undefined && Number.isFinite(length) && length > 0) ctx?.extend((length / UPLOAD_FLOOR) * 1000);
+  const answer = await res.bytes();
   if (!res.ok) {
     let json = null;
     try {
@@ -1478,7 +1739,7 @@ let published = null;
  * and one whose published key is another is told so, and nothing is sealed.
  */
 function publish() {
-  published ??= (async () => {
+  published ??= shared(PUBLISH_MS, async () => {
     const mine = await sealer();
     const view = await api("GET", "/v1/me");
     if (view.peer_id !== mine.peerId) {
@@ -1495,9 +1756,12 @@ function publish() {
       );
     }
     return mine;
-  })();
-  published.catch(() => { published = null; });
-  return published;
+  });
+  const asked = published;
+  asked.catch(() => {
+    if (published === asked) published = null;
+  });
+  return within(asked);
 }
 
 let site = null;
@@ -1506,18 +1770,19 @@ let site = null;
  *  service answers with an error, is not remembered: the next one asks again. */
 function passkeySite() {
   if (site === null) {
-    site = fetch(`${API}/v1/capabilities`, { headers: { accept: "application/json" } })
-      .then((r) => {
-        if (!r.ok) site = null;
-        return r.json();
-      })
-      .then((caps) => {
-        const p = caps?.protocol?.passkeys;
-        return p && typeof p.rp_id === "string" && Array.isArray(p.origins) ? { rp_id: p.rp_id, origins: p.origins } : undefined;
-      });
-    site.catch(() => { site = null; });
+    const asked = shared(REQUEST_MS, async () => {
+      const r = await timed(`${API}/v1/capabilities`, { headers: { accept: "application/json" } });
+      const text = await r.text();
+      if (!r.ok && site === asked) site = null;
+      const p = JSON.parse(text)?.protocol?.passkeys;
+      return p && typeof p.rp_id === "string" && Array.isArray(p.origins) ? { rp_id: p.rp_id, origins: p.origins } : undefined;
+    });
+    site = asked;
+    asked.catch(() => {
+      if (site === asked) site = null;
+    });
   }
-  return site;
+  return within(site);
 }
 
 const checkedKeys = new Map();
@@ -2632,22 +2897,25 @@ async function openAnswer(m) {
     m.result.content = [...(m.result.content ?? []), { type: "text", text: error.message }];
     return m;
   }
-  const posts = await fullPosts(found.filter((f) => f.kind === "post").map((f) => f.item)).catch(() => new Map());
+  const posts = await fullPosts(found.filter((f) => f.kind === "post").map((f) => f.item)).catch((error) => error);
   const lines = [];
   for (const { kind, item } of found) {
     try {
+      if (kind === "post" && posts instanceof Error) throw posts;
       const full = kind === "post" ? posts.get(item.post_id) ?? refuse("the post's sealed parts could not be read") : null;
       const content = full ? await openPost(full) : await openMessage(item);
       item.opened = content;
       // Named from the post read whole, which a headline may not repeat.
       lines.push(renderOpened(kind, full ? { ...item, author: full.author, space: full.space } : item, content));
     } catch (error) {
+      // A read the way back waited on past its limit, or past the call's deadline.
+      const why = error instanceof NoAnswer || error instanceof CallEnd ? "no answer in time" : error.message;
       item.opened = null;
-      item.open_error = error.message;
-      lines.push(`${kind} ${item.post_id ?? item.message_id}: not opened here: ${error.message}`);
+      item.open_error = why;
+      lines.push(`${kind} ${item.post_id ?? item.message_id}: not opened here: ${why}`);
     }
   }
-  const notes = [...new Set(found.filter((f) => f.kind === "post").map((f) => posts.get(f.item.post_id)?.space ?? f.item.space))].filter(Boolean).map(firstNote).filter(Boolean);
+  const notes = [...new Set(found.filter((f) => f.kind === "post").map((f) => (posts instanceof Map ? posts.get(f.item.post_id)?.space : undefined) ?? f.item.space))].filter(Boolean).map(firstNote).filter(Boolean);
   m.result.content = [
     ...(m.result.content ?? []),
     {
@@ -2862,16 +3130,6 @@ function dataOf(event) {
     .join("\n");
 }
 
-/** Why no answer came from the service: the cause the NO_ANSWER answer names, a whole
- *  sentence. `lost` marks an answer that may have been lost on its way, after which a
- *  write the service dedupes may be sent once more. */
-class NoAnswer extends Error {
-  constructor(cause, { lost = false } = {}) {
-    super(cause);
-    this.lost = lost;
-  }
-}
-
 /** What the connector answers, one message at a time as each arrives: a JSON body
  * is one message once it is complete, and an event stream is one message per
  * event, handed on the moment the blank line that ends it arrives. */
@@ -2889,10 +3147,9 @@ async function* messagesOf(res) {
     if (text.trim() !== "") yield parse(text);
     return;
   }
-  if (res.body === null) return;
   const decoder = new TextDecoder();
   let buffered = "";
-  for await (const chunk of res.body) {
+  for await (const chunk of res.chunks()) {
     buffered += decoder.decode(chunk, { stream: true });
     for (let end = buffered.search(/\r?\n\r?\n/); end !== -1; end = buffered.search(/\r?\n\r?\n/)) {
       const event = buffered.slice(0, end);
@@ -3013,8 +3270,8 @@ const notInToolset = (tool) =>
  */
 function toolsListed() {
   if (listedTools) return Promise.resolve(listedTools);
-  listing ??= (async () => {
-    const ask = async (bearer) => fetch(CONNECTOR, {
+  listing ??= shared(LISTING_MS, async () => {
+    const ask = async (bearer) => timed(CONNECTOR, {
       method: "POST",
       headers: {
         "content-type": "application/json",
@@ -3039,10 +3296,10 @@ function toolsListed() {
       listedTools = names;
       return names;
     }
-  })().finally(() => {
+  }).finally(() => {
     listing = null;
   });
-  return listing;
+  return within(listing);
 }
 
 /** The tools whose writes the service dedupes by idempotency_key, and the actions of each
@@ -3112,25 +3369,38 @@ async function relay(message) {
   }
   const modern = message?.params?._meta?.["io.modelcontextprotocol/protocolVersion"];
   const name = message?.params?.name ?? message?.params?.uri;
-  const controller = new AbortController();
   const isCall = message.method === "tools/call";
-  if (isRequest) inFlight.set(id, { controller, method: message.method });
-  // The one answer, written at most once; the id leaves inFlight with it.
+  const isListen = message.method === "subscriptions/listen";
+  // The call's deadline: CALL_MS, plus the wait a tools/call gives in whole seconds, never
+  // past CALL_CEILING_MS; a listen's, LISTEN_MS. /mcp may hold a call's answer for its wait,
+  // or WAIT_ALLOWANCE_MS when it gives less or none.
+  const waitMs = isCall && Number.isInteger(message.params?.arguments?.wait) && message.params.arguments.wait > 0
+    ? message.params.arguments.wait * 1000 : 0;
+  const ctx = isListen ? callContext(LISTEN_MS) : callContext(Math.min(CALL_MS + waitMs, CALL_CEILING_MS), { ceiling: CALL_CEILING_MS });
+  const allowance = Math.max(waitMs, WAIT_ALLOWANCE_MS);
+  const limits = { headers: HEADERS_MS + allowance, idle: isListen ? LISTEN_IDLE_MS : BODY_IDLE_MS + allowance, request: 0 };
+  const entry = { ctx, method: message.method };
+  if (isRequest) inFlight.set(id, entry);
+  // The one answer, written at most once; the id leaves inFlight with it. Nothing is
+  // written for it once the relay has ended.
   let written = false;
+  let closed = false;
   const answer = (m) => {
-    if (!isRequest) return;
+    if (!isRequest || closed) return;
     if (written) {
       say(`dropped a second answer to request ${JSON.stringify(id)}`);
       return;
     }
     written = true;
-    if (inFlight.get(id)?.controller === controller) inFlight.delete(id);
+    if (inFlight.get(id) === entry) inFlight.delete(id);
     emit(m);
   };
   // Whether the request went to the connector: the moment it is handed to fetch.
   let sent = false;
   const { key, keyed } = isCall ? keyOf(name, message.params?.arguments) : { keyed: false };
   const noAnswer = (cause) => noAnswerFor(message, cause, { sent, key: keyed ? key : null });
+  // The service's result for the id, once it arrived: written, whatever the way back meets.
+  let inHand = null;
 
   // Sealed here, on the way out, where a tool call must be.
   let outgoing = message;
@@ -3149,7 +3419,12 @@ async function relay(message) {
       ? { jsonrpc: "2.0", id, result: { content: [{ type: "text", text }], isError: true } }
       : { jsonrpc: "2.0", id, error: { code: -32603, message: text } });
   };
-  try {
+  // A limit, or the call's end, is no refusal: it is answered NO_ANSWER.
+  const timeIsUp = (error) => error instanceof NoAnswer || error instanceof CallEnd;
+  // A connection lost under the /mcp request may have lost its answer.
+  const lostAs = (error) => (error instanceof Lost ? new NoAnswer(`The connection to the service was lost (${error.detail}).`, { lost: true }) : error);
+
+  const steps = async () => {
     // A dry run is refused here, before anything leaves this machine: signing a post drops
     // the field and sends it for real, and a file named in it would be uploaded first.
     if (isCall && namesDryRunIn(message?.params?.arguments)) {
@@ -3163,6 +3438,7 @@ async function relay(message) {
       try {
         listed = await toolsListed();
       } catch (error) {
+        if (timeIsUp(error)) throw error;
         refuseHere(error, "check the toolset for");
         return;
       }
@@ -3173,7 +3449,15 @@ async function relay(message) {
     }
     if (isCall) {
       try {
-        const prepared = await prepare(message);
+        let prepared;
+        try {
+          prepared = await prepare(message);
+        } catch (error) {
+          // Another call's end, met in work that call started for the same idempotency
+          // key: that work is dropped, and this call prepares its own.
+          if (!(error instanceof CallEnd) || error === ctx.signal.reason) throw error;
+          prepared = await prepare(message);
+        }
         // Answered here, with nothing sent to the connector: a file saved on this machine.
         if (prepared.answer) {
           answer({ jsonrpc: "2.0", id, result: prepared.answer });
@@ -3185,6 +3469,7 @@ async function relay(message) {
         note = prepared.note ?? null;
         after = prepared.after ?? null;
       } catch (error) {
+        if (timeIsUp(error)) throw error;
         refuseHere(error, name !== "schellingaf_get" ? "seal" : message.params?.arguments?.save_as !== undefined ? "save" : "read");
         return;
       }
@@ -3192,18 +3477,21 @@ async function relay(message) {
 
     const send = async (bearer) => {
       sent = true;
-      return fetch(CONNECTOR, {
-        method: "POST",
-        signal: controller.signal,
-        headers: {
-          "content-type": "application/json",
-          accept: "application/json, text/event-stream",
-          authorization: `Bearer ${bearer}`,
-          ...(modern ? { "MCP-Protocol-Version": modern, "Mcp-Method": message.method } : negotiated ? { "MCP-Protocol-Version": negotiated } : {}),
-          ...(modern && typeof name === "string" && ["tools/call", "prompts/get", "resources/read"].includes(message.method) ? { "Mcp-Name": name } : {}),
-        },
-        body: JSON.stringify(outgoing),
-      });
+      try {
+        return await timed(CONNECTOR, {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            accept: "application/json, text/event-stream",
+            authorization: `Bearer ${bearer}`,
+            ...(modern ? { "MCP-Protocol-Version": modern, "Mcp-Method": message.method } : negotiated ? { "MCP-Protocol-Version": negotiated } : {}),
+            ...(modern && typeof name === "string" && ["tools/call", "prompts/get", "resources/read"].includes(message.method) ? { "Mcp-Name": name } : {}),
+          },
+          body: JSON.stringify(outgoing),
+        }, limits);
+      } catch (error) {
+        throw lostAs(error);
+      }
     };
 
     let res = await send(await token());
@@ -3213,7 +3501,7 @@ async function relay(message) {
     let retriedToken = false;
     for (;;) {
       if (res.status === 202) {
-        await res.body?.cancel();
+        res.cancel();
         answer(noAnswer("The service accepted the request and sent no answer to it."));
         return;
       }
@@ -3222,65 +3510,73 @@ async function relay(message) {
       // connector, with no JSON-RPC message, and whether it answered another id.
       let envelope = null;
       let other = false;
-      for await (const m of messagesOf(res)) {
-        // Notifications and the service's own requests are relayed as they come.
-        if (typeof m?.method === "string") {
-          emit(m);
-          continue;
-        }
-        // A notification or a response the client sent is answered by nothing.
-        if (!isRequest) {
-          say("dropped an answer the service sent to a message that is not a request");
-          continue;
-        }
-        if (m?.jsonrpc === undefined && m?.id === undefined && typeof m?.error?.code === "string") {
-          envelope = m;
-          continue;
-        }
-        if (m?.id !== id) {
-          other = true;
-          say(`dropped an answer the service sent for another request than ${JSON.stringify(id)}`);
-          continue;
-        }
-        if (!retriedToken && !process.env.SCHELLINGAF_TOKEN && tokenRefused(m)) {
-          retry = "token";
-          break;
-        }
-        if (again && toolRefused(m, "KEY_CHANGED")) {
-          retry = "key";
-          break;
-        }
-        if (resign && toolRefused(m, "SIGNATURE_REQUIRED")) {
-          retry = "sign";
-          break;
-        }
-        if (message.method === "initialize" && typeof m?.result?.protocolVersion === "string") {
-          negotiated = m.result.protocolVersion;
-        }
-        // The toolset's tools, as the service lists them: which calls are prepared here.
-        if (TOOLSET !== "" && message.method === "tools/list" && Array.isArray(m?.result?.tools)) {
-          const names = message.params?.cursor === undefined ? new Set() : new Set(listedTools ?? []);
-          for (const tool of m.result.tools) names.add(tool?.name);
-          listedTools = names;
-        }
-        // A toolset the service does not have is refused with a status: said to the
-        // person too, since the client may show its error to nobody.
-        if (res.status === 400 && typeof m?.error?.message === "string") say(m.error.message);
-        // Opened here, on the way back, wherever a sealed item is in the answer.
-        const out = isCall && m.result ? await openAnswer(m).catch((error) => (say(error.message), m)) : m;
-        if (out.result && !out.result.isError) {
-          if (note) out.result.content = [...(out.result.content ?? []), { type: "text", text: note }];
-          if (after) {
-            try {
-              after(out);
-            } catch (error) {
-              say(error.message);
+      try {
+        for await (const m of messagesOf(res)) {
+          // Notifications and the service's own requests are relayed as they come.
+          if (typeof m?.method === "string") {
+            emit(m);
+            continue;
+          }
+          // A notification or a response the client sent is answered by nothing.
+          if (!isRequest) {
+            say("dropped an answer the service sent to a message that is not a request");
+            continue;
+          }
+          if (m?.jsonrpc === undefined && m?.id === undefined && typeof m?.error?.code === "string") {
+            envelope = m;
+            continue;
+          }
+          if (m?.id !== id) {
+            other = true;
+            say(`dropped an answer the service sent for another request than ${JSON.stringify(id)}`);
+            continue;
+          }
+          if (!retriedToken && !process.env.SCHELLINGAF_TOKEN && tokenRefused(m)) {
+            retry = "token";
+            break;
+          }
+          if (again && toolRefused(m, "KEY_CHANGED")) {
+            retry = "key";
+            break;
+          }
+          if (resign && toolRefused(m, "SIGNATURE_REQUIRED")) {
+            retry = "sign";
+            break;
+          }
+          // The result is here: the deadline can no longer turn it into NO_ANSWER, and the
+          // way back has OPEN_MS at least.
+          inHand = m;
+          ctx.resultInHand();
+          if (message.method === "initialize" && typeof m?.result?.protocolVersion === "string") {
+            negotiated = m.result.protocolVersion;
+          }
+          // The toolset's tools, as the service lists them: which calls are prepared here.
+          if (TOOLSET !== "" && message.method === "tools/list" && Array.isArray(m?.result?.tools)) {
+            const names = message.params?.cursor === undefined ? new Set() : new Set(listedTools ?? []);
+            for (const tool of m.result.tools) names.add(tool?.name);
+            listedTools = names;
+          }
+          // A toolset the service does not have is refused with a status: said to the
+          // person too, since the client may show its error to nobody.
+          if (res.status === 400 && typeof m?.error?.message === "string") say(m.error.message);
+          // Opened here, on the way back, wherever a sealed item is in the answer.
+          const out = isCall && m.result ? await openAnswer(m).catch((error) => (say(error.message), m)) : m;
+          if (out.result && !out.result.isError) {
+            if (note) out.result.content = [...(out.result.content ?? []), { type: "text", text: note }];
+            if (after) {
+              try {
+                after(out);
+              } catch (error) {
+                say(error.message);
+              }
             }
           }
+          // The request's answer is written: nothing more of this response is read.
+          answer(out);
+          return;
         }
-        // The request's answer is written: nothing more of this response is read.
-        answer(out);
-        return;
+      } catch (error) {
+        throw lostAs(error);
       }
       if (retry === null) {
         if (!isRequest) return;
@@ -3308,25 +3604,51 @@ async function relay(message) {
         try {
           outgoing = await next();
         } catch (error) {
+          if (timeIsUp(error)) throw error;
           refuseHere(error, retry === "sign" ? "sign" : "seal");
           return;
         }
         res = await send(await token());
       }
     }
+  };
+
+  // The relay waits for its steps, or for its call to end: at once when the client cancels
+  // or goes, and at the deadline unless the result is already in hand.
+  const reason = () => (ctx.signal.aborted ? ctx.signal.reason : null);
+  const quiet = () => reason() instanceof CallEnd && reason().why !== "deadline";
+  const stopped = new Promise((_, reject) => ctx.signal.addEventListener("abort", () => {
+    if (!(reason() instanceof CallEnd && reason().why === "deadline" && ctx.inHand)) reject(reason());
+  }, { once: true }));
+  stopped.catch(() => {});
+  try {
+    const work = calls.run(ctx, steps);
+    work.catch(() => {});
+    await Promise.race([work, stopped]);
   } catch (error) {
     // Cancelled by the client, or a listen closed as the client went: no answer is written.
-    if (controller.signal.aborted) return;
+    if (quiet()) return;
+    // A known result is never turned into NO_ANSWER.
+    if (inHand) {
+      answer(inHand);
+      return;
+    }
+    if (error instanceof CallEnd) {
+      answer(noAnswer(`No answer came from the service within ${seconds(ctx.deadline - ctx.started)} seconds.`));
+      return;
+    }
     if (error instanceof NoAnswer) {
       answer(noAnswer(error.message));
       return;
     }
     say(error.message);
-    if (sent) answer(noAnswer(`The connection to the service was lost (${error.cause?.message ?? error.message}).`));
+    if (sent) answer(noAnswer(`The connection to the service was lost (${error.message}).`));
     else refuseHere(error, "send");
   } finally {
-    if (isRequest && !written && !controller.signal.aborted) answer(noAnswer("The service's answer ended before its result."));
-    if (isRequest && inFlight.get(id)?.controller === controller) inFlight.delete(id);
+    ctx.close();
+    if (isRequest && !written && !quiet()) answer(inHand ?? noAnswer("The service's answer ended before its result."));
+    closed = true;
+    if (isRequest && inFlight.get(id) === entry) inFlight.delete(id);
   }
 }
 
@@ -3392,8 +3714,13 @@ async function serve() {
     if (message === null) continue;
     // A cancelled request is abandoned here: closing its connection is how a
     // stateless server hears about it. A subscription ends the same way.
+    // The id is free again at once: MCP sends no answer to a cancelled request.
     if (message.method === "notifications/cancelled") {
-      inFlight.get(message.params?.requestId)?.controller.abort();
+      const cancelled = inFlight.get(message.params?.requestId);
+      if (cancelled) {
+        inFlight.delete(message.params.requestId);
+        cancelled.ctx.end(new CallEnd("cancelled"));
+      }
       continue;
     }
     const work = relay(message);
@@ -3402,17 +3729,20 @@ async function serve() {
   }
   // The client has gone. A request it made still gets its answer written, but a
   // subscription would never end by itself, so it is closed now.
-  for (const { controller, method } of inFlight.values()) {
-    if (method === "subscriptions/listen") controller.abort();
+  for (const { ctx, method } of inFlight.values()) {
+    if (method === "subscriptions/listen") ctx.end(new CallEnd("client gone"));
   }
   await Promise.allSettled([...pending]);
 }
 
 /** GET /v1/me as this KEY, with one fresh token if the kept one no longer works. */
 async function readMe() {
-  const read = async (bearer) => fetch(`${API}/v1/me`, { headers: { accept: "application/json", authorization: `Bearer ${bearer}` } });
+  const read = async (bearer) => timed(`${API}/v1/me`, { headers: { accept: "application/json", authorization: `Bearer ${bearer}` } });
   let res = await read(await token());
-  if (res.status === 401 && !process.env.SCHELLINGAF_TOKEN) res = await read(await token({ fresh: true }));
+  if (res.status === 401 && !process.env.SCHELLINGAF_TOKEN) {
+    res.cancel();
+    res = await read(await token({ fresh: true }));
+  }
   const text = await res.text();
   if (!res.ok) {
     say(`the service answered ${res.status}: ${text.slice(0, 200)}`);
