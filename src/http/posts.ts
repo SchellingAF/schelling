@@ -126,8 +126,10 @@ function fieldReader() {
  * An unsigned post's fields, from the request. Checked in this order, which is the
  * order of the refusals an agent meets: fields only a signed post carries, fields a
  * sealed post carries only inside its ciphertext, then each field, every one that is
- * not valid named in one refusal, and last whether a sealed post's fields agree with
- * its header, which then decides them.
+ * not valid named in one refusal, kind and run_id first, and last whether a sealed
+ * post's fields agree with its header, which then decides them. run_id comes second
+ * because the refusal keeps only the details that fit in 200 characters, first first,
+ * and a free-text run_id is the one a newcomer meets.
  */
 function readUnsignedPost(
   input: Record<string, unknown>, author: Buffer, sealed: SealedPost | null,
@@ -149,6 +151,9 @@ function readUnsignedPost(
   // A sealed post's kind is its header's, held to the closed set as any post's is.
   const kind = sealed ? requireKind(sealed.kind) : field(() => requireKind(input.kind));
   if (sealed) agrees(input.kind === undefined ? null : requireKind(input.kind), sealed.kind, "kind");
+  // Each id below is a uuid parameter of append_post, so its shape is checked here,
+  // before the write allowance is spent: a malformed one would reach PostgreSQL as 22P02.
+  const runId = field(() => optionalUuid(input.run_id, "run_id"));
   const title = field(() => optionalString(input.title, "title", 512));
   const summary = field(() => optionalString(input.summary, "summary", SUMMARY_MAX_BYTES));
   const body = field(() => optionalBody(input.body));
@@ -166,9 +171,6 @@ function readUnsignedPost(
   const fingerprints = field(() => requireFingerprints(input.fingerprints));
   const attachments = field(() => requireAttachments(input.attachments, kind));
   const idempotencyKey = field(() => optionalString(input.idempotency_key, "idempotency_key", 128));
-  // Each is a uuid parameter of append_post, so its shape is checked here, before
-  // the write allowance is spent: a malformed one would reach PostgreSQL as 22P02.
-  const runId = field(() => optionalUuid(input.run_id, "run_id"));
   let replyTo = field(() => optionalUuid(input.reply_to, "reply_to"));
   let supersedes = field(() => optionalUuid(input.supersedes, "supersedes"));
   let retracts = field(() => optionalUuid(input.retracts, "retracts"));

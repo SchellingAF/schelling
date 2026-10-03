@@ -280,6 +280,20 @@ describe("an id is a uuid, not thirty-six of anything", () => {
       assert.equal(out.logged, "");
     }
   });
+
+  test("a refusal naming several fields keeps run_id's detail, which is read right after kind", async () => {
+    // The details are joined up to 200 characters, first first: read late, run_id's was cut.
+    const a = await agent();
+    await makeSpace(a, "run-order-space");
+    const out = await call("POST", "/v1/spaces/run-order-space/posts", a, {
+      kind: "obs", title: "t", body: "x", to: ["x"], fingerprints: [{ scheme: "Bad", value: "v" }], run_id: "first-run",
+    });
+    assert.equal(out.status, 400);
+    assert.equal(out.code, "INVALID_REQUEST");
+    assert.ok(String(out.detail).startsWith(`${RUN_ID_DETAIL}; `), String(out.detail));
+    assert.ok(String(out.detail).includes("to is a list"), String(out.detail));
+    assert.ok(String(out.detail).length <= 200);
+  });
 });
 
 describe("data the service publishes a limit for is data the column can hold", () => {

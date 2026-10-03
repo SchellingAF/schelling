@@ -274,7 +274,7 @@ export function newSpaceName(input: Record<string, unknown>): string {
 export function newJoinPolicy(input: Record<string, unknown>): string {
   const joinPolicy = input.join_policy === undefined ? "request" : String(input.join_policy);
   if (!JOIN_POLICIES.includes(joinPolicy as never)) {
-    throw new ApiError("INVALID_REQUEST", { detail: `join_policy is ${JOIN_POLICIES.join(", ")}` });
+    throw new ApiError("INVALID_REQUEST", { detail: `join_policy is ${JOIN_POLICIES.slice(0, -1).join(", ")} or ${JOIN_POLICIES.at(-1)}` });
   }
   return joinPolicy;
 }
@@ -441,7 +441,7 @@ export function mountSpaces(app: Hono<Env>, config: Config, db: Db, service: Ser
     // either direction, so a public SPACE can never be made private.
     const visibility = input.visibility === undefined ? (oracle ? "public" : "private") : String(input.visibility);
     if (!VISIBILITIES.includes(visibility as never)) {
-      throw new ApiError("INVALID_REQUEST", { detail: `visibility is ${VISIBILITIES.join(", ")}` });
+      throw new ApiError("INVALID_REQUEST", { detail: `visibility is ${VISIBILITIES.slice(0, -1).join(", ")} or ${VISIBILITIES.at(-1)}` });
     }
     if (oracle && visibility !== "public") {
       throw new ApiError("INVALID_REQUEST", { detail: "an oracle space is public" });
@@ -676,7 +676,7 @@ export function mountSpaces(app: Hono<Env>, config: Config, db: Db, service: Ser
     // with an empty page that reads as a directory with nothing in it.
     const policy = c.req.query("join_policy") || null;
     if (policy !== null && !JOIN_POLICIES.includes(policy as never)) {
-      throw new ApiError("INVALID_REQUEST", { detail: `join_policy is ${JOIN_POLICIES.join(", ")}` });
+      throw new ApiError("INVALID_REQUEST", { detail: `join_policy is ${JOIN_POLICIES.slice(0, -1).join(", ")} or ${JOIN_POLICIES.at(-1)}` });
     }
     // The category and every category below it, resolved in memory before any read.
     const filter = requireCategoryFilter(c.req.query("category"));
@@ -1152,7 +1152,7 @@ export function mountSpaces(app: Hono<Env>, config: Config, db: Db, service: Ser
     const description = optionalString(input.description, "description", 8192);
     const joinPolicy = (input.join_policy ?? null) as string | null;
     if (joinPolicy !== null && !JOIN_POLICIES.includes(joinPolicy as never)) {
-      throw new ApiError("INVALID_REQUEST", { detail: `join_policy is ${JOIN_POLICIES.join(", ")}` });
+      throw new ApiError("INVALID_REQUEST", { detail: `join_policy is ${JOIN_POLICIES.slice(0, -1).join(", ")} or ${JOIN_POLICIES.at(-1)}` });
     }
     const signedOnly = optionalBoolean(input.signed_only, "signed_only");
     if (input.oracle !== undefined) throw new ApiError("INVALID_REQUEST", {

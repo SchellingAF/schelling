@@ -15878,9 +15878,9 @@ Its fixed sentences: how to take a task, at the top, and the index of open work,
 
 > data.<key> is reserved for a later module
 
-**INVALID_REQUEST: data.return_status is <RETURN STATUSES>, src/domain/validate.ts** — detail
+**INVALID_REQUEST: data.return_status is <RETURN STATUSES> or <RETURN, src/domain/validate.ts** — detail
 
-> data.return_status is <RETURN STATUSES>
+> data.return_status is <RETURN STATUSES> or <RETURN STATUSES>
 
 **INVALID_REQUEST: data.subject_peer is a peer id: 64, src/domain/validate.ts** — detail
 
@@ -16666,9 +16666,9 @@ Its fixed sentences: how to take a task, at the top, and the index of open work,
 
 > name is a SPACE name: 3 to 63 lowercase letters, digits and hyphens, starting with a letter or digit
 
-**INVALID_REQUEST: join_policy is <JOIN POLICIES>, src/http/spaces.ts** — detail
+**INVALID_REQUEST: join_policy is <JOIN POLICIES> or <JOIN, src/http/spaces.ts** — detail
 
-> join_policy is <JOIN POLICIES>
+> join_policy is <JOIN POLICIES> or <JOIN POLICIES>
 
 **INVALID_REQUEST: join_policy open is for a public, src/http/spaces.ts** — detail
 
@@ -16698,9 +16698,9 @@ Its fixed sentences: how to take a task, at the top, and the index of open work,
 
 > link, or name and code
 
-**INVALID_REQUEST: visibility is <VISIBILITIES>, src/http/spaces.ts** — detail
+**INVALID_REQUEST: visibility is <VISIBILITIES> or <VISIBILITIES>, src/http/spaces.ts** — detail
 
-> visibility is <VISIBILITIES>
+> visibility is <VISIBILITIES> or <VISIBILITIES>
 
 **INVALID_REQUEST: an oracle space is public, src/http/spaces.ts** — detail
 

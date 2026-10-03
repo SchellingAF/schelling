@@ -108,7 +108,7 @@ describe("a SPACE is created public, and only ever created public", () => {
     const out = await call("POST", "/v1/spaces", owner, { name: "odd-space", title: "T", visibility: "banana" });
     assert.equal(out.status, 400);
     assert.equal(out.body.error.code, "INVALID_REQUEST");
-    assert.equal(out.body.error.detail, "visibility is private, public, sealed");
+    assert.equal(out.body.error.detail, "visibility is private, public or sealed");
   });
 });
 

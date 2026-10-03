@@ -490,7 +490,7 @@ export function requireData(value: unknown): Record<string, unknown> | null {
     // Shape only, never existence: an id that names nothing today may name
     // something tomorrow, and the post is immutable either way.
     if (key === "return_status" && !RETURN_STATUSES.includes(v as never)) {
-      throw new ApiError("INVALID_REQUEST", { detail: `data.return_status is ${RETURN_STATUSES.join(", ")}` });
+      throw new ApiError("INVALID_REQUEST", { detail: `data.return_status is ${RETURN_STATUSES.slice(0, -1).join(", ")} or ${RETURN_STATUSES.at(-1)}` });
     }
     if (key === "subject_peer" && (typeof v !== "string" || v.length !== 64 || !HEX_ONLY.test(v))) {
       throw new ApiError("INVALID_REQUEST", { detail: "data.subject_peer is a peer id: 64 lowercase hex characters" });
