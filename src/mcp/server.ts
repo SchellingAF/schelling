@@ -31,7 +31,7 @@ import type { Config } from "../config.ts";
 import type { Db } from "../db/sql.ts";
 import { ApiError, ERRORS } from "../db/errors.ts";
 import { toHex } from "../domain/keys.ts";
-import { namesDryRun, requireAttachments, requireFingerprints, withAttachmentPrints, type Attachment, type Fingerprint } from "../domain/validate.ts";
+import { namesDryRunIn, requireAttachments, requireFingerprints, withAttachmentPrints, type Attachment, type Fingerprint } from "../domain/validate.ts";
 import { tokenRefusal, touchToken, wellFormedToken, type BearerState } from "../http/auth.ts";
 import { notTaken } from "../http/postview.ts";
 import { connectionSignedPost, openVault, type PostArguments } from "../domain/connection-keys.ts";
@@ -197,8 +197,9 @@ function refuseArgumentsInServiceWords(server: McpServer): void {
     // A dry run is the HTTP API's alone. No tool lists one, since a bridge that predates it
     // signs every post and drops the field, and a schema drops a field it does not list:
     // a dry run sent to any tool, however it is spelt, would be done for real. So an
-    // argument whose name reads as one is refused here, before any tool runs.
-    if (typeof args === "object" && args !== null && Object.keys(args).some(namesDryRun)) {
+    // argument whose name reads as one, or a name at the top of data or budget, is
+    // refused here, before any tool runs.
+    if (namesDryRunIn(args)) {
       const spec = ERRORS.INVALID_REQUEST!;
       throw new Error(`${said("INVALID_REQUEST", spec.message)} (${NO_DRY_RUN_HERE}) ${spec.fix}`);
     }

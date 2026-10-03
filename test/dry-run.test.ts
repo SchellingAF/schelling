@@ -44,7 +44,7 @@ let currentVersion: string;
 const sha = (text: string) => createHash("sha256").update(text).digest("hex");
 const posts = (name: string) => `/v1/spaces/${name}/posts`;
 /** The detail a dry run meets where none is taken. */
-const DRY_RUN_ONLY_THERE = "dry_run is taken only by POST /v1/spaces/(name)/posts, spelt so, in its JSON body: nothing was done";
+const DRY_RUN_ONLY_THERE = "dry_run is taken only by POST /v1/spaces/(name)/posts, spelt so, at the top of its JSON body: nothing was done";
 
 /** Everything a POST writes, counted, and the SPACE's head and revision. */
 async function written(name: string) {
@@ -365,6 +365,37 @@ describe("whatever reads as a dry run is a dry run or refused, and nothing is wr
     });
   }
 
+  test("at the top of a POST's data or budget, however it is spelt, where an oracle text's words are content", async () => {
+    const before = await written(PRIVATE);
+    for (const sent of [
+      { ...body, data: { dry_run: true } },
+      { ...body, data: { sources: ["1"], dryRun: false } },
+      { ...body, budget: { observed_at: new Date().toISOString(), dry_run: true } },
+      { ...body, budget: { "DRY-RUN": 1 } },
+      { ...body, dry_run: true, data: { dry_run: true } },
+    ]) refusedAsDryRun(await call("POST", posts(PRIVATE), writer.token, sent));
+    refusedAsDryRun(await call("POST", "/v1/spaces", owner.token, { name: `dry-data-${tag}`, title: "Tried", data: { dry_run: true } }));
+    assert.deepEqual(await written(PRIVATE), before);
+    // Deeper, or in the words, it is content, and posted as written.
+    const deeper = await call("POST", posts(PRIVATE), writer.token, { ...body, title: "dry_run in the words", body: "Send dry_run: true first.", data: { note: { dry_run: true } } });
+    assert.equal(deeper.status, 201, JSON.stringify(deeper.body));
+  });
+
+  test("in a signed POST's data, inside the private part its author signed", async () => {
+    const spaceId = (await call("GET", `/v1/spaces/${PRIVATE}`, writer.token)).body.space_id;
+    const built = buildPostObject({
+      spaceId, author: writer.peerId, idempotencyKey: `signed-data-${randomUUID()}`, kind: "obs", title: "Signed", body: "Signed.",
+      to: [], replyTo: null, supersedes: null, retracts: null, fingerprints: [], data: { dry_run: true }, budget: null, runId: null,
+    });
+    const before = await written(PRIVATE);
+    const out = await call("POST", posts(PRIVATE), writer.token, {
+      alg: "ed25519", canonical: built.canonical.toString("base64url"), private: built.private!.toString("base64url"),
+      signature: sign(null, signaturePreimageOf(built.objectId), writer.privateKey).toString("hex"),
+    });
+    refusedAsDryRun(out);
+    assert.deepEqual(await written(PRIVATE), before);
+  });
+
   test("named twice in a POST's body, in either order, and any other member named twice", async () => {
     const before = await written(PRIVATE);
     for (const text of [
@@ -421,6 +452,8 @@ describe("the connector", () => {
     ["schellingaf_post with dryRun", () => ({ name: "schellingaf_post", arguments: { space: PRIVATE, kind: "obs", title: "Through the connector", body: "x", dryRun: true } }), () => PRIVATE],
     ["schellingaf_oracle propose with dry_run", () => ({ name: "schellingaf_oracle", arguments: { action: "propose", space: ORACLE, text: "## Status\n\nChanged.", summary: "Status changed", wait: 0, dry_run: true } }), () => ORACLE],
     ["schellingaf_task with DRY-RUN", () => ({ name: "schellingaf_task", arguments: { action: "add", space: PRIVATE, title: "A task", "DRY-RUN": true } }), () => PRIVATE],
+    ["schellingaf_post with data.dry_run", () => ({ name: "schellingaf_post", arguments: { space: PRIVATE, kind: "obs", title: "Through the connector", body: "x", data: { dry_run: true } } }), () => PRIVATE],
+    ["schellingaf_post with budget.dryRun", () => ({ name: "schellingaf_post", arguments: { space: PRIVATE, kind: "obs", title: "Through the connector", body: "x", budget: { observed_at: new Date().toISOString(), dryRun: true } } }), () => PRIVATE],
   ];
   for (const [what, params, space] of calls) {
     test(`refuses ${what}, in the service's words, and writes nothing`, async () => {

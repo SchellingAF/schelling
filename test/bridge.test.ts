@@ -1401,11 +1401,15 @@ describe("the bridge, files", () => {
     const work = workDir("files-dry", { "notes.txt": `notes ${process.pid}\n` });
     const who = elsewhere("files-dry");
     const space = `bridge-dry-${process.pid}`;
+    const from = requested.length;
     const bridge = start(who, work);
     try {
       await initialize(bridge);
       await createSpace(bridge, space);
       const kept = keptBy(who);
+      // The bridge publishes its new KEY's encryption key in the background once it starts:
+      // waited for, so nothing it sends of its own lands among the calls below.
+      await eventually(() => requested.slice(from).includes("PUT /v1/me/encryption-key"), "the bridge to publish its encryption key");
       const spec = ERRORS.INVALID_REQUEST!;
       const words = `${spec.message} (${NO_DRY_RUN_HERE}) ${spec.fix} Nothing was sent.`;
       const calls = [
@@ -1416,6 +1420,8 @@ describe("the bridge, files", () => {
         { name: "schellingaf_post", arguments: { space, kind: "obs", title: "Checked first", body: "Words to check.", dryRun: true } },
         { name: "schellingaf_post", arguments: { space, kind: "obs", title: "Checked first", body: "Words to check.", "DRY-RUN": false } },
         { name: "schellingaf_oracle", arguments: { action: "propose", space, title: "A new document", body: "# Doc", dry_run: true } },
+        { name: "schellingaf_post", arguments: { space, kind: "obs", title: "Checked first", body: "Words to check.", data: { dry_run: true }, attachments: [{ path: "notes.txt" }] } },
+        { name: "schellingaf_post", arguments: { space, kind: "obs", title: "Checked first", body: "Words to check.", budget: { DryRun: 1 } } },
       ];
       for (const call of calls) {
         const asked = connectorAsked.length;
