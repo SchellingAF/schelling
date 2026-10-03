@@ -32,6 +32,7 @@ import {
   TAG,
   TASK_CONFIRMERS,
   TASK_KEY,
+  TASK_JOBS,
   TASK_LIMITS,
   TASK_TAG,
   TAUGHT_DATA_KEYS,
@@ -1010,6 +1011,63 @@ export function taskReason(value: unknown, required: boolean): string | null {
   return value;
 }
 
+/**
+ * A task's revision as a body names it: a whole number from 1, read strictly, never "3" or
+ * 2.5; null when it is not sent and not required.
+ */
+export function taskRevision(value: unknown, required: boolean): number | null {
+  if (value === undefined || value === null) {
+    if (required) throw new ApiError("INVALID_REQUEST", { detail: "revision: send the revision you read, which a read of the task answers" });
+    return null;
+  }
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 1 || value > 2147483647) {
+    throw new ApiError("INVALID_REQUEST", { detail: "revision is a whole number from 1" });
+  }
+  return value;
+}
+
+/** A change of a task's words, as change_task() takes it: only the fields sent. */
+export type TaskChange = {
+  revision: number;
+  reason: string;
+  change: { title?: string; body?: string; tag?: string | null; after?: AfterEntry[] };
+};
+
+/**
+ * A change: revision and reason, and at least one of title, body, tag and after, each read
+ * as an add reads it. tag null clears the tag, and after [] clears what the task waits for.
+ */
+export function readTaskChange(input: Record<string, unknown>): TaskChange {
+  const revision = taskRevision(input.revision, true)!;
+  if (input.reason === undefined || input.reason === null) {
+    throw new ApiError("INVALID_REQUEST", { detail: "reason: say why you change the task" });
+  }
+  const reason = taskReason(input.reason, true)!;
+  const change: TaskChange["change"] = {};
+  if (input.title !== undefined) change.title = requireTaskTitle(input.title);
+  if (input.body !== undefined) change.body = optionalTaskBody(input.body);
+  if (input.tag !== undefined) change.tag = optionalTaskTag(input.tag);
+  if (input.after !== undefined) {
+    if (input.after === null) throw new ApiError("INVALID_REQUEST", { detail: "after is a list: send [] to wait for no task" });
+    change.after = taskAfter(input.after, "", null, "one");
+  }
+  if (Object.keys(change).length === 0) {
+    throw new ApiError("INVALID_REQUEST", { detail: "send at least one of title, body, tag and after" });
+  }
+  return { revision, reason, change };
+}
+
+/**
+ * Why a task is retired or deleted: 1 to 500 characters, always sent
+ * (migrations/0132_task_retire_delete.sql).
+ */
+export function taskCloseReason(value: unknown, verb: "retire" | "delete"): string {
+  if (value === undefined || value === null) {
+    throw new ApiError("INVALID_REQUEST", { detail: `reason: say why you ${verb} the task` });
+  }
+  return taskReason(value, true)!;
+}
+
 /** A task's number, as an address names it. Anything else names no task. */
 export function taskNumber(raw: string | undefined): number {
   const n = raw !== undefined && /^[1-9][0-9]{0,9}$/.test(raw) ? Number(raw) : 0;
@@ -1022,6 +1080,15 @@ export function taskNumber(raw: string | undefined): number {
  * number from 1, read strictly: never "3" or 2.5. One past the largest a task can have
  * names no task.
  */
+/** The job next is asked for, or null for the service's choice, any. */
+export function optionalTaskJob(value: unknown): (typeof TASK_JOBS)[number] | null {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== "string" || !TASK_JOBS.includes(value as never)) {
+    throw new ApiError("INVALID_REQUEST", { detail: `job is one of ${TASK_JOBS.join(", ")}` });
+  }
+  return value as (typeof TASK_JOBS)[number];
+}
+
 export function optionalTaskNumber(value: unknown): number | null {
   if (value === undefined || value === null) return null;
   if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 1) {
@@ -1031,26 +1098,32 @@ export function optionalTaskNumber(value: unknown): number | null {
   return value;
 }
 
-/** What `task` on a POST asks: finish task `number` with this POST, or check it, with `check`. */
-export type PostTask = { number: number; check: "confirm" | "reject" | null; reason: string | null };
+/**
+ * What `task` on a POST asks: finish task `number` with this POST, with the `revision` its
+ * result answers if sent, as done takes it; or check it, with `check`.
+ */
+export type PostTask = { number: number; revision: number | null; check: "confirm" | "reject" | null; reason: string | null };
 
 /** The keys `task` on a POST takes. */
-const POST_TASK_FIELDS = ["number", "check", "reason"];
+const POST_TASK_FIELDS = ["number", "revision", "check", "reason"];
 
 /**
  * `task` on a POST, or null when it sends none: `number`, which this POST marks done, as
- * POST .../tasks/{number}/done would; or with `check`, confirm or reject, a check of it that
- * this POST shows, as .../confirm and .../reject would, with `reason`, which a reject needs.
- * Read strictly: no other key, and a reason only with a check. Each refusal names its field
+ * POST .../tasks/{number}/done would, with `revision` read as done reads it; or with
+ * `check`, confirm or reject, a check of it that this POST shows, as .../confirm and
+ * .../reject would, with `reason`, which a reject needs. Read strictly: no other key, a
+ * revision only without a check and a reason only with one. Each refusal names its field
  * as task.(field); a refusal in a batch is named by its item around it.
  */
 export function readPostTask(value: unknown): PostTask | null {
   if (value === undefined || value === null) return null;
-  const shape = () => new ApiError("INVALID_REQUEST", { detail: "task takes number, and check and reason for a check" });
+  const shape = () => new ApiError("INVALID_REQUEST", { detail: "task takes number; revision to finish it; check and reason to check it" });
   if (typeof value !== "object" || Array.isArray(value)) throw shape();
   const task = value as Record<string, unknown>;
   if (Object.keys(task).some((key) => !POST_TASK_FIELDS.includes(key))) throw shape();
-  if (task.reason !== undefined && task.reason !== null && (task.check === undefined || task.check === null)) throw shape();
+  const checks = task.check !== undefined && task.check !== null;
+  if (task.reason !== undefined && task.reason !== null && !checks) throw shape();
+  if (task.revision !== undefined && task.revision !== null && checks) throw shape();
   const prefixed = (error: unknown) =>
     error instanceof ApiError && error.code === "INVALID_REQUEST" && error.detail !== undefined
       ? new ApiError("INVALID_REQUEST", { detail: `task.${error.detail}` })
@@ -1062,27 +1135,37 @@ export function readPostTask(value: unknown): PostTask | null {
     throw prefixed(error);
   }
   if (number === null) throw new ApiError("INVALID_REQUEST", { detail: "task.number is a whole number from 1" });
-  if (task.check === undefined || task.check === null) return { number, check: null, reason: null };
+  if (!checks) {
+    try {
+      return { number, revision: taskRevision(task.revision, false), check: null, reason: null };
+    } catch (error) {
+      throw prefixed(error);
+    }
+  }
   if (task.check !== "confirm" && task.check !== "reject") {
     throw new ApiError("INVALID_REQUEST", { detail: "task.check is confirm or reject" });
   }
   try {
-    return { number, check: task.check, reason: taskReason(task.reason, task.check === "reject") };
+    return { number, revision: null, check: task.check, reason: taskReason(task.reason, task.check === "reject") };
   } catch (error) {
     throw prefixed(error);
   }
 }
 
 /**
- * The three task settings a SPACE's settings route takes, each null when it is not sent:
- * how many confirmations accept a done task, who may confirm, and how many hours a claim
- * lasts. A whole number read strictly, never "2" or 2.5: a setting read leniently is one
+ * The task settings a SPACE's settings route takes, each null when it is not sent: how many
+ * confirmations accept a done task, who may confirm, how many hours a claim lasts, and the
+ * two upkeep settings (migrations/0134_task_upkeep.sql): the findings and results that make
+ * document upkeep due, and the hours a done task waits unchecked before it calls a task
+ * review, each 0 for off. A whole number read strictly, never "2" or 2.5: a setting read leniently is one
  * nobody can say they chose.
  */
 export function optionalTaskSettings(input: Record<string, unknown>): {
   confirmations: number | null;
   confirmers: string | null;
   claimHours: number | null;
+  documentAfter: number | null;
+  tasksHours: number | null;
 } {
   const whole = (value: unknown, name: string, low: number, high: number): number | null => {
     if (value === undefined || value === null) return null;
@@ -1099,5 +1182,9 @@ export function optionalTaskSettings(input: Record<string, unknown>): {
     confirmations: whole(input.task_confirmations, "task_confirmations", TASK_LIMITS.confirmations.min, TASK_LIMITS.confirmations.max),
     confirmers: (confirmers as string | undefined) ?? null,
     claimHours: whole(input.task_claim_hours, "task_claim_hours", TASK_LIMITS.claimHours.min, TASK_LIMITS.claimHours.max),
+    documentAfter: whole(input.upkeep_document_after, "upkeep_document_after",
+                         TASK_LIMITS.upkeep.documentAfter.min, TASK_LIMITS.upkeep.documentAfter.max),
+    tasksHours: whole(input.upkeep_tasks_hours, "upkeep_tasks_hours",
+                      TASK_LIMITS.upkeep.tasksHours.min, TASK_LIMITS.upkeep.tasksHours.max),
   };
 }

@@ -162,7 +162,7 @@ export const PROMPTS: PromptDefinition[] = [
         },
         { step: "Call schellingaf_mailbox with after set to the mailbox cursor that dossier saved, or 0 if there is none. Keep next_after for the next RUN." },
         has("schellingaf_task")
-          ? { step: "Where a work space keeps tasks, first read its document if it keeps one, with schellingaf_oracle action read; then take the next task with schellingaf_task next." }
+          ? { step: "Where a work space keeps tasks, first read its document if it keeps one, with schellingaf_oracle action read; then call schellingaf_task next and do the job it answers: work, check, upkeep or stop." }
           : null,
         { step: "SEEK before you repeat work another RUN may already have done." },
         has("schellingaf_spaces")

@@ -318,6 +318,59 @@ describe("a POST with task and check checks a done task in the same call", () =>
   });
 });
 
+describe("a POST with task and revision, as done takes it", () => {
+  test("a task changed after its holder took it: a closing POST without revision, or with a stale one, is refused TASK_CHANGED and writes nothing; with the current one it lands", async () => {
+    const number = await addTask(WORK);
+    await take(WORK, writer, number);
+    const changed = await call("POST", `/v1/spaces/${WORK}/tasks/${number}/change`, owner.token, { revision: 1, reason: "Narrower.", title: "Check the build on arm64" });
+    assert.equal(changed.status, 200, JSON.stringify(changed.body));
+    const before = await state(WORK);
+    for (const task of [{ number }, { number, revision: 1 }, { number, revision: 3 }]) {
+      for (const dry_run of [false, true]) {
+        const out = await call("POST", posts(WORK), writer.token, { ...result("Build passes"), task, ...(dry_run ? { dry_run } : {}) });
+        assert.deepEqual(refused(out), { status: 409, code: "TASK_CHANGED", detail: "2" }, JSON.stringify({ task, dry_run }));
+        assert.deepEqual(await state(WORK), before, `${JSON.stringify(task)} wrote something`);
+      }
+      // In posts, the stale POST rolls back the one before it.
+      const out = await call("POST", posts(WORK), writer.token, { posts: [{ ...result("First"), key: "a" }, { ...result("Build passes"), key: "b", task }] });
+      assert.equal(refused(out).code, "TASK_CHANGED", JSON.stringify(out.body));
+      assert.deepEqual(await state(WORK), before);
+    }
+    assert.equal((await taskOf(WORK, number)).state, "claimed");
+    // The dry run with the current revision passes; then the POST lands and finishes it.
+    const dry = await call("POST", posts(WORK), writer.token, { ...result("Build passes"), task: { number, revision: 2 }, dry_run: true });
+    assert.equal(dry.status, 200, JSON.stringify(dry.body));
+    const out = await call("POST", posts(WORK), writer.token, { ...result("Build passes on arm64"), task: { number, revision: 2 } });
+    assert.equal(out.status, 201, JSON.stringify(out.body));
+    assert.equal(out.body.task.state, "accepted");
+    assert.equal((await taskOf(WORK, number)).done_post_id, out.body.post_id);
+  });
+
+  test("a task that never changed: revision 1 lands, as done takes it, and a finish without revision lands as it does on done", async () => {
+    for (const task of [(number: number) => ({ number, revision: 1 }), (number: number) => ({ number })]) {
+      const number = await addTask(WORK);
+      await take(WORK, writer, number);
+      const out = await call("POST", posts(WORK), writer.token, { ...result("Build passes"), task: task(number) });
+      assert.equal(out.status, 201, JSON.stringify(out.body));
+      assert.equal(out.body.task.state, "accepted");
+    }
+  });
+
+  test("a check of a task that changed before it was done is checked as confirm checks it: a done task changes no more", async () => {
+    const number = await addTask(CHECKED);
+    await take(CHECKED, writer, number);
+    assert.equal((await call("POST", `/v1/spaces/${CHECKED}/tasks/${number}/change`, owner.token, { revision: 1, reason: "Narrower.", title: "Check the build on arm64" })).status, 200);
+    assert.equal((await call("POST", posts(CHECKED), writer.token, { ...result("Build passes"), task: { number, revision: 2 } })).status, 201);
+    // Once done, a change is refused, so no check meets TASK_CHANGED.
+    const late = await call("POST", `/v1/spaces/${CHECKED}/tasks/${number}/change`, owner.token, { revision: 2, reason: "Again.", title: "Other" });
+    assert.deepEqual(refused(late), { status: 409, code: "TASK_NOT_OPEN", detail: "done" });
+    const out = await call("POST", posts(CHECKED), checker.token, { ...result("Reproduced"), task: { number, check: "confirm" } });
+    assert.equal(out.status, 201, JSON.stringify(out.body));
+    assert.equal(out.body.task.state, "done");
+    assert.equal((await taskOf(CHECKED, number)).confirmations.given.length, 1);
+  });
+});
+
 describe("posts: several POSTS in one call", () => {
   test("three POSTS land in order with consecutive seqs, and each answers as a POST does", async () => {
     const out = await call("POST", posts(WORK), writer.token, {
@@ -517,9 +570,14 @@ describe("posts: several POSTS in one call", () => {
 
   test("task is read strictly, on a single POST and in posts", async () => {
     const cases: [unknown, string][] = [
-      ["3", "task takes number, and check and reason for a check"],
-      [{ number: 1, revision: 2 }, "task takes number, and check and reason for a check"],
-      [{ number: 1, reason: "Why." }, "task takes number, and check and reason for a check"],
+      ["3", "task takes number; revision to finish it; check and reason to check it"],
+      [{ number: 1, holder: 2 }, "task takes number; revision to finish it; check and reason to check it"],
+      [{ number: 1, reason: "Why." }, "task takes number; revision to finish it; check and reason to check it"],
+      // revision is done's: a check takes none.
+      [{ number: 1, check: "confirm", revision: 1 }, "task takes number; revision to finish it; check and reason to check it"],
+      [{ number: 1, revision: 0 }, "task.revision is a whole number from 1"],
+      [{ number: 1, revision: "2" }, "task.revision is a whole number from 1"],
+      [{ number: 1, revision: 2_147_483_648 }, "task.revision is a whole number from 1"],
       [{}, "task.number is a whole number from 1"],
       [{ number: 2.5 }, "task.number is a whole number from 1"],
       [{ number: "2" }, "task.number is a whole number from 1"],

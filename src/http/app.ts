@@ -1301,6 +1301,16 @@ export function createApp(config: Config, db: Db): Hono<Env> {
         reason_characters: TASK_LIMITS.reasonCharacters,
         not_accepted_per_space: TASK_LIMITS.notAcceptedPerSpace,
         batch: TASK_LIMITS.batch,
+        revisions: TASK_LIMITS.revisions,
+        check_first_minutes: TASK_LIMITS.checkFirstMinutes,
+        check_offer_minutes: TASK_LIMITS.checkOfferMinutes,
+        // Upkeep: the two settings' bounds and defaults, and the least hours between rounds.
+        upkeep: {
+          document_after: TASK_LIMITS.upkeep.documentAfter,
+          document_gap_hours: TASK_LIMITS.upkeep.documentGapHours,
+          tasks_hours: TASK_LIMITS.upkeep.tasksHours,
+          review_gap_hours: TASK_LIMITS.upkeep.reviewGapHours,
+        },
         confirmations: {
           min: TASK_LIMITS.confirmations.min,
           max: TASK_LIMITS.confirmations.max,
@@ -1492,7 +1502,7 @@ export function createApp(config: Config, db: Db): Hono<Env> {
         status: "available",
         list: "GET /v1/spaces/{name}/tasks",
         next: "POST /v1/spaces/{name}/tasks/next",
-        note: "Members add tasks, next claims the lowest-numbered open one, done needs checks by other members, and a reject reopens it. A claim stops next handing the task to anybody else and locks nothing. No post, event or export records a task; a confirmation, an acceptance, a reject or a give-back by somebody else reaches its holder's mailbox, and a reject its confirmers' too.",
+        note: "Members add tasks. next hands each KEY its next job, work, check, upkeep or stop, and says why. done needs checks by other members, and a reject reopens it. A coordinator or above changes an open or claimed task, and its earlier words are kept. A coordinator or above retires a task not yet accepted, with replacements if it sends them, and a task nobody took may be deleted: its words are erased, and it is read by its number alone. An upkeep task comes from the service's counts, with a fixed brief and created_by null. A claim stops next handing the task to anybody else and locks nothing. No post, event or export records a task or its revisions; a confirmation, an acceptance, a reject, a change, a retire or a give-back by somebody else reaches its holder's mailbox, and a reject its confirmers' too.",
       },
       // A claim with its evidence, as a post of kind finding, and the sources any post
       // cites; see src/http/findings.ts and migrations/0114_findings.sql.

@@ -335,22 +335,31 @@ async function scenario() {
   ok(await call("tasks.next", { name: open }, { token: member.token, json: { tag: "transcription" } }));
   const working = ok(await call("posts.append", { name: open }, { token: member.token, json: { kind: "progress", body: "Lines 1 to 3 typed." } }), 201);
   ok(await call("tasks.progress", { name: open, number: "1" }, { token: member.token, json: { post_id: working.post_id } }));
+  // Its owner changes it while it is held: the holder's renewal says so, and done names the revision.
+  ok(await call("tasks.change", { name: open, number: "1" }, { token: owner.token, query: { detail: "full" }, json: { revision: 1, reason: "Both sides of the page.", body: "Type out both sides.", tag: null } }));
+  ok(await call("tasks.get", { name: open, number: "1" }, { query: { history: "true" } }));
   ok(await call("tasks.next", { name: open }, { token: member.token, json: { number: 1 } }));
   const transcribed = ok(await call("posts.append", { name: open }, { token: member.token, json: { kind: "result", body: "Page 3, typed out." } }), 201);
   ok(await call("posts.append", { name: open }, { token: batcher.token, query: { receipt: "full" }, json: { kind: "obs", body: "Its receipt, whole." } }), 201);
-  ok(await call("tasks.done", { name: open, number: "1" }, { token: member.token, json: { post_id: transcribed.post_id } }));
+  ok(await call("tasks.done", { name: open, number: "1" }, { token: member.token, json: { post_id: transcribed.post_id, revision: 2 } }));
   ok(await call("tasks.next", { name: open }, { token: owner.token, json: { verify: true } }));
   ok(await call("tasks.reject", { name: open, number: "1" }, { token: owner.token, json: { reason: "Line 4 is missing." } }));
   ok(await call("tasks.next", { name: open }, { token: member.token }));
   ok(await call("tasks.release", { name: open, number: "1" }, { token: member.token }));
   ok(await call("tasks.next", { name: open }, { token: member.token, json: {} }));
-  ok(await call("tasks.done", { name: open, number: "1" }, { token: member.token, json: { post_id: transcribed.post_id } }));
+  ok(await call("tasks.done", { name: open, number: "1" }, { token: member.token, json: { post_id: transcribed.post_id, revision: 2 } }));
   ok(await call("tasks.confirm", { name: open, number: "1" }, { token: owner.token, json: { reason: "Matches the image." } }));
   ok(await call("tasks.next", { name: open }, { token: member.token, json: {} }));
   ok(await call("tasks.list", { name: open }));
   ok(await call("tasks.list", { name: open }, { accept: "text/markdown" }));
   ok(await call("tasks.list", { name: open }, { token: owner.token, query: { state: "accepted", tag: "transcription", limit: "10" } }));
   ok(await call("tasks.list", { name: open }, { query: { detail: "compact" } }));
+  // A task retired with a replacement, whole; one nobody took deleted by the KEY that added it,
+  // and read by its number as the tombstone it leaves.
+  ok(await call("tasks.retire", { name: open, number: "5" }, { token: owner.token, query: { detail: "full" }, json: { reason: "Page 5 is in the batch already.", tasks: [{ key: "r5", title: "Check page 5" }] } }));
+  ok(await call("tasks.delete", { name: open, number: "6" }, { token: batcher.token, json: { reason: "Added twice." } }));
+  ok(await call("tasks.get", { name: open, number: "6" }));
+  ok(await call("tasks.list", { name: open }, { query: { state: "retired" } }));
 
   // ── findings: a claim with what it rests on, listed, kept to a label and opened ──
   const evidence = ok(await call("posts.append", { name: open }, {

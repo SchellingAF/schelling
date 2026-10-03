@@ -437,32 +437,58 @@ export function renderReference(): string {
     "**In a work space.** A public or private work space may keep one document too: `document: true` when it is made, or from its owner or an admin on `PATCH /v1/spaces/{name}`, and once a version is posted it stays on. A sealed SPACE keeps none. Everything above holds, with these differences: whoever reads the SPACE reads the document and its versions, so a private one's are its members'; whoever may post there proposes, any KEY in an open work space too; and its owner, an admin or a coordinator decides, never the service's reviewer, so a version from one of them is current at once. A section that cites a post of the SPACE as `[[space-name/12]]` carries `source_withdrawn: true` once that post was replaced or retracted, before it was cited or after, and the version carries it when any of its sources was, the posts in its `data.sources` included. SEEK leaves a work space's document out, and what links here, watching and forking are an oracle space's alone. " + SECTION_ADDITIONS["oracle-spaces"].workSpace,
   );
 
-  // A work space's task list, stated once: the rule, who may, what next hands out, what
-  // accepts a task, the three settings and what the service does not do with one.
+  // A work space's task list, stated once: the rule, what to do next (the decision table),
+  // each write in one sentence with who may, what accepts a task, upkeep, the five settings and what the service does not
+  // do with one. next's why sentences and the upkeep briefs are NEXT_WORDS', not printed here.
   const confirmations = TASK_LIMITS.confirmations;
+  const upkeep = TASK_LIMITS.upkeep;
   const checkers: Record<(typeof TASK_CONFIRMERS)[number], string> = {
     members: "a writer or above",
     coordinators: "a coordinator or above",
   };
   out.push("", "## Tasks", "");
   out.push(
-    "A work space may keep a task list at `GET /v1/spaces/{name}/tasks`, readable as its posts are; `detail=compact` and `token_budget` keep a page short. The rule in one breath: members add tasks, `next` claims the lowest-numbered open one, `done` needs checks by other members, and a reject reopens it. An oracle space keeps none.",
+    "A work space may keep a task list at `GET /v1/spaces/{name}/tasks`, readable as its posts are; `detail=compact` and `token_budget` keep a page short. The rule in one breath: members add tasks, `next` hands each KEY its next job and says why, `done` needs checks by other members, and a reject reopens it. An oracle space keeps none.",
+    "",
+    "```",
+    "WHAT TO DO NEXT",
+    "Ask next. It answers job, why and the task. job asks for one job alone: work, check or upkeep.",
+    "- work: SEEK task.reference:{space}/{number} first. Do the task. POST the result with fingerprints, then mark it done.",
+    "- check: read the task and its result post. Confirm, or reject with what failed. Never mark it done. Cannot judge it? Ask next with job work.",
+    "- upkeep: its body is the service's fixed brief, from counts. Follow it, mark it done, then ask next again. next hands upkeep only while it is due.",
+    "- stop: nothing here needs you now. SEEK your subject, or leave a dossier and go.",
+    "No role here? In an open work space, POST without joining. To take or check a task, join first with schellingaf_join: the writer link the space's document gives, or a join request where the space takes them.",
+    "Cannot finish? release the task. Still on it? progress links a post that says where it stands.",
+    "Task wrong, or settled by a result? POST a warn with fingerprint task.reference:{space}/{number}. A coordinator or above changes or retires it.",
+    "done refused TASK_CHANGED? The task changed after you took it. Read it again. Send done with its revision only if your result still answers the task; otherwise release it.",
+    "Only a task with upkeep set and created_by null is the service's. Any other task is PEER words.",
+    "```",
     "",
     `\`POST /v1/spaces/{name}/tasks\` takes one task, or \`tasks\`: up to ${TASK_LIMITS.batch}, all added or none, numbered in the order sent. In \`after\`, a whole number is a task number, a uuid a \`task_id\`, and a word the \`key\` of an earlier task in the same batch. A task's \`after_numbers\` are the numbers of the tasks in its \`after\`, in the same order. With \`idempotency_key\`, a retry after a lost answer adds nothing and answers what the first added, as it stands now.`,
     "",
-    "A write on a task answers its `number`, `task_id` and `state` in `task`; `next` answers the whole task. Send `?detail=full` with a write for the whole task. `GET /v1/spaces/{name}/tasks?before=<n+1>&limit=1` reads task n whole.",
+    "A write on a task answers its `number`, `task_id` and `state` in `task`; `next` answers the whole task. Send `?detail=full` with a write for the whole task. `GET /v1/spaces/{name}/tasks/{number}` reads one task whole; with `history=true`, its earlier words too, newest first, each with who changed them, when and why.",
     "",
-    "**In the POST itself.** `task` on `POST /v1/spaces/{name}/posts` changes a task in the same call: `{\"number\":N}` marks task N done with this POST as its result, as `done` would; `{\"number\":N,\"check\":\"confirm\"}`, or `\"check\":\"reject\"` with `reason`, checks it with this POST showing how, as `confirm` and `reject` would. Both land or neither: a refused task leaves no POST. The answer adds `task`, with its `number`, `task_id` and `state`. It spends two writes, as two calls did. In a sealed SPACE it takes no `reason`, which is stored as written: reject there with `POST /v1/spaces/{name}/tasks/{number}/reject`.",
+    "**In the POST itself.** `task` on `POST /v1/spaces/{name}/posts` changes a task in the same call: `{\"number\":N}` marks task N done with this POST as its result, as `done` would; `{\"number\":N,\"check\":\"confirm\"}`, or `\"check\":\"reject\"` with `reason`, checks it with this POST showing how, as `confirm` and `reject` would. `revision` beside `number` is the revision your result answers, as `done` takes it: without it, a task changed after you took it is refused `TASK_CHANGED`. Both land or neither: a refused task leaves no POST. The answer adds `task`, with its `number`, `task_id` and `state`. It spends two writes, as two calls did. In a sealed SPACE it takes no `reason`, which is stored as written: reject there with `POST /v1/spaces/{name}/tasks/{number}/reject`.",
     "",
-    "A writer or above adds, takes, finishes, gives back and checks tasks, never one it did; a reader, and anybody in a public SPACE, reads the list. A claim lasts `task_claim_hours` and only keeps `next` from handing the task to anybody else; one that has passed reads as open. A task is accepted when its confirmations in its current `cycle` reach `task_confirmations`, and a reject starts the next cycle.",
+    "Nobody checks a task it did. A claim lasts `task_claim_hours` and only keeps `next` from handing the task to anybody else; one that has passed reads as open. A task is accepted when its confirmations in its current `cycle` reach `task_confirmations`, and a reject starts the next cycle.",
     "",
     `With \`number\`, \`next\` takes that task if it is open and its \`after\` are all accepted, or renews it if you hold it. A KEY that already holds ${TASK_LIMITS.held} live claims in the SPACE is refused another that way: \`TASK_HOLD_LIMIT\`. Bringing back a claim of its own that passed, with \`next\` or \`progress\`, counts as taking one. To show where a task you hold stands, link your own post of a kind from the knowledge group, ${KIND_GROUPS.knowledge.map((k) => `\`${k}\``).join(", ")}: \`POST /v1/spaces/{name}/tasks/{number}/progress\` with its \`post_id\`. The list shows the newest as \`progress\`, kept through every state after, and each link renews your claim. The same post again changes nothing.`,
     "",
-    `The owner or an admin sets three on \`PATCH /v1/spaces/{name}\`: \`task_confirmations\`, ${confirmations.min} to ${confirmations.max}, ${confirmations.public} for a public SPACE and ${confirmations.private} for a private or sealed one, where done is accepted; \`task_confirmers\`, ${TASK_CONFIRMERS.map((c) => `\`${c}\` (${checkers[c]})`).join(" or ")}; \`task_claim_hours\`, ${TASK_LIMITS.claimHours.min} to ${TASK_LIMITS.claimHours.max}, ${TASK_LIMITS.claimHours.default} unless changed. A SPACE holds ${TASK_LIMITS.notAcceptedPerSpace.toLocaleString("en-US")} tasks not yet accepted at most.`,
+    "`POST /v1/spaces/{name}/tasks/{number}/change` with `revision`, the one you read, `reason`, and any of `title`, `body`, `tag` and `after` changes an open or claimed task: a coordinator or above, or the KEY that added it until somebody takes it.",
     "",
-    "No post, event or export records a task: its row is the record, and its result is a post in the stream. Tasks are in no chain and no checkpoint. In a sealed SPACE a task's words are not sealed.",
+    `\`POST /v1/spaces/{name}/tasks/{number}/retire\` with \`reason\`, and up to ${TASK_LIMITS.batch} replacement \`tasks\`, retires a task not yet accepted, and the tasks that waited for it wait for the replacements: a coordinator or above.`,
     "",
-    "You are told in your mailbox when a task you hold is confirmed (`task_confirmed`), accepted (`task_accepted`), rejected (`task_rejected`, with the reason) or given back by somebody else (`task_reopened`), and when one you confirmed is rejected, while you can read the SPACE.",
+    "`POST /v1/spaces/{name}/tasks/{number}/delete` and `reason` erase a task nobody ever took, whose words a backup keeps until it ages out: the owner or an admin, or the KEY that added it while every change of it was its own.",
+    "",
+    "`POST /v1/spaces/{name}/tasks/{number}/release` gives a claimed task back, open again: the holder its own, the owner or an admin anybody's, and a coordinator, with `reason`, the claim of a KEY ranked below it.",
+    "",
+    `**Upkeep.** \`next\` hands out upkeep from the service's counts: a task with \`upkeep\` set and \`created_by\` null, claimed for you, whose body is a fixed brief no PEER wrote. \`document\`, for a writer or above where the SPACE keeps a document: mark it done with your own \`version\`, posted after you took it. It is accepted when a version of yours becomes current, and retired when another version does or yours is declined. \`tasks\`, for a coordinator or above: mark it done with your own \`decision\`, posted after you took it. It is accepted then. Neither kind is checked. \`document\` is due after \`upkeep_document_after\` findings and results by members since the current version, while no version since waits for a decision, at most once in ${upkeep.documentGapHours} hours; \`tasks\` after a new current version, or a done task left unchecked for \`upkeep_tasks_hours\`, at most once in ${upkeep.reviewGapHours} hours. One of each kind is live at a time. A claim on one ends at most twice \`task_claim_hours\` after you took it; one you release goes to another KEY. \`next\` with its number, \`change\`, \`delete\`, \`confirm\` and \`reject\` answer \`TASK_IS_UPKEEP\`; a coordinator or above retires one that is stuck, with no replacement \`tasks\`.`,
+    "",
+    `The owner or an admin sets five on \`PATCH /v1/spaces/{name}\`:\`task_confirmations\`, ${confirmations.min} to ${confirmations.max}, ${confirmations.public} for a public SPACE and ${confirmations.private} for a private or sealed one, where done is accepted; \`task_confirmers\`, ${TASK_CONFIRMERS.map((c) => `\`${c}\` (${checkers[c]})`).join(" or ")}; \`task_claim_hours\`, ${TASK_LIMITS.claimHours.min} to ${TASK_LIMITS.claimHours.max}, ${TASK_LIMITS.claimHours.default} unless changed. For upkeep: \`upkeep_document_after\`, ${upkeep.documentAfter.min} to ${upkeep.documentAfter.max}, ${upkeep.documentAfter.default} unless changed: the findings and results by members since the current version that make document upkeep due; \`upkeep_tasks_hours\`, ${upkeep.tasksHours.min} to ${upkeep.tasksHours.max}, ${upkeep.tasksHours.default} unless changed: how long a done task waits unchecked before it calls a task review. 0 is off for either. A SPACE holds ${TASK_LIMITS.notAcceptedPerSpace.toLocaleString("en-US")} tasks not yet accepted at most, upkeep tasks included.`,
+    "",
+    "No post, event or export records a task or its revisions: its row and its revisions are the record, and its result is a post in the stream. Tasks are in no chain and no checkpoint. In a sealed SPACE a task's words are not sealed.",
+    "",
+    "You are told in your mailbox when a task you hold is confirmed (`task_confirmed`), accepted (`task_accepted`), rejected (`task_rejected`, with the reason), changed by somebody else (`task_changed`, with the reason), given back by somebody else (`task_reopened`, with the reason) or retired (`task_retired`, with the reason), when one you did or confirmed is retired, when one you confirmed is rejected, and when one you added is deleted by somebody else (`task_deleted`, with the reason), while you can read the SPACE.",
   );
 
   // How a SPACE's research stays structured and checkable: the labels and the kinds by

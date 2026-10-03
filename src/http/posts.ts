@@ -593,13 +593,14 @@ async function dryChecks(sql: Sql, name: string, author: Buffer, post: PostInput
  * the task of that number in this SPACE, one row, and only what that row says. No row is
  * TASK_NOT_FOUND, an oracle space's too, which keeps none. To finish it, the caller holds
  * it: done or accepted is TASK_NOT_OPEN, open TASK_NOT_CLAIMANT, held by another KEY
- * TASK_NOT_OPEN claimed. To check it, it is done and the caller did not do it. The rank
- * rules, a claim that passed, and an earlier check are task_done()'s and task_check()'s to
- * say, at the write: nothing here copies them.
+ * TASK_NOT_OPEN claimed; and its words are the revision sent, or, with none sent, the ones
+ * the caller took, or TASK_CHANGED, as task_done() says. To check it, it is done and the
+ * caller did not do it. The rank rules, a claim that passed, upkeep, and an earlier check
+ * are task_done()'s and task_check()'s to say, at the write: nothing here copies them.
  */
 async function dryTaskChecks(sql: Sql, spaceId: string, author: Buffer, task: PostTask): Promise<Record<string, unknown>> {
-  const [row] = await sql<{ item: Record<string, unknown> }[]>`
-    select schellingaf.task_item(t, s.task_confirmations) as item
+  const [row] = await sql<{ item: Record<string, unknown>; revision: number; claim_revision: number | null }[]>`
+    select schellingaf.task_item(t, s.task_confirmations) as item, t.revision, t.claim_revision
       from schellingaf.tasks t join schellingaf.spaces s on s.space_id = t.space_id
      where t.space_id = ${spaceId}::uuid and t.number = ${task.number}::int`;
   if (!row) throw new ApiError("TASK_NOT_FOUND");
@@ -610,6 +611,9 @@ async function dryTaskChecks(sql: Sql, spaceId: string, author: Buffer, task: Po
     // A claim that passed reads as open, and its holder may still finish it.
     if (state === "open" && !(mine && row.item.claim_expired === true)) throw new ApiError("TASK_NOT_CLAIMANT");
     if (state === "claimed" && !mine) throw new ApiError("TASK_NOT_OPEN", { detail: "claimed" });
+    if (task.revision !== null ? task.revision !== row.revision : (row.claim_revision ?? row.revision) < row.revision) {
+      throw new ApiError("TASK_CHANGED", { detail: String(row.revision) });
+    }
   } else {
     if (state !== "done") throw new ApiError("TASK_NOT_DONE", { detail: state });
     if (mine) throw new ApiError("TASK_SELF_CHECK");
@@ -1161,10 +1165,12 @@ export function mountPosts(app: Hono<Env>, config: Config, db: Db, service: Serv
         attached = list!.list;
       }
       if (item.task === null || replayed) return { receipt, attached, task: null, delivered: null };
-      const { number, check, reason } = item.task;
+      const { number, revision, check, reason } = item.task;
+      // A finish without revision is refused TASK_CHANGED once the task changed after its
+      // holder took it, as done is (migrations/0130_task_changes.sql).
       const [out] = check === null
         ? await sql<{ out: Record<string, unknown> }[]>`
-            select schellingaf.task_done(${name}, ${bearer.peerId}, ${number}::int, ${String(receipt.post_id)}::uuid) as out`
+            select schellingaf.task_done(${name}, ${bearer.peerId}, ${number}::int, ${String(receipt.post_id)}::uuid, ${revision}::int) as out`
         : await sql<{ out: Record<string, unknown> }[]>`
             select schellingaf.task_check(${name}, ${bearer.peerId}, ${number}::int, ${check},
                                           ${String(receipt.post_id)}::uuid, ${reason}, true) as out`;

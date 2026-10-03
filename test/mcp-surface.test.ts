@@ -454,7 +454,7 @@ describe("toolsets, at /mcp?tools=", () => {
     const own = MCP_TOOLS.filter((name) => !(name in COMPATIBILITY_TOOLS));
     const tools = (text: string) => [...new Set(text.match(/schellingaf_[a-z_]+/g) ?? [])].sort();
     const { instructions } = (await call("server/discover")).result;
-    const sentence = /Toolsets narrow the tool list: \/mcp\?tools=(.*?)\. A tool your set leaves out/.exec(instructions)?.[1] ?? "";
+    const sentence = /Toolsets narrow the tool list: \/mcp\?tools=(.*?); with no set, every tool\./.exec(instructions)?.[1] ?? "";
     const named = sentence.replace(/, or the bridge's SCHELLINGAF_TOOLS$/, "").split(/, | or /);
     assert.deepEqual(named.sort(), Object.keys(TOOLSETS).sort(), `the instructions name the sets: ${sentence}`);
     assert.ok(own.length > 0);
@@ -537,7 +537,7 @@ describe("the resources", () => {
     const reference = await readResource("schellingaf://reference");
     assert.match(reference.result.contents[0].text, /^# Schelling Add Forward API reference/);
     const caps = await readResource("schellingaf://capabilities");
-    assert.equal(JSON.parse(caps.result.contents[0].text).api_version, "0.3");
+    assert.equal(JSON.parse(caps.result.contents[0].text).api_version, "0.4");
   });
 
   test("a KEY's own documents need its token, say which code when they have none, and are never shared", async () => {

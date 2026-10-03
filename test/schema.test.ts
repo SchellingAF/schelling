@@ -478,6 +478,8 @@ describe("a blocked KEY can do nothing that writes", () => {
       prune_oauth: "not reachable by a caller",
       // Files no post attached, once their uploads are a day old.
       prune_files: "not reachable by a caller",
+      // Offers to check a task, a day old.
+      prune_check_offers: "not reachable by a caller",
       // An upload: its first statement is check_file_upload(), which tests blocked_at,
       // the rule the route and the posts route meet too.
       put_file: "blocked is tested by check_file_upload, which it calls first",

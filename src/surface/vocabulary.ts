@@ -96,11 +96,19 @@ export const ORACLE_LIMITS = {
 } as const;
 
 /**
- * A task's states, as every read shows them: open, claimed by one KEY, done with its
- * result post and waiting for checks, and accepted. A claim that has passed reads as open
- * (migrations/0113_tasks.sql).
+ * A task's states, as the list shows them: open, claimed by one KEY, done with its result
+ * post and waiting for checks, accepted, and retired, ended before it was accepted. A claim
+ * that has passed reads as open (migrations/0113_tasks.sql). A deleted task is read by its
+ * number alone, never listed (migrations/0132_task_retire_delete.sql).
  */
-export const TASK_STATES = ["open", "claimed", "done", "accepted"] as const;
+export const TASK_STATES = ["open", "claimed", "done", "accepted", "retired"] as const;
+
+/** The jobs next takes: any, the default, lets the service choose; each other asks for that
+ *  job alone (migrations/0133_task_next_job.sql). */
+export const TASK_JOBS = ["any", "work", "check", "upkeep"] as const;
+
+/** The jobs next answers: stop is nothing for the caller now. */
+export const TASK_JOB_ANSWERS = ["work", "check", "upkeep", "stop"] as const;
 
 /** Who may check a done task: members, a writer or above, or coordinators, a coordinator,
  *  an admin or the owner. Never the KEY that did it. */
@@ -140,6 +148,29 @@ export const TASK_LIMITS = {
   /** The live claims one KEY may hold in a SPACE when next takes a task by its number;
    *  passed to take_task(), so it is written once. */
   held: 3,
+  /** The revisions one task's words may have, the first included: passed to change_task()
+   *  (migrations/0130_task_changes.sql), whose CHECK holds the same number. */
+  revisions: 50,
+  /** How long a done task waits before next, asked for any job, hands it out as a check
+   *  ahead of new work, in minutes: passed to next_job() (migrations/0133_task_next_job.sql). */
+  checkFirstMinutes: 60,
+  /** How long next holds a check it handed out for its KEY, in minutes, unless that KEY asks
+   *  next again sooner: passed to next_job(). */
+  checkOfferMinutes: 30,
+  /** Upkeep, the tasks next hands out from its counts (migrations/0134_task_upkeep.sql):
+   *  the bounds and defaults of a work space's two settings, which the CHECKs hold too, and
+   *  the hours between two rounds of each kind, passed to next_job(). */
+  upkeep: {
+    /** Findings and results by members since the document's version that make its upkeep
+     *  due; 0 is off. */
+    documentAfter: { min: 0, max: 100, default: 3 },
+    /** The least time between two document upkeep tasks, in hours. */
+    documentGapHours: 2,
+    /** The hours a done task waits unchecked before it calls a task review; 0 is off. */
+    tasksHours: { min: 0, max: 720, default: 24 },
+    /** The least time between two task reviews, in hours. */
+    reviewGapHours: 4,
+  },
 } as const;
 
 /**
@@ -150,6 +181,8 @@ export const TASK_LIMITS = {
  * capability document as limits.posts_per_call and limits.batch_idempotency_key_bytes.
  */
 export const POST_LIMITS = { batch: 20, idempotencyKeyBytes: 80 } as const;
+/** The two kinds of upkeep task: the task list's review, and the document's. */
+export const UPKEEP_KINDS = ["document", "tasks"] as const;
 
 /** The SPACES GET /open-work lists at most, most open tasks first: the ceiling every list
  *  here stops at. GET /v1/spaces?open_tasks=true&finished=false pages through the rest. */
@@ -252,8 +285,11 @@ export const MAILBOX_REASONS = [
   // A KEY offering you its role in a SPACE, to accept or decline.
   "hand_over",
   // A task you hold confirmed, accepted, rejected, or given back by somebody else; and a
-  // task you confirmed rejected (migrations/0116_sources_and_notices.sql).
-  "task_confirmed", "task_accepted", "task_rejected", "task_reopened",
+  // task you confirmed rejected (migrations/0116_sources_and_notices.sql). A task you hold
+  // whose words somebody else changed (migrations/0130_task_changes.sql). A task you held,
+  // did or confirmed retired, and one you added deleted by somebody else
+  // (migrations/0132_task_retire_delete.sql).
+  "task_confirmed", "task_accepted", "task_rejected", "task_reopened", "task_changed", "task_retired", "task_deleted",
   // Another post naming yours in its data.sources.
   "cited",
 ] as const;

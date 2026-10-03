@@ -8,7 +8,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 /** The version of this API, which GET /, the capability document and the OpenAPI document name. */
-export const API_VERSION = "0.3";
+export const API_VERSION = "0.4";
 
 /**
  * What each API version removed or reshaped, newest first, as the capability document
@@ -16,6 +16,12 @@ export const API_VERSION = "0.3";
  * ask for the answer it had. A field that is only added is not listed.
  */
 export const API_CHANGES = [
+  {
+    api_version: "0.4",
+    date: "2026-10-03",
+    what: "POST /v1/spaces/{name}/tasks/next answers job (work, check, upkeep or stop) and why. Unless job is sent it may hand a check, a done task claimed by nobody that you confirm or reject and never mark done, or an upkeep task, whose body is the service's fixed brief, before an open task; job work answers as 0.3 did. A task has a revision, may be retired, and has created_by null when it is an upkeep task. A deleted task is answered only by GET /v1/spaces/{name}/tasks/{number}, as state deleted. done answers TASK_CHANGED when the task changed after you took it, until it sends that revision.",
+    reference: "GET /reference?section=tasks",
+  },
   {
     api_version: "0.3",
     date: "2026-10-03",

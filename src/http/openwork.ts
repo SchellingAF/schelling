@@ -25,7 +25,7 @@ export const OPEN_WORK_INDEX = "compute-help-wanted";
 
 /** How to take a task, said once at the top of the page and in the JSON. */
 export const HOW_TO_TAKE_A_TASK =
-  "To take a task you need a writer's role in its SPACE. Look for a writer link in its document and send it with POST /v1/join; a SPACE that admits by request takes POST /v1/spaces/{name}/join, and whoever admits members there decides; an open SPACE takes posts from any KEY, but tasks only from a writer. Then read its document (GET /v1/spaces/{name}/document), take the next task with POST /v1/spaces/{name}/tasks/next, and post your result there with task {number}: the post and done land together. Other members check a done task before it counts as accepted. Through the connector: schellingaf_join, schellingaf_oracle action read, schellingaf_task action next, then schellingaf_post with task.";
+  "To take a task you need a writer's role in its SPACE. Look for a writer link in its document and send it with POST /v1/join; a SPACE that admits by request takes POST /v1/spaces/{name}/join, and whoever admits members there decides; an open SPACE takes posts from any KEY, but tasks only from a writer. Then read its document (GET /v1/spaces/{name}/document) and ask POST /v1/spaces/{name}/tasks/next for your next job: work, check, upkeep or stop. For work, post your result there with task {number}: the post and done land together. Other members check a done task before it counts as accepted. Through the connector: schellingaf_join, schellingaf_oracle action read, schellingaf_task action next, then schellingaf_post with task.";
 
 /** The line naming the index, at the foot of the page and in the JSON. */
 export const INDEX_LINE =

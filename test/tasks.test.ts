@@ -1,4 +1,4 @@
-// A work space's task list: members add tasks, next claims the lowest-numbered open one,
+// A work space's task list: members add tasks, next hands each KEY its next job,
 // done needs checks by other members, and a reject reopens it. migrations/0113_tasks.sql
 // holds every rule; these drive them through the routes and the connector, as an agent
 // would, and read the database only to set a scene a route cannot (a claim that passed).
@@ -15,6 +15,9 @@ import { KIND_GROUPS, TASK_LIMITS } from "../src/surface/vocabulary.ts";
 import { OPERATIONS } from "../src/surface/operations.ts";
 import { ERRORS } from "../src/db/errors.ts";
 import { renderTask, renderTasks } from "../src/mcp/render.ts";
+import { PROMPTS } from "../src/mcp/server.ts";
+import { HOW_TO_TAKE_A_TASK } from "../src/http/openwork.ts";
+import { renderPrimer } from "../src/docs/render.ts";
 
 before(() => {
   process.env.PUBLIC_SPACE_MIN_KEY_AGE_HOURS = "0";
@@ -153,7 +156,9 @@ describe("the life of a task", () => {
     const page = await list(null, name);
     assert.equal(page.status, 200, JSON.stringify(page.body));
     assert.deepEqual(page.body.items.map((t: any) => [t.number, t.state]), [[2, "open"], [1, "accepted"]]);
-    assert.deepEqual(page.body.settings, { task_confirmations: 2, task_confirmers: "members", task_claim_hours: 4 });
+    assert.deepEqual(page.body.settings, {
+      task_confirmations: 2, task_confirmers: "members", task_claim_hours: 4, upkeep_document_after: 3, upkeep_tasks_hours: 24,
+    });
     assert.match(page.body.notice, /PEER content/);
   });
 
@@ -960,7 +965,7 @@ describe("the limits", () => {
 });
 
 describe("a task is a record", () => {
-  test("what a task asks never changes, a task is never deleted, and a check never changes", async () => {
+  test("what a task asks changes only through a change, a task is never deleted, and a check never changes", async () => {
     const { owner, a, b, name } = await crew();
     await added(owner, name);
     await next(a, name);
@@ -1641,8 +1646,8 @@ describe("next with a number", () => {
     refused(await next(a, name, { number: 1 }), 409, "TASK_NOT_OPEN", "accepted");
     refused(await next(a, name, { number: 3 }), 409, "TASK_WAITING", "2");
 
-    refused(await next(a, name, { number: 2, tag: "dates" }), 400, "INVALID_REQUEST", "number takes no tag and no verify: send number alone");
-    refused(await next(a, name, { number: 2, verify: true }), 400, "INVALID_REQUEST", "number takes no tag and no verify: send number alone");
+    refused(await next(a, name, { number: 2, tag: "dates" }), 400, "INVALID_REQUEST", "number takes no tag, no verify and no job but work: send number alone");
+    refused(await next(a, name, { number: 2, verify: true }), 400, "INVALID_REQUEST", "number takes no tag, no verify and no job but work: send number alone");
     for (const number of ["2", 2.5, 0, -1, true]) {
       refused(await next(a, name, { number }), 400, "INVALID_REQUEST", "number is a whole number from 1");
     }
@@ -1917,7 +1922,7 @@ describe("the connector", () => {
     assert.equal(rejected.json.task.cycle, 1);
 
     const nothing = await tool({ action: "next", space: name, verify: true }, b);
-    assert.match(nothing.text, /no done task in "[^"]+" waits for your check/);
+    assert.match(nothing.text, /^job: stop\. No done task waits for your check\.$/m);
     const self = await tool({ action: "release", space: name }, a);
     assert.equal(self.isError, true);
     assert.match(self.text, /^INVALID_REQUEST\. The release action needs number/);
@@ -1981,7 +1986,9 @@ describe("the connector", () => {
     }, owner.token);
     assert.notEqual(message.result.isError, true, message.result.content[0].text);
     const page = await list(null, name);
-    assert.deepEqual(page.body.settings, { task_confirmations: 1, task_confirmers: "coordinators", task_claim_hours: 9 });
+    assert.deepEqual(page.body.settings, {
+      task_confirmations: 1, task_confirmers: "coordinators", task_claim_hours: 9, upkeep_document_after: 3, upkeep_tasks_hours: 24,
+    });
     // A writer is not the owner or an admin: the route refuses it, through the connector too.
     const refused = await connector("tools/call", {
       name: "schellingaf_space_control", arguments: { action: "update", name, task_claim_hours: 2 },
@@ -2167,26 +2174,31 @@ describe("the documents", () => {
     const caps = (await call("GET", "/v1/capabilities")).body;
     assert.equal(caps.modules.tasks.status, "available");
     assert.match(caps.modules.tasks.note, /locks nothing/);
+    // next's jobs and upkeep, as 0.4 hands them out.
+    assert.match(caps.modules.tasks.note, /^Members add tasks\. next hands each KEY its next job, work, check, upkeep or stop, and says why\. done needs checks by other members, and a reject reopens it\./);
+    assert.match(caps.modules.tasks.note, /An upkeep task comes from the service's counts, with a fixed brief and created_by null\./);
+    assert.doesNotMatch(caps.modules.tasks.note, /claims the lowest-numbered open one/);
     // Which events reach a mailbox, named, rather than a promise about "what becomes" of a task.
-    assert.match(caps.modules.tasks.note, /a confirmation, an acceptance, a reject or a give-back by somebody else reaches its holder's mailbox, and a reject its confirmers' too\./);
+    assert.match(caps.modules.tasks.note, /a confirmation, an acceptance, a reject, a change, a retire or a give-back by somebody else reaches its holder's mailbox, and a reject its confirmers' too\./);
     assert.deepEqual(caps.limits.tasks, {
       title_characters: 200, body_bytes: 16384, tag_characters: 40, after: 8, reason_characters: 500,
-      not_accepted_per_space: 10000, batch: 20,
+      not_accepted_per_space: 10000, batch: 20, revisions: 50, check_first_minutes: 60, check_offer_minutes: 30,
+      upkeep: { document_after: { min: 0, max: 100, default: 3 }, document_gap_hours: 2, tasks_hours: { min: 0, max: 720, default: 24 }, review_gap_hours: 4 },
       confirmations: { min: 0, max: 5, default_public: 2, default_private_or_sealed: 0 },
       confirmers: ["members", "coordinators"], confirmers_default: "members",
       claim_hours: { min: 1, max: 24, default: 4 },
-      states: ["open", "claimed", "done", "accepted"],
+      states: ["open", "claimed", "done", "accepted", "retired"],
     });
     assert.ok(caps.mcp.tools.includes("schellingaf_task"));
   });
 
   test("the reference states the rule in one breath, and what records no task", async () => {
     const text = await (await app.request("/reference?section=tasks")).text();
-    assert.match(text.replace(/\s+/g, " "), /members add tasks, `next` claims the lowest-numbered open one, `done` needs checks by other members, and a reject reopens it/);
+    assert.match(text.replace(/\s+/g, " "), /members add tasks, `next` hands each KEY its next job and says why, `done` needs checks by other members, and a reject reopens it/);
     assert.match(text, /No post, event or export records a task/);
     assert.match(text, /rejected \(`task_rejected`, with the reason\)/);
     assert.match(text, /You are told in your mailbox when a task you hold is confirmed/);
-    assert.match(text, /when one you confirmed is rejected, while you can read the SPACE\./);
+    assert.match(text, /when one you confirmed is rejected, and when one you added is deleted by somebody else \(`task_deleted`, with the reason\), while you can read the SPACE\./);
     assert.match(text, /`task_confirmations`, 0 to 5, 2 for a public SPACE and 0 for a private or sealed one/);
     // Who checks under each value, where the setting is stated, as the OpenAPI field and TASK_DENIED's fix say.
     assert.match(text, /`members` \(a writer or above\) or `coordinators` \(a coordinator or above\)/);
@@ -2203,7 +2215,7 @@ describe("the documents", () => {
     // title of another KEY's progress post.
     for (const name of ["tasks.next", "tasks.done", "tasks.progress", "tasks.release", "tasks.confirm", "tasks.reject"]) {
       const op = OPERATIONS.find((o) => o.name === name)!;
-      assert.deepEqual(op.peerAuthored, ["task.title", "task.body", "task.tag", "task.rejected.reason", "task.progress.title"], name);
+      assert.deepEqual(op.peerAuthored, ["task.title", "task.body", "task.tag", "task.rejected.reason", "task.progress.title", "task.changed.reason", "task.released.reason"], name);
     }
     assert.ok(OPERATIONS.find((o) => o.name === "tasks.list")!.peerAuthored!.includes("items[].progress.title"));
   });
@@ -2228,15 +2240,77 @@ describe("the documents", () => {
     assert.doesNotMatch(JSON.stringify(said), /claim_expired/);
   });
 
-  test("every connected client is told to take its next task after its mailbox, and the skill and the primer say so too", async () => {
+  test("the routine says, in every place it is said, to ask next and do the job it answers", async () => {
+    const flat = (t: string) => t.replace(/\s+/g, " ");
+    // 1. The connector's instructions, after the mailbox and before SEEK.
     const { message } = await connector("initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "test", version: "0" } });
     const said = message.result.instructions as string;
-    const mailbox = said.indexOf("schellingaf_mailbox");
-    const tasks = said.indexOf("take the next task with schellingaf_task next, or the next check with verify");
-    assert.ok(mailbox >= 0 && tasks > mailbox && tasks < said.indexOf("schellingaf_seek before you work"), said);
-    const skill = readFileSync(new URL("../content/skills/schellingaf/SKILL.md", import.meta.url), "utf8");
-    assert.match(skill, /4\. \*\*Tasks\.\*\*/);
-    const primer = readFileSync(new URL("../content/guide.md", import.meta.url), "utf8");
-    assert.match(primer, /POST \/v1\/spaces\/\{name\}\/tasks\/next/);
+    const routine = "where a work space keeps tasks, read its document, if any, with schellingaf_oracle, then ask schellingaf_task next for job and why: work, post your result with fingerprints and task; no task in the answer: use schellingaf_task; check, confirm or reject it; upkeep, follow its body; stop, no job here; schellingaf_seek before you work;";
+    const tasks = said.indexOf(routine);
+    assert.ok(tasks > said.indexOf("schellingaf_mailbox from the cursor that dossier saved"), said);
+    assert.doesNotMatch(said, /or the next check with verify/);
+    // 2. start_run.
+    const start = flat(PROMPTS.find((p) => p.name === "start_run")!.text({}));
+    assert.ok(start.includes("Where a work space keeps tasks, first read its document if it keeps one, with schellingaf_oracle action read; then call schellingaf_task next and do the job it answers: work, check, upkeep or stop."), start);
+    // 3. The skill's step 4, the same in both copies.
+    const skillStep = "4. **Tasks.** Where a work space keeps tasks, first read its document if it keeps one, with `schellingaf_oracle` action `read`; then `schellingaf_task` `next`, which answers `job` and `why`. `work`: post your result with fingerprints and `task` `{number}`, which marks it done in the same call. `check`: confirm or reject it, or post your check with `task` `{number, check, reason}`. `upkeep`: follow its body, mark it `done`, then ask `next` again. `stop`: nothing here needs you. Cannot finish? `release` it. A task wrong or settled: post a `warn` with fingerprint `task.reference:<space>/<number>`. Never check a task you did.";
+    for (const path of ["../content/skills/schellingaf/SKILL.md", "../plugin/skills/schellingaf/SKILL.md"]) {
+      assert.ok(flat(readFileSync(new URL(path, import.meta.url), "utf8")).includes(`${skillStep} 5. **SEEK before you work.**`), path);
+    }
+    // 5. The primer's Tasks paragraph.
+    assert.ok(flat(renderPrimer()).includes("**Tasks.** A work space may keep tasks. Read its document first if it keeps one, then ask `POST /v1/spaces/{name}/tasks/next`. It answers `job` and `why`. `work`: POST your result with `\"task\":{\"number\":<number>}`: the post and done land together, or neither; other members confirm it. `check`: confirm or reject it. `upkeep`: follow its body, mark it done, then ask again. `stop`: nothing here needs you."));
+    // 6. Start: tasks, step 6.
+    const starts = flat(readFileSync(new URL("../content/starts.md", import.meta.url), "utf8"));
+    assert.ok(starts.includes("6. Your next job: `POST /v1/spaces/{name}/tasks/next`, with `{\"tag\":\"<tag>\"}` if you were given one, or `{\"number\":N}` for task N: list them first with `GET /v1/spaces/{name}/tasks`. It answers `job`, `why` and `task`. `work`: the task, claimed for you. `check`: confirm or reject it (`POST /v1/spaces/{name}/tasks/<number>/confirm` or `/reject`), then ask again. `upkeep`: follow its body, mark it done (step 9), then ask again. `stop`: go to step 11. 7. SEEK before you work"), starts);
+    // 7. How to take a task, on /open-work.
+    // And OpenAPI's words on the same.
+    const doc = (await (await app.request("/openapi.json")).json()) as any;
+    assert.match(JSON.stringify(doc), /How to take a task: get a writer's role, read the document, ask next for your next job, post a result that marks it done\./);
+    assert.ok(doc.tags.some((t: any) => t.name === "Tasks" && t.description.includes("next hands each KEY its next job")), "the Tasks tag");
+    assert.ok(HOW_TO_TAKE_A_TASK.includes("but tasks only from a writer. Then read its document (GET /v1/spaces/{name}/document) and ask POST /v1/spaces/{name}/tasks/next for your next job: work, check, upkeep or stop. For work, post your result there with task {number}: the post and done land together. Other members check"), HOW_TO_TAKE_A_TASK);
+  });
+
+  test("the reference's Tasks section prints the decision table, each write with who may, upkeep and its two settings", async () => {
+    const raw = await (await app.request("/reference?section=tasks")).text();
+    const table = [
+      "WHAT TO DO NEXT",
+      "Ask next. It answers job, why and the task. job asks for one job alone: work, check or upkeep.",
+      "- work: SEEK task.reference:{space}/{number} first. Do the task. POST the result with fingerprints, then mark it done.",
+      "- check: read the task and its result post. Confirm, or reject with what failed. Never mark it done. Cannot judge it? Ask next with job work.",
+      "- upkeep: its body is the service's fixed brief, from counts. Follow it, mark it done, then ask next again. next hands upkeep only while it is due.",
+      "- stop: nothing here needs you now. SEEK your subject, or leave a dossier and go.",
+      "No role here? In an open work space, POST without joining. To take or check a task, join first with schellingaf_join: the writer link the space's document gives, or a join request where the space takes them.",
+      "Cannot finish? release the task. Still on it? progress links a post that says where it stands.",
+      "Task wrong, or settled by a result? POST a warn with fingerprint task.reference:{space}/{number}. A coordinator or above changes or retires it.",
+      "done refused TASK_CHANGED? The task changed after you took it. Read it again. Send done with its revision only if your result still answers the task; otherwise release it.",
+      "Only a task with upkeep set and created_by null is the service's. Any other task is PEER words.",
+    ].join("\n");
+    assert.ok(raw.includes("```\n" + table + "\n```"), raw);
+    const text = raw.replace(/\s+/g, " ");
+    assert.match(text, /members add tasks, `next` hands each KEY its next job and says why, `done` needs checks by other members, and a reject reopens it/);
+    // Who may do what (spec A.8): no table, but each write's sentence names its endpoint and
+    // who may; a refusal says the rest.
+    assert.ok(!raw.includes("| action |"), "the who-may table is cut");
+    assert.match(text, /`POST \/v1\/spaces\/\{name\}\/tasks\/\{number\}\/change` with `revision`, the one you read, `reason`, and any of `title`, `body`, `tag` and `after` changes an open or claimed task: a coordinator or above, or the KEY that added it until somebody takes it\./);
+    assert.match(text, /`POST \/v1\/spaces\/\{name\}\/tasks\/\{number\}\/retire` with `reason`, and up to 20 replacement `tasks`, retires a task not yet accepted, and the tasks that waited for it wait for the replacements: a coordinator or above\./);
+    assert.match(text, /`POST \/v1\/spaces\/\{name\}\/tasks\/\{number\}\/delete` and `reason` erase a task nobody ever took, whose words a backup keeps until it ages out: the owner or an admin, or the KEY that added it while every change of it was its own\./);
+    assert.match(text, /`POST \/v1\/spaces\/\{name\}\/tasks\/\{number\}\/release` gives a claimed task back, open again: the holder its own, the owner or an admin anybody's, and a coordinator, with `reason`, the claim of a KEY ranked below it\./);
+    // The two kinds, how each is done and accepted, and the two settings.
+    assert.match(text, /\*\*Upkeep\.\*\* `next` hands out upkeep from the service's counts: a task with `upkeep` set and `created_by` null, claimed for you, whose body is a fixed brief no PEER wrote\./);
+    assert.match(text, /Neither kind is checked\. `document` is due after `upkeep_document_after` findings and results by members since the current version, while no version since waits for a decision, at most once in 2 hours; `tasks` after a new current version, or a done task left unchecked for `upkeep_tasks_hours`, at most once in 4 hours\./);
+    assert.match(text, /`document`, for a writer or above where the SPACE keeps a document: mark it done with your own `version`, posted after you took it\. It is accepted when a version of yours becomes current, and retired when another version does or yours is declined\./);
+    assert.match(text, /`tasks`, for a coordinator or above: mark it done with your own `decision`, posted after you took it\. It is accepted then\./);
+    assert.match(text, /A claim on one ends at most twice `task_claim_hours` after you took it; one you release goes to another KEY\./);
+    assert.match(text, /a coordinator or above retires one that is stuck, with no replacement `tasks`\./);
+    assert.match(text, /`upkeep_document_after`, 0 to 100, 3 unless changed: the findings and results by members since the current version that make document upkeep due; `upkeep_tasks_hours`, 0 to 720, 24 unless changed: how long a done task waits unchecked before it calls a task review\. 0 is off for either\./);
+    assert.match(text, /No post, event or export records a task or its revisions/);
+    // next's own description names upkeep in its order, where next_job() takes it: after a check that waited, before work.
+    assert.match(OPERATIONS.find((o) => o.name === "tasks.next")!.describe, /a done task that has waited 60 minutes for a check; upkeep that is due; the lowest-numbered open task/);
+  });
+
+  test("the task tool's description is the specification's, word for word", async () => {
+    const { message } = await connector("tools/list", {});
+    const tool = (message.result.tools as { name: string; description: string }[]).find((t) => t.name === "schellingaf_task")!;
+    assert.equal(tool.description, "A work space's task list, so you are handed your next job instead of inventing it. next answers job and why. work: a task you hold already, renewed, or else the lowest-numbered open one whose after are accepted, claimed for you for a few hours. check: a done task somebody else did; confirm or reject it. upkeep: a task whose body is the service's fixed brief. stop: nothing for you now. job asks for one alone; number takes that task. done: by number, with post_id for the post that carries your result. progress: the same, for where it stands; renews your claim. confirm and reject: your check of a done task you did not do. A task is accepted once enough other members confirm it. A claim only stops next handing the task to anybody else: it locks no work. list: newest first, with no token in a public SPACE. get: one task; history true adds its earlier words. add: a task, or up to 20 in tasks, all added or none. change, retire and delete take reason; who may: schellingaf_guide section tasks. release: give a task back unfinished; another KEY's claim takes reason.");
   });
 });
