@@ -1,6 +1,7 @@
 // Process entry. Loads config (failing loudly on a placeholder), opens the
 // database, serves the app, and shuts down without dropping a request.
 
+import type { Server } from "node:http";
 import { serve } from "@hono/node-server";
 import { loadConfig } from "./config.ts";
 import { openDb, warm } from "./db/sql.ts";
@@ -10,6 +11,7 @@ import { startSearchUpkeep } from "./db/search-upkeep.ts";
 import { checkRestore } from "./db/restore-check.ts";
 import { waitForSchema } from "./db/wait.ts";
 import { createApp } from "./http/app.ts";
+import { receiveOptions, watchBodies } from "./http/receive.ts";
 import { shutdown, shutdownDeadlineSeconds } from "./shutdown.ts";
 
 const config = loadConfig();
@@ -84,9 +86,14 @@ if (restore.findings.length > 0) {
 const app = createApp(config, db);
 const port = Number(process.env.PORT ?? 3000);
 
-const server = serve({ fetch: app.fetch, port }, (info) => {
+// How long the server waits while a request arrives: headers within
+// HTTP_HEADERS_SECONDS, the whole request within HTTP_REQUEST_SECONDS, and a body that
+// sends nothing for HTTP_BODY_IDLE_SECONDS while the server is ready to read it closes
+// the connection. See http/receive.ts.
+const server = serve({ fetch: app.fetch, port, serverOptions: receiveOptions(config) }, (info) => {
   process.stdout.write(`schellingaf-api listening on ${info.port}, audience ${config.apiHost}\n`);
-});
+}) as Server;
+watchBodies(server, config.receive!.bodyIdleSeconds * 1000);
 
 // Rate buckets idle for a day and tokens dead for ninety, which are the two
 // tables a caller holding no KEY can make grow and this service can shrink. At
