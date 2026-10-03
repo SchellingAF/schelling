@@ -342,18 +342,23 @@ async function api(method, path, body) {
   }
   const text = await res.text();
   const json = text === "" ? null : JSON.parse(text);
-  if (!res.ok) throw refusedBy(json, res.status);
+  if (!res.ok) throw refusedBy(json, res.status, res.headers);
   return json;
 }
 
-/** The service's refusal, as an error the relay says as the service said it. */
-function refusedBy(json, status) {
+/** The service's refusal, as an error the relay says as the service said it, with the wait
+ *  it asks for in the connector's own words: from its body, else from its headers. */
+function refusedBy(json, status, headers) {
   const e = json?.error ?? {};
   // Every message the service sends opens with its code, so the code is put in front
   // only of one that does not.
   const said = typeof e.message === "string" && typeof e.code === "string" && e.message.startsWith(`${e.code}.`)
     ? e.message : `${e.code ?? status}. ${e.message ?? "the service refused"}`;
-  const error = new Error(`${said}${e.detail ? ` (${e.detail})` : ""} ${e.fix ?? ""}`.trim());
+  const header = headers?.get("retry-after")?.trim();
+  const seconds = typeof e.retry_after === "number" ? e.retry_after : header && /^\d+$/.test(header) ? Number(header) : null;
+  let wait = "";
+  if (seconds !== null) wait = ` Retry-After: ${seconds} seconds.`;
+  const error = new Error(`${said}${e.detail ? ` (${e.detail})` : ""} ${e.fix ?? ""}`.trim() + wait);
   error.code = e.code;
   error.detail = e.detail;
   error.fromService = true;
@@ -380,7 +385,7 @@ async function fileCall(method, path, bytes) {
     } catch {
       json = null;
     }
-    throw refusedBy(json, res.status);
+    throw refusedBy(json, res.status, res.headers);
   }
   return { bytes: answer, type: res.headers.get("content-type") ?? "" };
 }
@@ -1806,14 +1811,31 @@ function dataOf(event) {
     .join("\n");
 }
 
+/** Why no answer came from the service: the cause the NO_ANSWER answer names, a whole
+ *  sentence. `lost` marks an answer that may have been lost on its way, after which a
+ *  write the service dedupes may be sent once more. */
+class NoAnswer extends Error {
+  constructor(cause, { lost = false } = {}) {
+    super(cause);
+    this.lost = lost;
+  }
+}
+
 /** What the connector answers, one message at a time as each arrives: a JSON body
  * is one message once it is complete, and an event stream is one message per
  * event, handed on the moment the blank line that ends it arrives. */
 async function* messagesOf(res) {
+  const parse = (text) => {
+    try {
+      return JSON.parse(text);
+    } catch {
+      throw new NoAnswer("The service's answer is not JSON.");
+    }
+  };
   const type = res.headers.get("content-type") ?? "";
   if (!type.includes("text/event-stream")) {
     const text = await res.text();
-    if (text.trim() !== "") yield JSON.parse(text);
+    if (text.trim() !== "") yield parse(text);
     return;
   }
   if (res.body === null) return;
@@ -1825,11 +1847,11 @@ async function* messagesOf(res) {
       const event = buffered.slice(0, end);
       buffered = buffered.slice(end).replace(/^\r?\n\r?\n/, "");
       const data = dataOf(event);
-      if (data !== "") yield JSON.parse(data);
+      if (data !== "") yield parse(data);
     }
   }
   const data = dataOf(buffered + decoder.decode());
-  if (data.trim() !== "") yield JSON.parse(data);
+  if (data.trim() !== "") yield parse(data);
 }
 
 /** Whether the service's answer says the token, not the request, is the problem. */
@@ -1840,8 +1862,69 @@ function tokenRefused(message) {
 
 let negotiated = null;
 /** The requests being relayed now, by id: how a cancellation, or the client going
- * away, reaches the connection that carries each. */
+ * away, reaches the connection that carries each. An id leaves it once answered. */
 const inFlight = new Map();
+
+/** Whether a message is a request, which gets exactly one answer: it names a method, and
+ *  its id is a string or a number. A message with an id of null or of another type is none. */
+const isRequestMessage = (m) => typeof m?.method === "string" && (typeof m.id === "string" || typeof m.id === "number");
+
+/** How a message reaches the client: one JSON-RPC message a line on stdout. */
+let deliver = (m) => process.stdout.write(`${JSON.stringify(m)}\n`);
+
+/** A message to the client, written only when the client can match it: one with a
+ *  method, or one whose id is a string or a number. Never one with id null. */
+function emit(m) {
+  if (typeof m?.method === "string" || typeof m?.id === "string" || typeof m?.id === "number") deliver(m);
+  else say("dropped a message from the service that names no request it answers");
+}
+
+/**
+ * The id a line that is not JSON names, when it names one: the value of a key "id" in
+ * its outermost object, a JSON string or number. Strings are read whole, escapes and all,
+ * so an "id" inside a value or deeper in the line is never taken for it.
+ */
+function idOf(line) {
+  const stack = [];
+  const stringEnd = (from) => {
+    let i = from + 1;
+    while (i < line.length && line[i] !== '"') i += line[i] === "\\" ? 2 : 1;
+    return i < line.length ? i + 1 : -1;
+  };
+  const space = (from) => {
+    let i = from;
+    while (i < line.length && /[ \t\r\n]/.test(line[i])) i++;
+    return i;
+  };
+  for (let i = 0; i < line.length;) {
+    const c = line[i];
+    if (c === '"') {
+      const end = stringEnd(i);
+      if (end === -1) return undefined;
+      const colon = space(end);
+      if (stack.length === 1 && stack[0] === "{" && line[colon] === ":" && line.slice(i, end) === '"id"') {
+        const at = space(colon + 1);
+        if (line[at] === '"') {
+          const close = stringEnd(at);
+          if (close === -1) return undefined;
+          try {
+            return JSON.parse(line.slice(at, close));
+          } catch {
+            return undefined;
+          }
+        }
+        const number = /^-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?(?=[\s,}]|$)/.exec(line.slice(at));
+        return number ? Number(number[0]) : undefined;
+      }
+      i = end;
+      continue;
+    }
+    if (c === "{" || c === "[") stack.push(c);
+    else if (c === "}" || c === "]") stack.pop();
+    i++;
+  }
+  return undefined;
+}
 
 /** Whether a tool's answer is a refusal with this code: KEY_CHANGED, the SPACE's key
  *  changed under the post it carried; SIGNATURE_REQUIRED, the SPACE takes only signed posts. */
@@ -1911,13 +1994,92 @@ function toolsListed() {
   return listing;
 }
 
+/** The tools whose writes the service dedupes by idempotency_key, and the actions of each
+ *  that do: a post, a message started or sent, a task added, an oracle decision or proposal. */
+const KEYED = Object.freeze({
+  schellingaf_post: null,
+  schellingaf_message: ["start", "send"],
+  schellingaf_task: ["add"],
+  schellingaf_oracle: ["approve", "decline", "propose"],
+});
+
+/** Whether a call is a write the service dedupes by idempotency_key, and the key it
+ *  carries: at the top of its arguments, or inside canonical when the agent signed it. */
+function keyOf(name, args) {
+  if (!Object.hasOwn(KEYED, name) || args === null || typeof args !== "object") return { keyed: false };
+  const actions = KEYED[name];
+  if (actions !== null && !actions.includes(args.action)) return { keyed: false };
+  if (name === SEALING_TOOLS.post && typeof args.canonical === "string") {
+    let inside;
+    try {
+      inside = JSON.parse(Buffer.from(args.canonical, "base64url").toString("utf8"))?.idempotency_key;
+    } catch {
+      inside = undefined;
+    }
+    return typeof inside === "string" ? { keyed: true, key: inside } : { keyed: false };
+  }
+  return typeof args.idempotency_key === "string" ? { keyed: true, key: args.idempotency_key } : { keyed: false };
+}
+
+/**
+ * The answer to a request no answer came for, in place of the service's: never a success.
+ * A tools/call is answered as a tool's error that says whether anything may have been
+ * written, and how to call again safely; any other request as a JSON-RPC error.
+ */
+function noAnswerFor(message, cause, { sent, key = null, given = true, twice = null } = {}) {
+  const tool = message.params?.name;
+  if (message.method !== "tools/call") {
+    return { jsonrpc: "2.0", id: message.id, error: { code: -32603, message: `NO_ANSWER. ${cause} Send the request again.` } };
+  }
+  let plus = `plus idempotency_key "${key}"`;
+  if (given) plus = `with the idempotency_key "${key}" you gave`;
+  let words;
+  if (!sent) words = `NO_ANSWER. ${cause} The call was not sent to the service. Call it again.`;
+  else if (key === null) words = `NO_ANSWER. ${cause}${twice ?? ""} Whether ${tool} changed anything is UNKNOWN, and this call carries no idempotency_key. If it only reads, call it again. If it writes, read what it would change first: a second call may do it twice.`;
+  else if (message.params?.arguments?.action === "propose") words = `NO_ANSWER. ${cause}${twice ?? ""} Whether ${tool} wrote anything is UNKNOWN. If its history shows your version, the first call landed. If not, call propose again with the same arguments, unchanged, ${plus}.`;
+  else words = `NO_ANSWER. ${cause}${twice ?? ""} Whether ${tool} wrote anything is UNKNOWN. Call ${tool} again with the same arguments, unchanged, ${plus}: the service writes it at most once, and if the first call landed it answers what that call wrote. IDEMPOTENCY_CONFLICT on that call means the first call landed.`;
+  const written = sent ? "UNKNOWN" : "no";
+  return {
+    jsonrpc: "2.0",
+    id: message.id,
+    result: {
+      content: [{ type: "text", text: words }],
+      structuredContent: { code: "NO_ANSWER", written, cause, ...(sent && key !== null ? { idempotency_key: key } : {}) },
+      isError: true,
+    },
+  };
+}
+
 async function relay(message) {
+  const isRequest = isRequestMessage(message);
+  const id = message.id;
+  // One answer for each request id: a request whose id is still in flight is not
+  // relayed, and the first keeps its own answer.
+  if (isRequest && inFlight.has(id)) {
+    say("ignored a request whose id is still in flight");
+    return;
+  }
   const modern = message?.params?._meta?.["io.modelcontextprotocol/protocolVersion"];
   const name = message?.params?.name ?? message?.params?.uri;
-  const isRequest = message?.id !== undefined;
   const controller = new AbortController();
-  if (isRequest) inFlight.set(message.id, { controller, method: message.method });
-  const isCall = message?.method === "tools/call";
+  const isCall = message.method === "tools/call";
+  if (isRequest) inFlight.set(id, { controller, method: message.method });
+  // The one answer, written at most once; the id leaves inFlight with it.
+  let written = false;
+  const answer = (m) => {
+    if (!isRequest) return;
+    if (written) {
+      say(`dropped a second answer to request ${JSON.stringify(id)}`);
+      return;
+    }
+    written = true;
+    if (inFlight.get(id)?.controller === controller) inFlight.delete(id);
+    emit(m);
+  };
+  // Whether the request went to the connector: the moment it is handed to fetch.
+  let sent = false;
+  const { key, keyed } = isCall ? keyOf(name, message.params?.arguments) : { keyed: false };
+  const noAnswer = (cause) => noAnswerFor(message, cause, { sent, key: keyed ? key : null });
 
   // Sealed here, on the way out, where a tool call must be.
   let outgoing = message;
@@ -1929,98 +2091,123 @@ async function relay(message) {
   // service said it, or BRIDGE_FAILED for anything else that stopped it.
   const refuseHere = (error, doing) => {
     if (!(error instanceof Refusal)) say(error.message);
-    if (isRequest) {
-      const text = error instanceof Refusal ? error.message
-        : error?.fromService ? `${error.message} Nothing was sent.`
-          : `BRIDGE_FAILED. The bridge could not ${doing} this: ${error.message}. Nothing was sent.`;
-      process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: message.id, result: { content: [{ type: "text", text }], isError: true } }) + "\n");
-      inFlight.delete(message.id);
-    }
+    const text = error instanceof Refusal ? error.message
+      : error?.fromService ? `${error.message} Nothing was sent.`
+        : `BRIDGE_FAILED. The bridge could not ${doing} this: ${error.message}. Nothing was sent.`;
+    answer(isCall
+      ? { jsonrpc: "2.0", id, result: { content: [{ type: "text", text }], isError: true } }
+      : { jsonrpc: "2.0", id, error: { code: -32603, message: text } });
   };
-  // A dry run is refused here, before anything leaves this machine: signing a post drops
-  // the field and sends it for real, and a file named in it would be uploaded first.
-  if (isCall && namesDryRunIn(message?.params?.arguments)) {
-    refuseHere(NO_DRY_RUN);
-    return;
-  }
-  // With a toolset, a call to a tool it leaves out is answered here: nothing is sent,
-  // read, sealed, signed, uploaded or stamped for it.
-  if (isCall && TOOLSET !== "") {
-    let listed;
-    try {
-      listed = await toolsListed();
-    } catch (error) {
-      refuseHere(error, "check the toolset for");
+  try {
+    // A dry run is refused here, before anything leaves this machine: signing a post drops
+    // the field and sends it for real, and a file named in it would be uploaded first.
+    if (isCall && namesDryRunIn(message?.params?.arguments)) {
+      refuseHere(NO_DRY_RUN);
       return;
     }
-    if (!listed.has(name)) {
-      refuseHere(notInToolset(name));
-      return;
-    }
-  }
-  if (isCall) {
-    try {
-      const prepared = await prepare(message);
-      // Answered here, with nothing sent to the connector: a file saved on this machine.
-      if (prepared.answer) {
-        if (isRequest) {
-          process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: message.id, result: prepared.answer }) + "\n");
-          inFlight.delete(message.id);
-        }
+    // With a toolset, a call to a tool it leaves out is answered here: nothing is sent,
+    // read, sealed, signed, uploaded or stamped for it.
+    if (isCall && TOOLSET !== "") {
+      let listed;
+      try {
+        listed = await toolsListed();
+      } catch (error) {
+        refuseHere(error, "check the toolset for");
         return;
       }
-      outgoing = prepared.message;
-      again = prepared.again ?? null;
-      resign = prepared.sign ?? null;
-      note = prepared.note ?? null;
-      after = prepared.after ?? null;
-    } catch (error) {
-      refuseHere(error, name !== "schellingaf_get" ? "seal" : message.params?.arguments?.save_as !== undefined ? "save" : "read");
-      return;
+      if (!listed.has(name)) {
+        refuseHere(notInToolset(name));
+        return;
+      }
     }
-  }
+    if (isCall) {
+      try {
+        const prepared = await prepare(message);
+        // Answered here, with nothing sent to the connector: a file saved on this machine.
+        if (prepared.answer) {
+          answer({ jsonrpc: "2.0", id, result: prepared.answer });
+          return;
+        }
+        outgoing = prepared.message;
+        again = prepared.again ?? null;
+        resign = prepared.sign ?? null;
+        note = prepared.note ?? null;
+        after = prepared.after ?? null;
+      } catch (error) {
+        refuseHere(error, name !== "schellingaf_get" ? "seal" : message.params?.arguments?.save_as !== undefined ? "save" : "read");
+        return;
+      }
+    }
 
-  const send = async (bearer) => fetch(CONNECTOR, {
-    method: "POST",
-    signal: controller.signal,
-    headers: {
-      "content-type": "application/json",
-      accept: "application/json, text/event-stream",
-      authorization: `Bearer ${bearer}`,
-      ...(modern ? { "MCP-Protocol-Version": modern, "Mcp-Method": message.method } : negotiated ? { "MCP-Protocol-Version": negotiated } : {}),
-      ...(modern && typeof name === "string" && ["tools/call", "prompts/get", "resources/read"].includes(message.method) ? { "Mcp-Name": name } : {}),
-    },
-    body: JSON.stringify(outgoing),
-  });
+    const send = async (bearer) => {
+      sent = true;
+      return fetch(CONNECTOR, {
+        method: "POST",
+        signal: controller.signal,
+        headers: {
+          "content-type": "application/json",
+          accept: "application/json, text/event-stream",
+          authorization: `Bearer ${bearer}`,
+          ...(modern ? { "MCP-Protocol-Version": modern, "Mcp-Method": message.method } : negotiated ? { "MCP-Protocol-Version": negotiated } : {}),
+          ...(modern && typeof name === "string" && ["tools/call", "prompts/get", "resources/read"].includes(message.method) ? { "Mcp-Name": name } : {}),
+        },
+        body: JSON.stringify(outgoing),
+      });
+    };
 
-  try {
     let res = await send(await token());
     // Each at most once, and only for a request whose own answer says so: the token is
     // the problem, and the request goes again with a fresh one; or the SPACE's key
     // changed under a sealed post, and it is sealed again under the new key.
     let retriedToken = false;
     for (;;) {
-      if (res.status === 202) return;
+      if (res.status === 202) {
+        await res.body?.cancel();
+        answer(noAnswer("The service accepted the request and sent no answer to it."));
+        return;
+      }
       let retry = null;
-      let wrote = false;
+      // What came instead of the request's own answer: the service's refusal before the
+      // connector, with no JSON-RPC message, and whether it answered another id.
+      let envelope = null;
+      let other = false;
       for await (const m of messagesOf(res)) {
-        if (isRequest && m?.id === message.id && !retriedToken && !process.env.SCHELLINGAF_TOKEN && tokenRefused(m)) {
+        // Notifications and the service's own requests are relayed as they come.
+        if (typeof m?.method === "string") {
+          emit(m);
+          continue;
+        }
+        // A notification or a response the client sent is answered by nothing.
+        if (!isRequest) {
+          say("dropped an answer the service sent to a message that is not a request");
+          continue;
+        }
+        if (m?.jsonrpc === undefined && m?.id === undefined && typeof m?.error?.code === "string") {
+          envelope = m;
+          continue;
+        }
+        if (m?.id !== id) {
+          other = true;
+          say(`dropped an answer the service sent for another request than ${JSON.stringify(id)}`);
+          continue;
+        }
+        if (!retriedToken && !process.env.SCHELLINGAF_TOKEN && tokenRefused(m)) {
           retry = "token";
           break;
         }
-        if (isRequest && m?.id === message.id && again && toolRefused(m, "KEY_CHANGED")) {
+        if (again && toolRefused(m, "KEY_CHANGED")) {
           retry = "key";
           break;
         }
-        if (isRequest && m?.id === message.id && resign && toolRefused(m, "SIGNATURE_REQUIRED")) {
+        if (resign && toolRefused(m, "SIGNATURE_REQUIRED")) {
           retry = "sign";
           break;
         }
-        if (message.method === "initialize" && m?.id === message.id && typeof m?.result?.protocolVersion === "string") {
+        if (message.method === "initialize" && typeof m?.result?.protocolVersion === "string") {
           negotiated = m.result.protocolVersion;
         }
         // The toolset's tools, as the service lists them: which calls are prepared here.
-        if (TOOLSET !== "" && message.method === "tools/list" && m?.id === message.id && Array.isArray(m?.result?.tools)) {
+        if (TOOLSET !== "" && message.method === "tools/list" && Array.isArray(m?.result?.tools)) {
           const names = message.params?.cursor === undefined ? new Set() : new Set(listedTools ?? []);
           for (const tool of m.result.tools) names.add(tool?.name);
           listedTools = names;
@@ -2029,8 +2216,8 @@ async function relay(message) {
         // person too, since the client may show its error to nobody.
         if (res.status === 400 && typeof m?.error?.message === "string") say(m.error.message);
         // Opened here, on the way back, wherever a sealed item is in the answer.
-        const out = isCall && m?.id === message.id && m.result ? await openAnswer(m).catch((error) => (say(error.message), m)) : m;
-        if (out?.id === message.id && out.result && !out.result.isError) {
+        const out = isCall && m.result ? await openAnswer(m).catch((error) => (say(error.message), m)) : m;
+        if (out.result && !out.result.isError) {
           if (note) out.result.content = [...(out.result.content ?? []), { type: "text", text: note }];
           if (after) {
             try {
@@ -2040,14 +2227,25 @@ async function relay(message) {
             }
           }
         }
-        process.stdout.write(JSON.stringify(out) + "\n");
-        wrote = true;
+        // The request's answer is written: nothing more of this response is read.
+        answer(out);
+        return;
       }
       if (retry === null) {
-        if (!wrote && isRequest && res.status >= 400) {
-          process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: message.id, error: { code: -32603, message: `the service answered ${res.status}` } }) + "\n");
+        if (!isRequest) return;
+        // The service's refusal, made before the connector read the request: said as the
+        // service said it, for this request's id.
+        if (envelope) {
+          const refused = refusedBy(envelope, res.status, res.headers);
+          answer(isCall
+            ? { jsonrpc: "2.0", id, result: { content: [{ type: "text", text: refused.message }], isError: true } }
+            : { jsonrpc: "2.0", id, error: { code: -32603, message: refused.message } });
+          return;
         }
-        return;
+        if (other) throw new NoAnswer("The service answered another request instead.");
+        if (res.status >= 400) throw new NoAnswer(`The service answered ${res.status} and no result.`, { lost: [502, 503, 504].includes(res.status) });
+        if ((res.headers.get("content-type") ?? "").includes("text/event-stream")) throw new NoAnswer("The service's answer ended before its result.", { lost: true });
+        throw new NoAnswer("The service sent an empty answer.");
       }
       if (retry === "token") {
         retriedToken = true;
@@ -2066,13 +2264,18 @@ async function relay(message) {
       }
     }
   } catch (error) {
+    // Cancelled by the client, or a listen closed as the client went: no answer is written.
     if (controller.signal.aborted) return;
-    say(error.message);
-    if (isRequest) {
-      process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: message.id, error: { code: -32603, message: `the bridge could not reach the service: ${error.message}` } }) + "\n");
+    if (error instanceof NoAnswer) {
+      answer(noAnswer(error.message));
+      return;
     }
+    say(error.message);
+    if (sent) answer(noAnswer(`The connection to the service was lost (${error.cause?.message ?? error.message}).`));
+    else refuseHere(error, "send");
   } finally {
-    if (isRequest) inFlight.delete(message.id);
+    if (isRequest && !written && !controller.signal.aborted) answer(noAnswer("The service's answer ended before its result."));
+    if (isRequest && inFlight.get(id)?.controller === controller) inFlight.delete(id);
   }
 }
 
@@ -2095,6 +2298,37 @@ async function* inputLines(stream) {
   if (buffered !== "") yield buffered;
 }
 
+/** A line the client wrote, read as one message to relay, or answered here: a line that is
+ *  not JSON by the id it names, a batch element by element, and nothing ever with id null. */
+function received(line) {
+  let message;
+  try {
+    message = JSON.parse(line);
+  } catch {
+    const named = idOf(line);
+    if (named === undefined) say(`ignored a line of ${Buffer.byteLength(line)} bytes that is not JSON and names no id to answer`);
+    else emit({ jsonrpc: "2.0", id: named, error: { code: -32700, message: "Parse error: this line is not JSON, so it was not sent." } });
+    return null;
+  }
+  if (Array.isArray(message)) {
+    for (const each of message) {
+      if (isRequestMessage(each)) {
+        emit({ jsonrpc: "2.0", id: each.id, error: { code: -32600, message: "Batch requests are not supported: send each message on its own line." } });
+      }
+    }
+    return null;
+  }
+  if (message === null || typeof message !== "object") {
+    say(`ignored a line of ${Buffer.byteLength(line)} bytes that is not a JSON-RPC message`);
+    return null;
+  }
+  if (Object.hasOwn(message, "id") && typeof message.id !== "string" && typeof message.id !== "number") {
+    say("ignored a message whose id is not a string or a number, such as null: no answer could name it");
+    return null;
+  }
+  return message;
+}
+
 async function serve() {
   // Published as soon as the bridge starts, so a sealed pair or SPACE can be offered
   // to this KEY before it first seals anything. Not being able to is said, not fatal:
@@ -2103,17 +2337,8 @@ async function serve() {
   const pending = new Set();
   for await (const line of inputLines(process.stdin)) {
     if (line.trim() === "") continue;
-    let message;
-    try {
-      message = JSON.parse(line);
-    } catch {
-      process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: null, error: { code: -32700, message: "Parse error" } }) + "\n");
-      continue;
-    }
-    if (Array.isArray(message)) {
-      process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: null, error: { code: -32600, message: "Batch requests are not supported." } }) + "\n");
-      continue;
-    }
+    const message = received(line);
+    if (message === null) continue;
     // A cancelled request is abandoned here: closing its connection is how a
     // stateless server hears about it. A subscription ends the same way.
     if (message.method === "notifications/cancelled") {

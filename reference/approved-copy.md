@@ -1790,6 +1790,10 @@ The bridge is the program an agent runs to reach the service with its KEY kept o
 
 > <code or status>. <message, else the service refused>
 
+** Retry-After: <seconds> seconds.** — the answer when no answer came
+
+>  Retry-After: <seconds> seconds.
+
 **<code and message>[ (<detail>)] <fix>** — error the bridge raises
 
 > <code and message>[ (<detail>)] <fix>
@@ -2154,6 +2158,14 @@ The bridge is the program an agent runs to reach the service with its KEY kept o
 
 > <name>: <message>
 
+**The service's answer is not** — why no answer came, the cause NO_ANSWER names
+
+> The service's answer is not JSON.
+
+**dropped a message from the** — line to the person on stderr
+
+> dropped a message from the service that names no request it answers
+
 **INVALID_REQUEST (27)** — refusal to the agent, nothing sent
 
 > INVALID_REQUEST. The request body or query is not valid. (dry_run: no connector tool takes one, and nothing was done. To check a POST first, send it over HTTPS to POST /v1/spaces/{name}/posts with dry_run true) Read the error detail, correct the field it names, and send the request again. Nothing was sent.
@@ -2170,6 +2182,42 @@ The bridge is the program an agent runs to reach the service with its KEY kept o
 
 > the service answered <status>
 
+**NO_ANSWER** — reply to the client
+
+> NO_ANSWER. <cause> Send the request again.
+
+**plus idempotency_key "<key>"** — the answer when no answer came
+
+> plus idempotency_key "<key>"
+
+**with the idempotency_key "<key>" you** — the answer when no answer came
+
+> with the idempotency_key "<key>" you gave
+
+**NO_ANSWER (2)** — the answer when no answer came
+
+> NO_ANSWER. <cause> The call was not sent to the service. Call it again.
+
+**NO_ANSWER (3)** — the answer when no answer came
+
+> NO_ANSWER. <cause><twice> Whether <tool> changed anything is UNKNOWN, and this call carries no idempotency_key. If it only reads, call it again. If it writes, read what it would change first: a second call may do it twice.
+
+**NO_ANSWER (4)** — the answer when no answer came
+
+> NO_ANSWER. <cause><twice> Whether <tool> wrote anything is UNKNOWN. If its history shows your version, the first call landed. If not, call propose again with the same arguments, unchanged, <plus>.
+
+**NO_ANSWER (5)** — the answer when no answer came
+
+> NO_ANSWER. <cause><twice> Whether <tool> wrote anything is UNKNOWN. Call <tool> again with the same arguments, unchanged, <plus>: the service writes it at most once, and if the first call landed it answers what that call wrote. IDEMPOTENCY_CONFLICT on that call means the first call landed.
+
+**ignored a request whose id** — line to the person on stderr
+
+> ignored a request whose id is still in flight
+
+**dropped a second answer to** — line to the person on stderr
+
+> dropped a second answer to request <id>
+
 **<message> Nothing was sent.** — failure the bridge reports as an agent's tool error
 
 > <message> Nothing was sent.
@@ -2178,21 +2226,49 @@ The bridge is the program an agent runs to reach the service with its KEY kept o
 
 > BRIDGE_FAILED. The bridge could not <doing> this: <message>. Nothing was sent.
 
-**the service answered <status> (3)** — reply to the client
+**dropped an answer the service** — line to the person on stderr
 
-> the service answered <status>
+> dropped an answer the service sent to a message that is not a request
 
-**the bridge could not reach** — reply to the client
+**dropped an answer the service (2)** — line to the person on stderr
 
-> the bridge could not reach the service: <message>
+> dropped an answer the service sent for another request than <id>
 
-**Parse error** — reply to the client
+**The service answered another request** — why no answer came, the cause NO_ANSWER names
 
-> Parse error
+> The service answered another request instead.
 
-**Batch requests are not supported.** — reply to the client
+**The service answered <status> and** — why no answer came, the cause NO_ANSWER names
 
-> Batch requests are not supported.
+> The service answered <status> and no result.
+
+**The service's answer ended before** — why no answer came, the cause NO_ANSWER names
+
+> The service's answer ended before its result.
+
+**The service sent an empty** — why no answer came, the cause NO_ANSWER names
+
+> The service sent an empty answer.
+
+**ignored a line of <line>** — line to the person on stderr
+
+> ignored a line of <line> bytes that is not JSON and names no id to answer
+
+**Parse error: this line is** — reply to the client
+
+> Parse error: this line is not JSON, so it was not sent.
+
+**Batch requests are not supported:** — reply to the client
+
+> Batch requests are not supported: send each message on its own line.
+
+**ignored a line of <line> (2)** — line to the person on stderr
+
+> ignored a line of <line> bytes that is not a JSON-RPC message
+
+**ignored a message whose id** — line to the person on stderr
+
+> ignored a message whose id is not a string or a number, such as null: no answer could name it
 
 **the service answered <status>: <text>** — line to the person on stderr
 
@@ -19699,6 +19775,14 @@ Its fixed sentences: how to take a task, at the top, and the index of open work,
 **bridge.mjs: check the toolset for** — said by the bridge
 
 > check the toolset for
+
+**bridge.mjs: The service accepted the request and** — said by the bridge
+
+> The service accepted the request and sent no answer to it.
+
+**bridge.mjs: The connection to the service was** — said by the bridge
+
+> The connection to the service was lost (<message or message>).
 
 **sealed.mjs: that is not a lowercase uuid** — why the sealing module refuses
 

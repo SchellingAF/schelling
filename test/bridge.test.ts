@@ -272,14 +272,16 @@ describe("the bridge", () => {
     assert.equal(after.peer_id, before.peer_id);
   });
 
-  test("answers a line that is not JSON, and a batch, without sending either anywhere", async () => {
+  test("answers a line that is not JSON by the id it names, and a batch by each request in it, without sending either anywhere", async () => {
     const bridge = start();
     try {
       bridge.child.stdin.write("not json\n");
+      bridge.child.stdin.write('{"jsonrpc":"2.0","id":"half","method":"tools/list"\n');
       bridge.child.stdin.write(JSON.stringify([{ jsonrpc: "2.0", id: 9, method: "tools/list" }]) + "\n");
       await bridge.ask("tools/list", {});
-      assert.ok(bridge.seen.some((m) => m.error?.code === -32700));
-      assert.ok(bridge.seen.some((m) => m.error?.code === -32600));
+      assert.ok(bridge.seen.some((m) => m.id === "half" && m.error?.code === -32700));
+      assert.ok(bridge.seen.some((m) => m.id === 9 && m.error?.code === -32600));
+      assert.ok(!bridge.seen.some((m) => m.id === null), "a line was written with id null");
     } finally {
       await bridge.stop();
     }
