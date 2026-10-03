@@ -34,7 +34,7 @@ import {
   withAttachmentPrints,
   type Attachment,
 } from "../domain/validate.ts";
-import { authorClause, authorOf, boundedNumber, budgetCut, cursor, postColumns, detailOr, hideOldVersions, kindClause, kindsOf, PAGE_DETAILS, PostPage, readDenied, render, tokenBudget, type Detail, type PostRow, withinBudget } from "./postview.ts";
+import { authorClause, authorOf, boundedNumber, budgetCut, cursor, postColumns, detailOr, hideOldVersions, kindClause, kindsOf, PAGE_DETAILS, PostPage, readCost, readDenied, render, tokenBudget, type Detail, type PostRow, type Written, withinBudget } from "./postview.ts";
 import { charge, emptyOf, LIMITS, openPostsPerDay, OWN, SHARED, spend } from "./ratelimit.ts";
 import { connectorSignedWith, floorPlace, optionalBearer, requireBearer, type Env } from "./app.ts";
 import { receipt } from "./spaces.ts";
@@ -48,12 +48,14 @@ import { RECEIPT_VERSION, type ServiceState } from "./service.ts";
 import { jsonText } from "../mcp/render.ts";
 import { publishChange } from "../mcp/listen.ts";
 import { agrees, readSealedItem } from "./sealed.ts";
-import { hintFor, STAGE_HINT } from "../domain/voice.ts";
+import { hintForPost, STAGE_HINT } from "../domain/voice.ts";
 
 /** A sealed post's parts and what its header names, which the service acts on. */
 type SealedPost = {
   header: Buffer;
   ciphertext: Buffer;
+  /** The generation its header names, which append_post holds to the one in use. */
+  generation: string;
   kind: string;
   to: string[];
   replyTo: string | null;
@@ -72,6 +74,7 @@ function readSealedPost(value: unknown, me: string): SealedPost {
   return {
     header,
     ciphertext,
+    generation: String(fields.generation),
     kind: fields.kind as string,
     to: fields.to ?? [],
     replyTo: fields.reply_to ?? null,
@@ -641,7 +644,8 @@ export function mountPosts(app: Hono<Env>, config: Config, db: Db, service: Serv
     }
     // delivered is logged, never returned: who else received a copy is not the
     // author's business, and mailbox positions are private counters.
-    const { delivered, ...rest } = receipt as Record<string, unknown> & { delivered?: unknown };
+    // admitted_revision is read to price read_cost below, and answered nowhere.
+    const { delivered, admitted_revision: _revision, ...rest } = receipt as Record<string, unknown> & { delivered?: unknown };
     // The stage a go set carries finished, as every stage of a SPACE does, from its word.
     const stageSet = rest.stage_set as { word: string; note: string | null } | undefined;
     if (stageSet) rest.stage_set = { ...stageSet, finished: isFinishedStage(stageSet.word) };
@@ -695,10 +699,16 @@ export function mountPosts(app: Hono<Env>, config: Config, db: Db, service: Serv
     const stageHint = sealed === null && post.kind !== "version" && post.data !== null && Object.hasOwn(post.data, "stage")
       ? STAGE_HINT
       : null;
-    const longHint = sealed === null ? hintFor(post.title, post.body) : null;
+    const longHint = sealed === null ? hintForPost(post.title, post.body, post.kind) : null;
     const hint = [stageHint, longHint].filter((line) => line !== null).join("\n") || null;
+    // What its readers pay for it, at each level, as a member reads it: so a writer sees
+    // the price of a long title or a missing summary in the answer to the write itself.
+    const readPrice = readCost({
+      space: name, author: bearer.peerId, receipt, post, attachments: attached as Written["attachments"],
+      sealed: sealed === null ? null : { header: sealed.header, ciphertext: sealed.ciphertext, generation: sealed.generation },
+    });
     return c.json(
-      { ...rest, space: name, ...(notNotified.length > 0 ? { not_notified: notNotified } : {}), ...(hint ? { hint } : {}) },
+      { ...rest, space: name, read_cost: readPrice, ...(notNotified.length > 0 ? { not_notified: notNotified } : {}), ...(hint ? { hint } : {}) },
       replayed ? 200 : 201,
     );
   });

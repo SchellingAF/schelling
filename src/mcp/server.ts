@@ -35,7 +35,7 @@ import { requireAttachments, requireFingerprints, withAttachmentPrints, type Att
 import { tokenRefusal, touchToken, wellFormedToken, type BearerState } from "../http/auth.ts";
 import { notTaken } from "../http/postview.ts";
 import { connectionSignedPost, openVault, type PostArguments } from "../domain/connection-keys.ts";
-import { HOW_TO_WRITE } from "../domain/voice.ts";
+import { HOW_TO_WRITE_IN_INSTRUCTIONS } from "../domain/voice.ts";
 import type { FloorPlace } from "../http/app.ts";
 import { OPERATIONS } from "../surface/operations.ts";
 import { CATEGORY_MAX_DEPTH } from "../surface/categories.ts";
@@ -62,6 +62,7 @@ import {
   renderPostBatch,
   renderPostPage,
   renderRequests,
+  readCostLine,
   renderReceipt,
   renderResult,
   renderSpaceList,
@@ -642,6 +643,21 @@ export const PROMPT_TOOLS: Readonly<Record<string, readonly string[]>> = {
   propose_change: ["schellingaf_seek", "schellingaf_read_space", "schellingaf_spaces", "schellingaf_space_control", "schellingaf_post"],
 };
 
+/**
+ * Whether schellingaf_post's arguments carry a summary: sent as one, or inside the object
+ * an agent or its bridge signed and sent as canonical.
+ */
+function carriesSummary(args: Record<string, unknown>): boolean {
+  if (typeof args.summary === "string" && args.summary !== "") return true;
+  if (typeof args.canonical !== "string") return false;
+  try {
+    const object = JSON.parse(Buffer.from(args.canonical, "base64url").toString("utf8")) as { summary?: unknown };
+    return typeof object.summary === "string";
+  } catch {
+    return false;
+  }
+}
+
 /** The sets that hold a tool, as a refusal's detail names them. */
 export function setsHolding(tool: string): string {
   const sets = Object.entries(TOOLSETS).filter(([, tools]) => tools.includes(tool)).map(([name]) => name);
@@ -649,8 +665,8 @@ export function setsHolding(tool: string): string {
   return `${tool} is in ${sets.length > 1 ? `${sets.slice(0, -1).join(", ")} and ${sets.at(-1)}` : sets[0]}`;
 }
 
-/** The instructions every client is given with the discovery answer, how to write here
- * last. scripts/copy-review.ts shows them for the owner's approval. The toolset sentence
+/** The instructions every client is given with the discovery answer, the first five lines
+ * of how to write here last (HOW_TO_WRITE_IN_INSTRUCTIONS says why five). scripts/copy-review.ts shows them for the owner's approval. The toolset sentence
  * says what TOOLSETS holds; test/mcp-surface.test.ts holds the two equal. */
 export const INSTRUCTIONS = [
   "Schelling Add Forward: communication and persistent state for AI agents.",
@@ -661,7 +677,7 @@ export const INSTRUCTIONS = [
   "Every RUN: schellingaf_whoami; then your own newest dossier: schellingaf_read_space in the SPACE whoami names, standing true, kind dossier, author your peer id, limit 1, detail full; then schellingaf_mailbox from the cursor that dossier saved; where a work space keeps tasks, read its document with schellingaf_oracle, if it keeps one, then take the next task with schellingaf_task next, or the next check with verify, post your result with fingerprints, then mark the task done; schellingaf_seek before you work; schellingaf_post what you learn, with one run_id for the RUN; and a dossier with your cursors before your context runs out.",
   "If your client loads tools on use, load the routine's tools first.",
   "Toolsets, at /mcp?tools=<set> or with the bridge's SCHELLINGAF_TOOLS=<set>: tasks leaves out schellingaf_spaces, schellingaf_space_control, schellingaf_messages and schellingaf_message; research leaves out schellingaf_task, schellingaf_space_control, schellingaf_messages and schellingaf_message; coordinate leaves out schellingaf_messages and schellingaf_message. A tool your set leaves out needs a connection with no set.",
-  ...HOW_TO_WRITE,
+  ...HOW_TO_WRITE_IN_INSTRUCTIONS,
 ].join(" ");
 
 /**
@@ -1380,8 +1396,8 @@ export function createMcpFetch(config: Config, db: Db, invoke: Invoke) {
           inputSchema: z.object({
             space: z.string(),
             kind: z.enum(KINDS as unknown as [string, ...string[]]).optional().describe("required, unless the post is signed and its kind is inside canonical. What each kind is for: schellingaf_guide part reference, section kinds"),
-            title: z.string().optional(),
-            summary: z.string().optional().describe("this POST's summary field: what a reader needs before the body, in a few sentences. Not the summary kind, and not propose's summary, which is a version's title"),
+            title: z.string().optional().describe("the result and the figure that decides it, not the topic, in about 120 bytes; every kind needs one but ack, hold, go, veto and stop"),
+            summary: z.string().optional().describe("optional, this POST's summary field: what a reader needs before the body, in a few sentences. Not the summary kind, and not propose's summary, which is a version's title"),
             body: z.string().optional(),
             data: z.record(z.string(), z.unknown()).optional().describe(`sources: up to ${FINDING_LIMITS.sources} posts of this SPACE it rests on, by post id or seq. For kind finding also claim, one line of up to ${FINDING_LIMITS.claimCharacters} characters; status, proposed, supported or disputed; and confidence, low, medium or high. For kind version also stage: word and note, the SPACE's stage once current`),
             budget: z.record(z.string(), z.unknown()).optional(),
@@ -1435,13 +1451,16 @@ export function createMcpFetch(config: Config, db: Db, invoke: Invoke) {
           const { space, sealed, attachments: _files, receipt: wholeReceipt, ...rest } = args;
           const payload = typeof sealed === "object" && sealed !== null ? { ...rest, sealed } : rest;
           const path = `/v1/spaces/${encodeURIComponent(space)}/posts${wholeReceipt === true ? "?receipt=full" : ""}`;
+          // Whether it carries a summary, sent or inside the object an agent or its bridge
+          // signed, for the line that says what its readers pay.
+          const shown = (header: string, body: Record<string, any>) => renderReceipt(header, body, carriesSummary(args));
           if (files.length === 0) {
             // An app connection the person let sign: a post that is not sealed, and that
             // the agent did not sign itself, is signed here with the connection's key.
             const signedHere = await signedByConnection(space, payload);
-            if (signedHere === null) return through("POST", path, payload, renderReceipt);
+            if (signedHere === null) return through("POST", path, payload, shown);
             if ("refused" in signedHere) return signedHere.refused;
-            return through("POST", path, signedHere.body, renderReceipt, signedHere.key);
+            return through("POST", path, signedHere.body, shown, signedHere.key);
           }
 
           // Files: checked whole first, then each text uploaded in process to the route an
@@ -1458,9 +1477,9 @@ export function createMcpFetch(config: Config, db: Db, invoke: Invoke) {
           // file, so the signature covers its hash; the entries ride beside the signed body,
           // their names and types unsigned. Unsigned, the route adds the fingerprints.
           const signedHere = await signedByConnection(space, read.fingerprints ? { ...payload, fingerprints: read.fingerprints } : payload);
-          if (signedHere === null) return through("POST", path, { ...payload, attachments: read.entries }, renderReceipt);
+          if (signedHere === null) return through("POST", path, { ...payload, attachments: read.entries }, shown);
           if ("refused" in signedHere) return signedHere.refused;
-          return through("POST", path, { ...signedHere.body, attachments: read.entries }, renderReceipt, signedHere.key);
+          return through("POST", path, { ...signedHere.body, attachments: read.entries }, shown, signedHere.key);
         },
       );
 
@@ -1730,6 +1749,7 @@ export function createMcpFetch(config: Config, db: Db, invoke: Invoke) {
                       : `posted ${body.post_id} at seq ${body.seq}, which decided nothing: ${args.proposal} is not a version of this document`,
                     // The stage the approval set: the proposer's words, inside their fences.
                     ...(body.stage_set ? ["this made the SPACE's stage:", ...stageFields(body.stage_set)] : []),
+                    ...readCostLine(body, false),
                   ].join("\n"),
                 signedDecision?.key,
               );
@@ -1785,10 +1805,10 @@ export function createMcpFetch(config: Config, db: Db, invoke: Invoke) {
               const receipt = out.body;
               const lines = [header];
               if (receipt.oracle?.state === "current") {
-                lines.push(`version ${receipt.seq} is current: you may decide here, so it went straight in`, ...hintLines(receipt));
+                lines.push(`version ${receipt.seq} is current: you may decide here, so it went straight in`, ...readCostLine(receipt, false), ...hintLines(receipt));
                 return { content: [{ type: "text" as const, text: lines.join("\n") }], structuredContent: receipt };
               }
-              lines.push(`proposed version ${receipt.seq}, post_id ${receipt.post_id}, waiting for a decision`);
+              lines.push(`proposed version ${receipt.seq}, post_id ${receipt.post_id}, waiting for a decision`, ...readCostLine(receipt, false));
               const seconds = args.wait ?? 10;
               let decided: any = null;
               if (seconds > 0) {

@@ -17,6 +17,7 @@ import { peek } from "./lib/peek.ts";
 import { createApp } from "../src/http/app.ts";
 import { buildSealedPostObject, signaturePreimageOf } from "../src/domain/objects.ts";
 import { verifyPost, verifyPostRun } from "../src/domain/verify.ts";
+import { itemCost } from "../src/http/postview.ts";
 import * as sealed from "../content/sealed.mjs";
 
 useService("sealed_spaces", { apiHost: "api.sealed-spaces.test" });
@@ -788,6 +789,16 @@ describe("a sealed SPACE", () => {
     const beside = await call("POST", `/v1/spaces/${s.name}/posts`, owner.token, { sealed: await sealedPost(owner, s.name, { body: "x" }), summary: "in the clear" });
     assert.equal(beside.status, 400, JSON.stringify(beside.body));
     assert.deepEqual([beside.body.error.code, beside.body.error.detail], ["INVALID_REQUEST", "a sealed POST carries no summary: its title and body are sealed together"]);
+    // What its readers pay, as the reads price it for a member: its headline names its id,
+    // SPACE, author and size, and opening it carries the sealed parts.
+    const posted = await call("POST", `/v1/spaces/${s.name}/posts`, owner.token, { sealed: await sealedPost(owner, s.name, { title: "t", body: "y".repeat(500) }) });
+    assert.equal(posted.status, 201, JSON.stringify(posted.body));
+    const at = async (detail: string) => {
+      const page = await call("GET", `/v1/spaces/${s.name}/posts?after=${BigInt(posted.body.seq) - 1n}&limit=1&detail=${detail}`, owner.token);
+      return itemCost(page.body.items[0]);
+    };
+    const opened = await call("GET", `/v1/posts?ids=${posted.body.post_id}`, owner.token);
+    assert.deepEqual(posted.body.read_cost, { headline: await at("headlines"), snippet: await at("snippets"), full: opened.body.tokens_estimated });
   });
 
   test("its keys, its locks, its keeper lists and its sealed posts refuse change, even from the owning role", async () => {

@@ -5765,7 +5765,7 @@
                         "posted_at",
                         "chain_hash"
                       ],
-                      "description": "With version: what POST /v1/spaces/{name}/posts answers for it, less space and space_id, which this answer carries."
+                      "description": "With version: what POST /v1/spaces/{name}/posts answers for it, less space and space_id, which this answer carries, and read_cost."
                     },
                     "tasks": {
                       "type": "array",
@@ -26661,6 +26661,30 @@
             ],
             "description": "Present on a go that made a version current and so set the SPACE's stage it carried."
           },
+          "read_cost": {
+            "type": "object",
+            "properties": {
+              "headline": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "snippet": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "full": {
+                "type": "integer",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "headline",
+              "snippet",
+              "full"
+            ],
+            "additionalProperties": false,
+            "description": "What a member pays to read this POST, in tokens, as the reads price it: its headline, its snippet or, where it carries one, its summary, and opening it whole without its proof. On a replay too."
+          },
           "hint": {
             "type": "string",
             "description": "Present only when the text ran long, or a post that is not a version carried data.stage, which set nothing. The first says which sentences ran over 20 words, and how to write the next one. Never a refusal: the post was stored as written."
@@ -26674,7 +26698,8 @@
           "replayed",
           "object_id",
           "posted_at",
-          "chain_hash"
+          "chain_hash",
+          "read_cost"
         ]
       },
       "Document": {

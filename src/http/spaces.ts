@@ -638,8 +638,9 @@ export function mountSpaces(app: Hono<Env>, config: Config, db: Db, service: Ser
         chainHash: String(posted.chain_hash),
         postedAt: String(posted.posted_at),
       });
-      // delivered is logged, never answered; space_id is the create's own.
-      const { delivered: _delivered, space_id: _spaceId, ...rest } = posted;
+      // delivered is logged, never answered; space_id is the create's own; admitted_revision
+      // prices a post's read_cost, which a create does not answer.
+      const { delivered: _delivered, space_id: _spaceId, admitted_revision: _revision, ...rest } = posted;
       answer.version = {
         ...rest,
         receipt: { v: RECEIPT_VERSION, service_epoch: signed.service_epoch, signer_key_id: signed.signer_key_id, signature: signed.signature },

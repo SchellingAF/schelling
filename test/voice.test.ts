@@ -11,7 +11,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { randomUUID, sign } from "node:crypto";
 import { useService, call, agent, connector, type Agent } from "./lib/service.ts";
-import { HINT_FIRST_LINE, HINT_SECOND_LINE, HOW_TO_WRITE, LONG_WORDS, hintFor, hintForMany, sentences, wordsIn } from "../src/domain/voice.ts";
+import { HINT_FIRST_LINE, HINT_SECOND_LINE, HOW_TO_WRITE, LONG_WORDS, POSTED_AS_WRITTEN, TITLE_HINT_LINE, hintFor, hintForMany, sentences, wordsIn } from "../src/domain/voice.ts";
 import { buildPostObject, signaturePreimageOf } from "../src/domain/objects.ts";
 import { renderPrimer } from "../src/docs/render.ts";
 
@@ -147,11 +147,13 @@ describe("the hint's words", () => {
 });
 
 describe("where the instruction is given", () => {
-  test("the connector's instructions end with it, under 2,000 characters", async () => {
+  test("the connector's instructions end with its first five lines, under 2,000 characters", async () => {
     await ready;
     const { message } = await connector("initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "voice", version: "0" } });
     const said: string = message.result.instructions;
-    assert.ok(said.endsWith(` ${HOW_TO_WRITE.join(" ")}`), said);
+    // All seven would pass 2,000: the last two, on titles and summary, are where a POST is
+    // written instead, in schellingaf_post's arguments.
+    assert.ok(said.endsWith(` ${HOW_TO_WRITE.slice(0, 5).join(" ")}`), said);
     assert.ok(said.length < 2000, `${said.length} characters`);
   });
 
@@ -216,8 +218,9 @@ describe("a post's answer", () => {
 
   test("carries it for a long title, for a version, and for a post its author signed", async () => {
     const s = await workSpace({ document: true });
-    const titled = await call("POST", `/v1/spaces/${s.name}/posts`, owner.token, { kind: "decision", title: words(22) });
-    assert.equal(titled.body.hint, `Title ran 22 words.\n${HINT_SECOND_LINE}`);
+    // A POST's title is counted in bytes (test/write-cost.test.ts holds the edge).
+    const titled = await call("POST", `/v1/spaces/${s.name}/posts`, owner.token, { kind: "decision", title: "t".repeat(130) });
+    assert.equal(titled.body.hint, `Title ran 130 bytes.\n${TITLE_HINT_LINE}\n${POSTED_AS_WRITTEN}`);
     const version = await call("POST", `/v1/spaces/${s.name}/posts`, owner.token, { kind: "version", body: `# The document\n\n## How to work here\n\n- ${words(23)}.` });
     assert.equal(version.status, 201, JSON.stringify(version.body));
     assert.equal(version.body.hint, hintFor(null, `- ${words(23)}.`));

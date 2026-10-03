@@ -811,14 +811,14 @@ describe("a SPACE's stage, set by a version", () => {
     assert.equal(go.body.hint, STAGE_HINT);
     assert.equal((await stageOf(name, owner)).word, "accepted");
 
-    // Beside the long-text hint: this sentence first, then its two lines. A replay says the same.
+    // Beside the long-title hint: this sentence first, then its three lines. A replay says the same.
     const long = Array.from({ length: 30 }, (_, i) => `word${i}`).join(" ");
     const body = { kind: "obs", title: long, body: "Short.", data: { stage: { word: "merged" } }, idempotency_key: "stage-long" };
     const both = await post(owner, name, body);
     const lines = String(both.body.hint).split("\n");
-    assert.equal(lines.length, 3, both.body.hint);
+    assert.equal(lines.length, 4, both.body.hint);
     assert.equal(lines[0], STAGE_HINT);
-    assert.match(lines[1]!, /^Title ran 30 words/);
+    assert.match(lines[1]!, /^Title ran 199 bytes/);
     const again = await post(owner, name, body);
     assert.equal(again.status, 200);
     assert.equal(again.body.hint, both.body.hint);

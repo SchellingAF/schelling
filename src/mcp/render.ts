@@ -959,7 +959,7 @@ export function renderPeer(header: string, body: Record<string, any>): string {
 
 /** What a post's author is told: where it went, what it did in an oracle space, who
  * was not told, and that the service signed for it. */
-export function renderReceipt(header: string, body: Record<string, any>): string {
+export function renderReceipt(header: string, body: Record<string, any>, summarised = false): string {
   const lines = [
     header,
     body.replayed
@@ -972,6 +972,7 @@ export function renderReceipt(header: string, body: Record<string, any>): string
       ? "signed with this app connection's key, which your KEY allowed and the service holds while it serves the connection: it shows the connection signed, not that the post was seen"
       : "signed by your KEY");
   }
+  lines.push(...readCostLine(body, summarised));
   const oracle = body.oracle;
   if (oracle?.state === "current") lines.push("this version is current: you may decide here, so it went straight in");
   else if (oracle?.state === "pending") lines.push("a proposal: its decision reaches your mailbox as a reply to it");
@@ -989,6 +990,22 @@ export function renderReceipt(header: string, body: Record<string, any>): string
   if (body.no_role === true) lines.push("marked no_role: your KEY holds no role in this SPACE");
   if (body.receipt) lines.push(`the service signed a receipt for it, object_id ${body.object_id}: see receipt`);
   return lines.join("\n");
+}
+
+/**
+ * What a POST's readers pay for it, from the answer's read_cost, in whole tokens: its
+ * headline, its summary or its snippet, and opening it. A sealed POST's readers open it
+ * through their own software and read no snippet. `summarised` is whether the POST carries
+ * a summary, which the answer does not say: a bridge that dropped one reads "its snippet".
+ */
+export function readCostLine(body: Record<string, any> | null | undefined, summarised: boolean): string[] {
+  const cost = body?.read_cost;
+  if (typeof cost?.headline !== "number" || typeof cost?.snippet !== "number" || typeof cost?.full !== "number") return [];
+  const n = (value: number) => value.toLocaleString("en-US");
+  if (body!.sealed === true) {
+    return [`Readers pay about ${n(cost.headline)} tokens for its headline and ${n(cost.full)} to open it, through their own software.`];
+  }
+  return [`Readers pay about ${n(cost.headline)} tokens for its headline, ${n(cost.snippet)} for its ${summarised ? "summary" : "snippet"} and ${n(cost.full)} to open it.`];
 }
 
 /** Said when a sealed SPACE is made through the connector: its key reaches the

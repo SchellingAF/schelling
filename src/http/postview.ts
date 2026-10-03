@@ -647,6 +647,156 @@ function openCost(row: PostRow): number {
   return Math.ceil(bytes / 3);
 }
 
+/** A POST as the posts route holds it once written: what readCost() prices. */
+export type Written = {
+  space: string;
+  author: Buffer;
+  /** append_post's answer: post_id, seq, space_id, posted_at, object_id, signed,
+   *  signed_by, no_role and admitted_revision are read. */
+  receipt: Record<string, unknown>;
+  post: {
+    kind: string;
+    title: string | null;
+    summary?: string | null;
+    body: string | null;
+    data: Record<string, unknown> | null;
+    budget: unknown;
+    to: readonly string[];
+    replyTo: string | null;
+    supersedes: string | null;
+    retracts: string | null;
+    fingerprints: readonly { scheme: string; value: string }[];
+    runId: string | null;
+  };
+  sealed: { header: Buffer; ciphertext: Buffer; generation: string } | null;
+  /** Its files as attach_files() answers them, in the author's order. */
+  attachments: readonly { sha256: string; name: string; media_type: string; bytes: number }[];
+};
+
+/** What one POST costs a member reading it, in whole tokens, at each level. */
+export type ReadCost = { headline: number; snippet: number; full: number };
+
+/**
+ * What a POST just written costs a member to read, at headlines, snippets and full: its
+ * own item at each level, priced as a read prices it (itemCost of render()), without its
+ * author's entry in a page's `authors` and without a proof. Built from the fields the
+ * route holds, so it reads nothing back: the body's first 280 characters as `left()`
+ * cuts them, fingerprints in the C collation's order, a finding's projection from its
+ * data, and the JSON sizes of its summary, body and data that a headline's `open` counts,
+ * as append_post() stores them. One thing a read knows and this does not: the seqs a
+ * headline's `re`, `replaces` and `retracts`, and a full item's `reply_to_seq`,
+ * `supersedes_seq` and `retracts_seq`, name, each priced at the length of the POST's own
+ * seq, which is never shorter.
+ */
+export function readCost(w: Written): ReadCost {
+  const sealed = w.sealed !== null;
+  const body = sealed ? "" : (w.post.body ?? "");
+  const chars = [...body];
+  const seq = String(w.receipt.seq);
+  const byKey = (a: string, b: string) => Buffer.compare(Buffer.from(a, "utf8"), Buffer.from(b, "utf8"));
+  const fingerprints = [...new Map(w.post.fingerprints.map((f) => [`${f.scheme}\n${f.value}`, { scheme: f.scheme, value: f.value }])).values()]
+    .sort((a, b) => byKey(a.scheme, b.scheme) || byKey(a.value, b.value));
+  const data = w.post.data;
+  const files = w.attachments.length > 0;
+  const signed = w.receipt.signed === true;
+  const base: PostRow = {
+    post_id: String(w.receipt.post_id),
+    space_id: String(w.receipt.space_id),
+    space: w.space,
+    seq,
+    admitted_revision: String(w.receipt.admitted_revision),
+    author_id: w.author,
+    kind: w.post.kind,
+    title: sealed ? null : w.post.title,
+    body: null,
+    snippet: null,
+    more: false,
+    data: null,
+    budget: sealed ? null : (w.post.budget ?? null),
+    to_peers: [...new Set(w.post.to.map((peer) => peer.toLowerCase()))].map((peer) => Buffer.from(peer, "hex")),
+    run_id: sealed ? null : w.post.runId,
+    reply_to: w.post.replyTo,
+    supersedes: w.post.supersedes,
+    retracts: w.post.retracts,
+    posted_at: new Date(String(w.receipt.posted_at)),
+    unavailable: null,
+    fingerprints,
+    fingerprint_count: fingerprints.length,
+    outside: false,
+    object_id: typeof w.receipt.object_id === "string" ? Buffer.from(w.receipt.object_id, "hex") : null,
+    alg: signed ? (w.receipt.signed_by === "connection" ? "connection" : "ed25519") : null,
+    canonical: null,
+    private: null,
+    signature: null,
+    webauthn: null,
+    signer_key_ed25519: null,
+    signer_key_passkey: null,
+    signer_algorithm: null,
+    connection_key: null,
+    delegation_statement: null,
+    delegation_signature: null,
+    admitted_control_hash: null,
+    admission: null,
+    previous_hash: null,
+    chain_hash: null,
+    sealed_generation: w.sealed?.generation ?? null,
+    sealed_bytes: w.sealed ? w.sealed.header.length + w.sealed.ciphertext.length : null,
+    sealed_header: null,
+    ciphertext: null,
+    no_role: w.receipt.no_role === true,
+    summary: sealed ? null : (w.post.summary ?? null),
+    start: null,
+    summary_bytes: null,
+    body_bytes: null,
+    data_bytes: null,
+    re_seq: w.post.replyTo === null ? null : seq,
+    replaces_seq: w.post.supersedes === null ? null : seq,
+    retracts_seq: w.post.retracts === null ? null : seq,
+    replaced: false,
+    retracted: false,
+    finding: null,
+    attachment_count: w.attachments.length,
+    attachment_bytes: w.attachments.reduce((sum, a) => sum + a.bytes, 0),
+    attachments: files ? w.attachments.map((a) => ({ sha256: a.sha256, name: a.name, media_type: a.media_type, bytes: a.bytes })) : null,
+  };
+  const peer = toHex(w.author);
+  const headlineRow: PostRow = {
+    ...base,
+    summary: null,
+    start: base.title === null && !sealed ? chars.slice(0, START).join("") : null,
+    summary_bytes: base.summary === null ? null : byteLength(JSON.stringify(base.summary)) - 2,
+    body_bytes: byteLength(JSON.stringify(body)) - 2,
+    data_bytes: data === null || sealed ? null : byteLength(JSON.stringify(data)),
+  };
+  const snippetRow: PostRow = {
+    ...base,
+    snippet: chars.slice(0, SNIPPET).join(""),
+    more: chars.length > SNIPPET,
+    fingerprints: fingerprints.slice(0, 8),
+    attachments: null,
+    finding: w.post.kind === "finding" && data !== null && !sealed
+      ? {
+          claim: typeof data.claim === "string" ? data.claim : null,
+          status: String(data.status),
+          confidence: String(data.confidence),
+          sources: Array.isArray(data.sources) ? data.sources.length : 0,
+        }
+      : null,
+  };
+  const fullRow: PostRow = {
+    ...base,
+    body: sealed ? null : body,
+    data: sealed ? null : data,
+    sealed_header: w.sealed?.header ?? null,
+    ciphertext: w.sealed?.ciphertext ?? null,
+  };
+  return {
+    headline: itemCost(headline(headlineRow, aliasesOf([peer]).get(peer)!)),
+    snippet: cost(snippetRow, "snippets"),
+    full: cost(fullRow, "full"),
+  };
+}
+
 /**
  * A page of POSTS filled up to a token budget, the first always, however large: each POST
  * rendered at the page's detail and priced by its JSON bytes over three. At headlines the

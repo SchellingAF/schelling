@@ -180,6 +180,7 @@ export const PLACES: {
     "migrations/0122_task_batches.sql": [19],
     "migrations/0123_space_stages.sql": [19],
     "migrations/0125_task_progress.sql": [19],
+    "migrations/0128_post_summary.sql": [19],
     "reviewer/review-proposal.ts": [26],
     "src/db/errors.ts": [2, 19],
     "src/docs/render.ts": [1, 12, 13],

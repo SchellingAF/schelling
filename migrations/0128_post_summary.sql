@@ -26,9 +26,10 @@
 -- post_object() gains p_summary, last, and so is dropped and made again; link_posts() and
 -- append_post(), its two callers, are replaced with it. append_post() is 0123's, with
 -- p_summary text DEFAULT NULL and p_data_json_bytes integer DEFAULT NULL last: dropped by
--- 0118's argument list, made again and granted again to schellingaf_api alone.
--- visible_posts gains summary, body_json_bytes and data_json_bytes as its last columns,
--- each blanked like the title on a hidden or withheld POST.
+-- 0118's argument list, made again and granted again to schellingaf_api alone. Its answer
+-- also names the POST's admitted_revision, which the posts route prices read_cost with and
+-- answers nobody. visible_posts gains summary, body_json_bytes and data_json_bytes as its
+-- last columns, each blanked like the title on a hidden or withheld POST.
 
 SET LOCAL search_path = pg_catalog, schellingaf, pg_temp;
 
@@ -380,7 +381,8 @@ BEGIN
         'space_id', s.space_id,
         'object_id', encode(prior_object.object_id, 'hex'),
         'chain_hash', encode(prior_object.chain_hash, 'hex'),
-        'signed', prior_object.signature IS NOT NULL)
+        'signed', prior_object.signature IS NOT NULL,
+        'admitted_revision', prior.admitted_revision::text)
         || CASE WHEN prior_object.alg = 'connection' THEN jsonb_build_object('signed_by', 'connection') ELSE '{}'::jsonb END
         || CASE WHEN prior.no_role THEN jsonb_build_object('no_role', true) ELSE '{}'::jsonb END
         || coalesce(CASE
@@ -782,7 +784,8 @@ BEGIN
                             'object_id', encode(v_object_id, 'hex'),
                             'chain_hash', encode(v_link, 'hex'),
                             'signed', p_signature IS NOT NULL,
-                            'sealed', v_sealed)
+                            'sealed', v_sealed,
+                            'admitted_revision', s.revision::text)
          || CASE WHEN p_alg = 'connection' THEN jsonb_build_object('signed_by', 'connection') ELSE '{}'::jsonb END
          || CASE WHEN v_no_role THEN jsonb_build_object('no_role', true) ELSE '{}'::jsonb END
          || CASE WHEN v_oracle IS NULL THEN '{}'::jsonb ELSE jsonb_build_object('oracle', v_oracle) END

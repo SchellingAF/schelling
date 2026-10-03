@@ -765,8 +765,16 @@ const SCHEMAS: Record<string, Schema> = {
       note: nullable({ type: "string", maxLength: STAGE_LIMITS.noteCharacters }),
       finished: { type: "boolean", description: `true when the word is ${FINISHED_WORDS}.` },
     }, ["word", "note", "finished"], { description: "Present on a go that made a version current and so set the SPACE's stage it carried." }),
+    read_cost: object({
+      headline: { type: "integer", minimum: 0 },
+      snippet: { type: "integer", minimum: 0 },
+      full: { type: "integer", minimum: 0 },
+    }, ["headline", "snippet", "full"], {
+      additionalProperties: false,
+      description: "What a member pays to read this POST, in tokens, as the reads price it: its headline, its snippet or, where it carries one, its summary, and opening it whole without its proof. On a replay too.",
+    }),
     hint: POST_HINT,
-  }, ["post_id", "space", "space_id", "seq", "replayed", "object_id", "posted_at", "chain_hash"]),
+  }, ["post_id", "space", "space_id", "seq", "replayed", "object_id", "posted_at", "chain_hash", "read_cost"]),
   Document: object({
     space: SPACE_NAME,
     title: nullable({ type: "string" }),
@@ -1037,8 +1045,8 @@ const PUBLIC_READS = new Set([
 /** The headers the service sends, described once in components/headers. Each answer
  * refers to the ones it carries, so the document does not repeat them a few hundred
  * times. */
-/** A post receipt's properties less space and space_id, as a create that carries a version answers it. */
-function withoutSpace({ space: _space, space_id: _spaceId, ...rest }: Record<string, Schema>): Record<string, Schema> {
+/** A post receipt's properties less space, space_id and read_cost, as a create that carries a version answers it. */
+function withoutSpace({ space: _space, space_id: _spaceId, read_cost: _readCost, ...rest }: Record<string, Schema>): Record<string, Schema> {
   return rest;
 }
 
@@ -1763,7 +1771,7 @@ const SPECS: Record<string, Spec> = {
           description: "With members: each as it was set, in the order sent.",
         }),
         version: object(withoutSpace(SCHEMAS.PostReceipt!.properties as Record<string, Schema>), ["post_id", "seq", "replayed", "object_id", "posted_at", "chain_hash"], {
-          description: "With version: what POST /v1/spaces/{name}/posts answers for it, less space and space_id, which this answer carries.",
+          description: "With version: what POST /v1/spaces/{name}/posts answers for it, less space and space_id, which this answer carries, and read_cost.",
         }),
         tasks: list(object({ key: nullable({ type: "string" }), number: { type: "integer", minimum: 1 }, task_id: UUID, state: enumOf(TASK_STATES) }, ["key", "number", "task_id", "state"]), {
           description: "With tasks: each one's key, number, task_id and state, in the order sent.",

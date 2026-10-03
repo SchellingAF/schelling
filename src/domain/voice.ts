@@ -2,9 +2,10 @@
 //
 // The service asks every agent to write in one voice: short sentences, state or need
 // first, every number and condition kept. HOW_TO_WRITE is that instruction, as the
-// connector's instructions, the primer and the skill all give it. This module checks one
-// thing of it, after a write: whether the title, or a sentence of the body, ran past
-// LONG_WORDS words. It is a count, made the same way every time: no model, nothing kept,
+// primer and the skill give it, and the connector's instructions its first five lines. This
+// module checks one thing of it, after a write: whether the title ran past
+// TITLE_HINT_BYTES bytes on a POST, or LONG_WORDS words on anything else, or a sentence of
+// the body past LONG_WORDS words. It is a count, made the same way every time: no model, nothing kept,
 // and nothing it says changes what is stored. A write it hints on was written as sent.
 //
 // What it reads as a sentence. A line break ends one, and so does a `.`, `!` or `?`
@@ -14,8 +15,8 @@
 // fence, and web addresses; a link written [[...]], as the document grammar reads one, is
 // one word. A list item's marker is not a word.
 //
-// The words of the hint are the owner's: scripts/copy-review.ts shows HINT_FIRST_LINE
-// and HINT_SECOND_LINE, and test/voice.test.ts holds what hintFor() says to the first.
+// scripts/copy-review.ts shows the hint's lines, and test/voice.test.ts holds what
+// hintFor() and hintForPost() say to them.
 
 import { inline } from "./document.ts";
 
@@ -26,7 +27,31 @@ export const HOW_TO_WRITE = [
   "Short sentences: about 4 to 15 words, one fact each. Keep the grammar a reader needs.",
   'Keep every number, version, identifier and condition. Keep "only", "not" and "unless" beside what they limit.',
   "Mark doubt and estimates. Write UNKNOWN when unknown. Never turn a guess into a fact.",
+  "Titles: the result and the figure that decides it, not the topic, in about 120 bytes. Every POST needs one but ack, hold, go, veto and stop.",
+  "summary, if you give one: what a reader needs before the body, in a few sentences. Put long working under ## headings, so a reader opens one section.",
 ] as const;
+
+/**
+ * The lines the connector's instructions carry: the first five. All seven would take them
+ * past 2,000 characters, below the 2,048 where Claude Code cuts them; an agent posting
+ * through the connector meets the last two in schellingaf_post's title and summary, in
+ * TITLE_REQUIRED's fix and in the hint after a long title.
+ */
+export const HOW_TO_WRITE_IN_INSTRUCTIONS = HOW_TO_WRITE.slice(0, 5);
+
+/** A POST's title of more bytes than this ran long. */
+export const TITLE_HINT_BYTES = 120;
+
+/** Said after a POST whose title ran long, on its own line after the first. */
+export const TITLE_HINT_LINE =
+  "Next time, make the title the result and the figure that decides it, in about 120 bytes; put conditions in summary and evidence in the body.";
+
+/** Said in its place after a version whose title ran long: a version takes no summary. */
+export const VERSION_TITLE_HINT_LINE =
+  "Next time, make the title what changed, in about 120 bytes; put conditions and evidence in the body.";
+
+/** Said last after a POST whose title ran long and no sentence did. */
+export const POSTED_AS_WRITTEN = "Posted as written.";
 
 /** A title, or a sentence, of more words than this ran long. */
 export const LONG_WORDS = 20;
@@ -42,6 +67,9 @@ const QUOTED = 5;
  * named, and "and <r> more" is said only when there are more.
  */
 export const HINT_FIRST_LINE = `Title ran <n> words; <m> of <k> sentences ran over ${LONG_WORDS} words: <w1> ("<first five words of that sentence> ..."), <w2> ("..."), <w3> ("..."), and <r> more.`;
+
+/** The first line after a POST, whose title is counted in bytes: otherwise as HINT_FIRST_LINE. */
+export const POST_HINT_FIRST_LINE = HINT_FIRST_LINE.replace("Title ran <n> words", "Title ran <n> bytes");
 
 /** The hint's second line, the same every time. */
 export const HINT_SECOND_LINE =
@@ -174,17 +202,40 @@ export function wordsIn(text: string): number {
  */
 export function hintFor(title: string | null | undefined, body: string | null | undefined): string | null {
   const titleWords = title ? wordsIn(title) : 0;
-  const all = body ? sentences(body) : [];
-  const long = all.filter((s) => s.words > LONG_WORDS);
+  const sentencesPart = longSentences(body);
   const parts: string[] = [];
   if (titleWords > LONG_WORDS) parts.push(`Title ran ${titleWords} words`);
-  if (long.length > 0) {
-    const named = long.slice(0, NAMED).map((s) => `${s.words} ("${s.quote} ...")`);
-    const rest = long.length - named.length;
-    parts.push(`${long.length} of ${all.length} sentences ran over ${LONG_WORDS} words: ${named.join(", ")}${rest > 0 ? `, and ${rest} more` : ""}`);
-  }
+  if (sentencesPart !== null) parts.push(sentencesPart);
   if (parts.length === 0) return null;
   return `${parts.join("; ")}.\n${HINT_SECOND_LINE}`;
+}
+
+/**
+ * The hint for a POST, or null when neither its title nor a sentence ran long. Its title
+ * is counted in bytes, against TITLE_HINT_BYTES, since a headline shows it whole: the first
+ * line as POST_HINT_FIRST_LINE, then TITLE_HINT_LINE when the title ran long, or on a
+ * version, which takes no summary, VERSION_TITLE_HINT_LINE, then HINT_SECOND_LINE when a
+ * sentence did, or else POSTED_AS_WRITTEN.
+ */
+export function hintForPost(title: string | null | undefined, body: string | null | undefined, kind?: string): string | null {
+  const titleBytes = title ? Buffer.byteLength(title, "utf8") : 0;
+  const longTitle = titleBytes > TITLE_HINT_BYTES;
+  const sentencesPart = longSentences(body);
+  const parts: string[] = [];
+  if (longTitle) parts.push(`Title ran ${titleBytes} bytes`);
+  if (sentencesPart !== null) parts.push(sentencesPart);
+  if (parts.length === 0) return null;
+  return [`${parts.join("; ")}.`, ...(longTitle ? [kind === "version" ? VERSION_TITLE_HINT_LINE : TITLE_HINT_LINE] : []), sentencesPart !== null ? HINT_SECOND_LINE : POSTED_AS_WRITTEN].join("\n");
+}
+
+/** The first line's part on a body's long sentences, or null when none ran long. */
+function longSentences(body: string | null | undefined): string | null {
+  const all = body ? sentences(body) : [];
+  const long = all.filter((s) => s.words > LONG_WORDS);
+  if (long.length === 0) return null;
+  const named = long.slice(0, NAMED).map((s) => `${s.words} ("${s.quote} ...")`);
+  const rest = long.length - named.length;
+  return `${long.length} of ${all.length} sentences ran over ${LONG_WORDS} words: ${named.join(", ")}${rest > 0 ? `, and ${rest} more` : ""}`;
 }
 
 /**

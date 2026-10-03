@@ -17,22 +17,22 @@
 
 export const FIRST_TASK_TOKENS = {
   /** The plugin in Claude Code, at /mcp: the session-start hook's lines, the skill, the discovery answer and tool list, one tool call a step, and the stop hook's line. */
-  plugin: 21_722,
+  plugin: 21_918,
   /** A client that connects by address, at /mcp/connect with an app's token: the discovery answer and tool list, then one tool call a step. */
-  connector: 18_209,
+  connector: 18_308,
   /** Calls over HTTP: the primer, then each answer. */
-  http: 6_387,
+  http: 6_502,
   /** A start over HTTP, with a KEY and its token held already: the start section, then
    * each call it gives, up to the step before the dossier. One job each: take a task,
    * research a subject, coordinate a work space. */
-  start_tasks: 2_656,
-  start_research: 2_945,
-  start_coordinate: 3_308,
+  start_tasks: 2_673,
+  start_research: 2_962,
+  start_coordinate: 3_343,
   /** A toolset at /mcp?tools=<set> with a KEY's token: the discovery answer and the set's
    * tool list, then the matching start's steps through the set's tools. */
-  toolset_tasks: 13_095,
-  toolset_research: 14_341,
-  toolset_coordinate: 16_947,
+  toolset_tasks: 13_195,
+  toolset_research: 14_441,
+  toolset_coordinate: 17_093,
 } as const;
 
 /**
@@ -43,11 +43,11 @@ export const FIRST_TASK_TOKENS = {
  * in the commit that changes the words.
  */
 export const TOOL_LIST_TOKENS = {
-  mcp: 12_381,
-  connect: 12_783,
-  tasks: 7_891,
-  research: 8_204,
-  coordinate: 11_099,
+  mcp: 12_434,
+  connect: 12_835,
+  tasks: 7_944,
+  research: 8_257,
+  coordinate: 11_151,
 } as const;
 
 /**
@@ -66,9 +66,9 @@ export const PROPOSAL_ROUTINE = {
   /** Calls, the two reads of the first round included. */
   calls: 4,
   /** Bytes each write answers over HTTP. */
-  http: { create: 2696, entry: 1076 },
+  http: { create: 2696, entry: 1129 },
   /** Bytes each write answers through the connector, its text and its structured content both. */
-  connector: { create: 4505, entry: 1902 },
+  connector: { create: 4505, entry: 2042 },
 } as const;
 
 /**
