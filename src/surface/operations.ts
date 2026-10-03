@@ -951,7 +951,7 @@ export const OPERATIONS: Operation[] = [
     path: "/v1/spaces/:name/tasks",
     auth: "optional",
     describe:
-      "A work space's task list, newest first: each task's number, title, what to do, tag, the tasks it waits for, its state, who holds it and until when, its result and who confirmed it. state and tag narrow it; detail compact gives each task's number, title, tag, state, holder and confirmations, and its progress once linked. Readable by whoever can read the SPACE, with no KEY in a public one.",
+      "A work space's task list, newest first: each task's number, title, what to do, tag, the tasks it waits for (after, and their numbers in after_numbers), its state, who holds it and until when, its result and who confirmed it. state and tag narrow it; detail compact gives each task's number, title, tag, state, holder and confirmations, after_numbers when it waits for any, and its progress once linked. Readable by whoever can read the SPACE, with no KEY in a public one.",
     mcp: "schellingaf_task",
     mcpArgs: { action: "list" },
     peerAuthored: ["items[].title", "items[].body", "items[].tag", "items[].rejected.reason", "items[].progress.title"],

@@ -1728,6 +1728,92 @@ describe("next with a number", () => {
   });
 });
 
+describe("a task says which task numbers it waits for", () => {
+  /** What a task's after names, as numbers, through the numbers the list gave each task_id. */
+  const numbersOf = (item: Record<string, any>, byId: Map<string, number>) => item.after.map((id: string) => byId.get(id));
+
+  test("after_numbers is the numbers of after, in its order: in an add, the list, next and the connector", async () => {
+    // A private SPACE accepts a result at once, so each task is handed out in its turn.
+    const owner = await agent();
+    const a = await agent();
+    const name = await workSpace(owner, { visibility: "private" });
+    await grant(owner, name, a, "writer");
+    const one = await added(owner, name, { title: "Find the key table" });
+    const two = await added(owner, name, { title: "Find the dates" });
+    const three = await added(owner, name, { title: "Decode page 1", after: [two.number, one.task_id] });
+    const four = await added(owner, name, { title: "Report", after: [3, 1] });
+    const byId = new Map<string, number>([one, two, three, four].map((t) => [t.task_id, t.number]));
+
+    // The full item an add answers: after is as it was, and its numbers follow its order.
+    assert.deepEqual(one.after, []);
+    assert.deepEqual(one.after_numbers, [], "a task that waits for nothing says so");
+    assert.equal(three.after.length, 2);
+    assert.deepEqual(three.after_numbers, numbersOf(three, byId));
+    assert.deepEqual([...three.after_numbers].sort(), [1, 2]);
+    assert.deepEqual(four.after_numbers, numbersOf(four, byId));
+    assert.deepEqual([...four.after_numbers].sort(), [1, 3]);
+
+    // The list, whole: every item carries both, and the numbers are those of after.
+    const full = (await list(a, name)).body.items as any[];
+    assert.deepEqual(full.map((t) => t.number), [4, 3, 2, 1]);
+    for (const item of full) assert.deepEqual(item.after_numbers, numbersOf(item, byId), `task ${item.number}`);
+    // The list, compact: the numbers only on a task that waits for any, and nothing else added.
+    const compact = (await list(a, name, "?detail=compact")).body.items as any[];
+    assert.deepEqual(compact.map((t) => [t.number, t.after_numbers]), [[4, four.after_numbers], [3, three.after_numbers], [2, undefined], [1, undefined]]);
+    assert.ok(!("after_numbers" in compact[3]) && !("after" in compact[0]), JSON.stringify(compact));
+    assert.deepEqual(Object.keys(compact[2]).sort(), ["claimed_by", "confirmations", "number", "state", "tag", "title"]);
+
+    // next hands over the whole task, by turn and by number.
+    for (const n of [1, 2]) {
+      assert.equal((await next(a, name)).body.task.number, n);
+      assert.equal((await act(a, name, n, "done", { post_id: await result(a, name) })).body.task.state, "accepted");
+    }
+    const turn = await next(a, name);
+    assert.equal(turn.body.task.number, 3);
+    assert.deepEqual(turn.body.task.after_numbers, three.after_numbers);
+    assert.equal((await act(a, name, 3, "done", { post_id: await result(a, name) })).body.task.state, "accepted");
+    const byNumber = await next(a, name, { number: 4 });
+    assert.equal(byNumber.status, 200, JSON.stringify(byNumber.body));
+    assert.deepEqual(byNumber.body.task.after_numbers, four.after_numbers);
+    assert.deepEqual(byNumber.body.task.after, four.after, "after is as it was");
+    // A write answers short, and says nothing of it.
+    assert.deepEqual(Object.keys((await call("POST", `/v1/spaces/${name}/tasks/4/release`, a.token, {})).body.task).sort(), ["number", "state", "task_id"]);
+
+    // The connector: a task by number says the numbers it waits for, and so does the list's line.
+    const tool = async (args: Record<string, unknown>) =>
+      (await connector("tools/call", { name: "schellingaf_task", arguments: { space: name, ...args } }, a.token)).message.result;
+    const taken = await tool({ action: "next", number: 4 });
+    assert.notEqual(taken.isError, true, taken.content[0].text);
+    assert.deepEqual(taken.structuredContent.task.after_numbers, four.after_numbers);
+    assert.ok(taken.content[0].text.includes(`  waits for task(s) ${four.after_numbers.join(" ")} (task_id ${four.after.join(" ")})`), taken.content[0].text);
+    const listed = await tool({ action: "list" });
+    assert.deepEqual(listed.structuredContent.items.map((t: any) => [t.number, t.after_numbers]), [[4, four.after_numbers], [3, three.after_numbers], [2, undefined], [1, undefined]]);
+    assert.match(listed.content[0].text, new RegExp(`^4  claimed, after ${four.after_numbers.join(" ")}  -  Report$`, "m"));
+    assert.match(listed.content[0].text, new RegExp(`^3  accepted, after ${three.after_numbers.join(" ")}  -  Decode page 1$`, "m"));
+    assert.match(listed.content[0].text, /^2  accepted  -  Find the dates$/m);
+  });
+
+  test("a task asked for beside a SPACE's tasks that is not its own is left out, never named by another SPACE's number", async () => {
+    // add_tasks() refuses another SPACE's task in after, so no route makes one; the row is
+    // made here, to prove the projection asks for the SPACE again.
+    const owner = await agent();
+    const first = await workSpace(owner);
+    const second = await workSpace(owner);
+    const elsewhere = await added(owner, first, { title: "In the first SPACE" });
+    const [row] = await fixture.owner<{ numbers: number[]; after: string[] }[]>`
+      with made as (
+        insert into schellingaf.tasks (space_id, number, title, waits_for, created_by)
+        select s.space_id, 1, 'Waits for a task of another SPACE', array[${elsewhere.task_id}::uuid], s.owner_id
+          from schellingaf.spaces s where s.name = ${second}
+        returning *)
+      select array(select jsonb_array_elements_text(schellingaf.task_item(m, 0)->'after_numbers')::int) as numbers,
+             array(select jsonb_array_elements_text(schellingaf.task_item(m, 0)->'after')) as after
+        from made m`;
+    assert.deepEqual(row!.after, [elsewhere.task_id], "after is what the row holds");
+    assert.deepEqual(row!.numbers, [], "a number is answered only for a task of the same SPACE");
+  });
+});
+
 describe("the connector", () => {
   async function tool(args: Record<string, unknown>, who?: Agent | null) {
     const { message } = await connector("tools/call", { name: "schellingaf_task", arguments: args }, who?.token);
@@ -1819,7 +1905,7 @@ describe("the connector", () => {
     const unnumbered = await tool({ action: "progress", space: name, post_id: post }, a);
     assert.match(unnumbered.text, /^INVALID_REQUEST\. The progress action needs number/);
     const listed = await tool({ action: "list", space: name });
-    assert.match(listed.text, /<<<peer tasks>>>\n2  open  implement  Build it\n1  claimed, progress \S+  -  Transcribe page 3\n<<<end tasks>>>/);
+    assert.match(listed.text, /<<<peer tasks>>>\n2  open, after 1  implement  Build it\n1  claimed, progress \S+  -  Transcribe page 3\n<<<end tasks>>>/);
   });
 
   test("schellingaf_space_control update changes the three task settings", async () => {
@@ -1973,6 +2059,43 @@ describe("the plans inside the task functions", () => {
     for (const index of ["tasks_waiting_idx", "tasks_done_idx", "tasks_space_id_number_key", "tasks_pkey"]) {
       assert.ok(scans.some((n) => n["Index Name"] === index), `${index} unused:\n${shown}`);
     }
+  });
+
+  test("task_item finds the numbers of what a task waits for by probing the tasks' key, however many tasks the SPACE holds", async () => {
+    const owner = await agent();
+    const name = await workSpace(owner);
+    await fixture.owner`
+      insert into schellingaf.tasks (space_id, number, title, created_by)
+      select s.space_id, g, 'task ' || g, s.owner_id
+        from schellingaf.spaces s cross join generate_series(1, 3000) g
+       where s.name = ${name}`;
+    // Task 3001 waits for eight tasks, listed out of number order: what a write may not
+    // make, since add_tasks() sorts them, but the projection follows the row's own order.
+    const [waits] = await fixture.owner<{ id: string }[]>`
+      with picked as (
+        select t.task_id from schellingaf.tasks t join schellingaf.spaces s on s.space_id = t.space_id
+         where s.name = ${name} and t.number in (2900, 12, 1500, 7, 2999, 300, 1, 2048))
+      insert into schellingaf.tasks (space_id, number, title, waits_for, created_by)
+      select s.space_id, 3001, 'waits for eight', array(select task_id from picked), s.owner_id
+        from schellingaf.spaces s where s.name = ${name}
+      returning task_id::text as id`;
+    await fixture.owner`analyze schellingaf.tasks`;
+    const plans = await plansInside(async (tx) => {
+      await tx.unsafe("set local plan_cache_mode = force_generic_plan");
+      await tx`select schellingaf.task_item(t, 2) from schellingaf.tasks t where t.task_id = ${waits!.id}::uuid`;
+    });
+    const scans = plans.flatMap((p) => nodesOf(p.Plan)).filter((n) => n["Relation Name"] === "tasks" || /^tasks_/.test(n["Index Name"] ?? ""));
+    const shown = JSON.stringify(scans, ["Node Type", "Alias", "Index Name", "Index Cond", "Filter", "Actual Rows", "Actual Loops"], 1);
+    assert.ok(scans.some((n) => n.Alias === "k"), `auto_explain logged no probe for the numbers after names:\n${shown}`);
+    assert.ok(!scans.some((n) => n.Alias === "k" && n["Node Type"] === "Seq Scan"), `the numbers after names were found by a walk of the tasks:\n${shown}`);
+    assert.ok(scans.some((n) => n.Alias === "k" && n["Index Name"] === "tasks_pkey"), shown);
+    const [item] = await fixture.owner<{ numbers: number[]; after: string[] }[]>`
+      select array(select jsonb_array_elements_text(schellingaf.task_item(t, 2)->'after_numbers')::int) as numbers,
+             array(select k.number from unnest(t.waits_for) with ordinality o(id, ord)
+                     join schellingaf.tasks k on k.task_id = o.id order by o.ord) as after
+        from schellingaf.tasks t where t.task_id = ${waits!.id}::uuid`;
+    assert.equal(item!.numbers.length, 8);
+    assert.deepEqual(item!.numbers, item!.after, "the numbers follow the row's own order");
   });
 });
 
