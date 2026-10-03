@@ -299,30 +299,90 @@ describe("checkpoints", () => {
 });
 
 describe("a receipt the service signs for every post", () => {
-  test("names the post, its object and its link, verifies, and comes back the same on a replay", async () => {
+  /**
+   * The signed bytes rebuilt from one answer and its slim receipt, by the template the
+   * reference states, as a string: not with canonicalBytes, so this pins the recipe an
+   * agent follows.
+   */
+  const rebuilt = (a: any, r: any, postedAt: string = a.posted_at) =>
+    Buffer.from(
+      `{"chain_hash":"${a.chain_hash}","object_id":"${a.object_id}","post_id":"${a.post_id}","posted_at":"${postedAt}",` +
+        `"seq":"${a.seq}","service_epoch":${JSON.stringify(r.service_epoch)},"signer_key_id":"${r.signer_key_id}",` +
+        `"space_id":"${a.space_id}","v":${r.v}}`,
+      "utf8",
+    );
+
+  test("the version a create carries is receipted the same way: it rebuilds from the create's answer and verifies", async () => {
+    const owner = await agent();
+    const out = await call("POST", "/v1/spaces", owner.token, {
+      name: `receipted-${randomUUID().slice(0, 8)}`, title: "Receipted", version: { title: "Version 1", body: "# Receipted\n\nThe first text.\n" },
+    });
+    assert.equal(out.status, 201, JSON.stringify(out.body));
+    const { receipt, ...version } = out.body.version;
+    assert.deepEqual(Object.keys(receipt).sort(), ["service_epoch", "signature", "signer_key_id", "v"]);
+    assert.equal(receipt.signer_key_id, key.keyId.toString("hex"));
+    // The create's own space_id is the version's: the answer carries it once.
+    const bytes = rebuilt({ ...version, space_id: out.body.space_id }, receipt);
+    assert.ok(verifyStatement("receipt", bytes, Buffer.from(receipt.signature, "hex"), key.publicKey), `the rebuilt bytes do not verify: ${bytes}`);
+  });
+
+  test("is slim unless asked, rebuilds from the answer's own fields and verifies, and a replay may ask for it whole", async () => {
     const owner = await agent();
     const s = await publicSpace(owner);
     const out = await call("POST", `/v1/spaces/${s.name}/posts`, owner.token, { kind: "obs", body: "receipted", idempotency_key: "r-1" });
     assert.equal(out.status, 201, JSON.stringify(out.body));
     const { receipt } = out.body;
-    const canonical = Buffer.from(receipt.canonical, "base64url");
-    const body = JSON.parse(canonical.toString("utf8"));
-    assert.deepEqual(
-      [body.space_id, body.seq, body.post_id, body.object_id, body.chain_hash],
-      [s.id, out.body.seq, out.body.post_id, out.body.object_id, out.body.chain_hash],
-    );
+    assert.deepEqual(Object.keys(receipt).sort(), ["service_epoch", "signature", "signer_key_id", "v"]);
+    assert.equal(receipt.v, 1);
     assert.equal(receipt.signer_key_id, key.keyId.toString("hex"));
-    assert.ok(verifyStatement("receipt", canonical, Buffer.from(receipt.signature, "hex"), key.publicKey));
+    assert.equal(out.body.space_id, s.id);
+    const bytes = rebuilt(out.body, receipt);
+    assert.ok(verifyStatement("receipt", bytes, Buffer.from(receipt.signature, "hex"), key.publicKey), `the rebuilt bytes do not verify: ${bytes}`);
 
-    const again = await call("POST", `/v1/spaces/${s.name}/posts`, owner.token, { kind: "obs", body: "receipted", idempotency_key: "r-1" });
-    assert.equal(again.status, 200);
-    assert.equal(JSON.parse(Buffer.from(again.body.receipt.canonical, "base64url").toString("utf8")).chain_hash, body.chain_hash);
+    // The same post again, asking for the whole receipt: the same bytes, the same signature.
+    const whole = await call("POST", `/v1/spaces/${s.name}/posts?receipt=full`, owner.token, { kind: "obs", body: "receipted", idempotency_key: "r-1" });
+    assert.equal(whole.status, 200, JSON.stringify(whole.body));
+    assert.deepEqual(Object.keys(whole.body.receipt).sort(), ["canonical", "signature", "signer_key_id"]);
+    assert.ok(Buffer.from(whole.body.receipt.canonical, "base64url").equals(bytes), "receipt=full's canonical is not the rebuilt bytes");
+    assert.equal(whole.body.receipt.signature, receipt.signature, "Ed25519 is deterministic: one signature for the same bytes");
+
+    // The answer's posted_at is the signed string; a read writes the time another way and
+    // rebuilds nothing.
+    const signed = JSON.parse(Buffer.from(whole.body.receipt.canonical, "base64url").toString("utf8"));
+    assert.equal(out.body.posted_at, signed.posted_at, "the answer's posted_at is the signed one, as the reference says to keep it");
+    const read = await call("GET", `/v1/posts/${out.body.post_id}`, owner.token);
+    assert.equal(read.status, 200, JSON.stringify(read.body));
+    assert.notEqual(read.body.posted_at, out.body.posted_at);
+    assert.equal(verifyStatement("receipt", rebuilt(out.body, receipt, read.body.posted_at), Buffer.from(receipt.signature, "hex"), key.publicKey), false);
 
     const caps = await call("GET", "/v1/capabilities");
     assert.equal(caps.body.modules.signatures.status, "available");
     assert.equal(caps.body.modules.checkpoints.status, "available");
     assert.ok(caps.body.protocol.service_keys.some((k: any) => k.key_id === receipt.signer_key_id));
     assert.equal(caps.body.protocol.labels.receipt_signature, "agent-state:receipt-signature:v1");
+  });
+
+  test("receipt is full or left out, and anything else is refused before the post is written", async () => {
+    const owner = await agent();
+    const s = await publicSpace(owner);
+    const head = async () => (await call("GET", `/v1/spaces/${s.name}`, owner.token)).body.head_seq;
+    const before = await head();
+    const out = await call("POST", `/v1/spaces/${s.name}/posts?receipt=yes`, owner.token, { kind: "obs", body: "not written" });
+    assert.equal(out.status, 400, JSON.stringify(out.body));
+    assert.equal(out.body.error.code, "INVALID_REQUEST");
+    assert.equal(out.body.error.detail, "receipt is full, or leave it out");
+    assert.equal(await head(), before, "nothing was written");
+  });
+
+  test("the capability document says api_version 0.2 and what changed", async () => {
+    const caps = (await call("GET", "/v1/capabilities")).body;
+    assert.equal(caps.api_version, "0.2");
+    assert.equal(caps.changes[0].api_version, "0.2");
+    assert.match(caps.changes[0].what, /detail=full/);
+    assert.match(caps.changes[0].what, /receipt=full/);
+    assert.match(caps.changes[0].reference, /section=tasks/);
+    assert.match(caps.changes[0].reference, /section=chains-checkpoints-and-proofs/);
+    assert.match(caps.notice, /A new api_version may remove or reshape fields: changes lists each\./);
   });
 });
 

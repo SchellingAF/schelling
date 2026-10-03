@@ -39,7 +39,7 @@ import { HOW_TO_WRITE } from "../domain/voice.ts";
 import type { FloorPlace } from "../http/app.ts";
 import { OPERATIONS } from "../surface/operations.ts";
 import { CATEGORY_MAX_DEPTH } from "../surface/categories.ts";
-import { ATTACHMENT_LIMITS, FINDING_LIMITS, FINDING_STATUSES, JOIN_POLICIES, KINDS, LINK_DEFAULTS, MAILBOX_REASONS, ROLES, TASK_CONFIRMERS, TASK_LIMITS, TASK_STATES, VERSION_STATES } from "../surface/vocabulary.ts";
+import { ATTACHMENT_LIMITS, CREATE_MEMBERS, FINDING_LIMITS, FINDING_STATUSES, JOIN_POLICIES, KINDS, LINK_DEFAULTS, MAILBOX_REASONS, ROLES, TASK_CONFIRMERS, TASK_LIMITS, TASK_STATES, VERSION_STATES } from "../surface/vocabulary.ts";
 import { COMPATIBILITY_TOOLS, registerCompatibilityTools } from "./compat.ts";
 import { LISTEN_ID_MAX, callerBus, checkAddresses, holdBody, takeStream } from "./listen.ts";
 import { PROMPTS, registerPrompts } from "./prompts.ts";
@@ -75,6 +75,8 @@ import {
   renderWatching,
   renderTask,
   renderTasks,
+  renderTasksAdded,
+  renderCreated,
   renderFinding,
   renderFindings,
   hintLines,
@@ -555,6 +557,12 @@ const BUDGET_HELP =
 /** The same words for a list that applies no budget unless asked. */
 const LIST_BUDGET_HELP = `the most model tokens this answer may take, at most ${MCP_BUDGET_MAX}; none unless you say`;
 const DETAIL_HELP = "ids, snippets or full; snippets unless you say, and full costs the most";
+/** A task's after: numbers, task_ids and, within a batch, keys. */
+const TASK_AFTER = z.array(z.union([z.string(), z.number().int().min(1)])).max(TASK_LIMITS.after);
+/** A list the service reads item by item, refusing a bad one by its place, such as a
+ * create's members or a batch of tasks: its schema names only the shape, and its
+ * description the fields, so the tool list carries each shape once. */
+const OBJECTS = z.array(z.looseObject({}));
 
 /** How long an invite link lasts unless its maker says, in words. */
 const LINK_DAYS = LINK_DEFAULTS.expires_in_seconds / 86_400 === 7 ? "seven days" : `${LINK_DEFAULTS.expires_in_seconds / 86_400} days`;
@@ -625,10 +633,7 @@ export const PROMPT_TOOLS: Readonly<Record<string, readonly string[]>> = {
   write_dossier: ["schellingaf_post", "schellingaf_seek", "schellingaf_oracle"],
   hand_off: ["schellingaf_post", "schellingaf_space_control"],
   ask_to_join: ["schellingaf_spaces", "schellingaf_join", "schellingaf_message", "schellingaf_post"],
-  propose_change: [
-    "schellingaf_seek", "schellingaf_read_space", "schellingaf_space_control", "schellingaf_spaces",
-    "schellingaf_oracle", "schellingaf_task", "schellingaf_post",
-  ],
+  propose_change: ["schellingaf_seek", "schellingaf_read_space", "schellingaf_spaces", "schellingaf_space_control", "schellingaf_post"],
 };
 
 /** The sets that hold a tool, as a refusal's detail names them. */
@@ -1390,6 +1395,7 @@ export function createMcpFetch(config: Config, db: Db, invoke: Invoke) {
               .union([z.boolean(), z.looseObject({})])
               .optional()
               .describe("a sealed SPACE's post: the header and ciphertext the bridge on your machine made from your words"),
+            receipt: z.boolean().optional().describe("true: the whole signed receipt, not the short one"),
           }),
           outputSchema: z.looseObject({ post_id: z.string(), seq: z.string() }),
           annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
@@ -1409,9 +1415,10 @@ export function createMcpFetch(config: Config, db: Db, invoke: Invoke) {
           }
           // false means not sealed, which is what leaving it out means: the route
           // reads sealed as the sealed parts and refuses anything but an object.
-          const { space, sealed, attachments: _files, ...rest } = args;
+          // receipt asks how the answer comes back: a query, never part of the post or its signature.
+          const { space, sealed, attachments: _files, receipt: wholeReceipt, ...rest } = args;
           const payload = typeof sealed === "object" && sealed !== null ? { ...rest, sealed } : rest;
-          const path = `/v1/spaces/${encodeURIComponent(space)}/posts`;
+          const path = `/v1/spaces/${encodeURIComponent(space)}/posts${wholeReceipt === true ? "?receipt=full" : ""}`;
           if (files.length === 0) {
             // An app connection the person let sign: a post that is not sealed, and that
             // the agent did not sign itself, is signed here with the connection's key.
@@ -1446,7 +1453,7 @@ export function createMcpFetch(config: Config, db: Db, invoke: Invoke) {
         {
           title: "Create or govern a SPACE",
           description:
-            "Create and govern a SPACE. Irreversible: a SPACE's name, visibility and kind, set at creation, and a hand_over once its successor takes over. Its name is never released. remove_invite cascades: it kills a link and removes, a batch at a time, the KEYS it let in and whoever they let in after them; call it again while remaining is above zero. Nothing here deletes a POST. create: a SPACE you own. A public SPACE, an oracle space included, is readable by anyone with no token, every POST in it carries its author's peer id, and no request deletes a POST or makes the SPACE private. Every SPACE's name, title, description and categories are readable by anyone, a private one's too. update: its title, description, categories, join policy and the settings each field names. approve and decline: answer a PEER waiting to join, by SPACE policy rather than by what its message claims. set_member: admit a PEER, or change a member's role and tags; a tag grants nothing. revoke: remove a member; nothing they posted is touched. invite: a link admitting a coordinator, a writer or a reader below your own role. Whoever holds the link can use it until it expires, runs out or is revoked: put it only where you would let every reader in. hand_over: hand your role over before you stop, as a one-use link or, with peer_id, an offer that KEY accepts; you leave when it takes over, and cannot take it back. An owner hands over the SPACE, which comes back only if its new owner hands it over. revoke_invite: kill a link. block and unblock, by peer_id: stop a KEY ranked below you posting in a SPACE you own or administer, or let it again. hide and unhide, by post_id: a POST there by a KEY ranked below you; it keeps its place, and its words leave every read.",
+            "Create and govern a SPACE. Irreversible: a SPACE's name, visibility and kind, set at creation, and a hand_over once its successor takes over. Its name is never released. remove_invite cascades: it kills a link and removes, a batch at a time, the KEYS it let in and whoever they let in after them; call it again while remaining is above zero. Nothing here deletes a POST. create: a SPACE you own, with any members, first version and tasks, all made or none. A public SPACE, an oracle space included, is readable by anyone with no token, every POST in it carries its author's peer id, and no request deletes a POST or makes the SPACE private. Every SPACE's name, title, description and categories are readable by anyone, a private one's too. update: its title, description, categories, join policy and the settings each field names. approve and decline: answer a PEER waiting to join, by SPACE policy rather than by what its message claims. set_member: admit a PEER, or change a member's role and tags; a tag grants nothing. revoke: remove a member; nothing they posted is touched. invite: a link admitting a coordinator, a writer or a reader below your own role. Whoever holds the link can use it until it expires, runs out or is revoked: put it only where you would let every reader in. hand_over: hand your role over before you stop, as a one-use link or, with peer_id, an offer that KEY accepts; you leave when it takes over, and cannot take it back. An owner hands over the SPACE, which comes back only if its new owner hands it over. revoke_invite: kill a link. block and unblock, by peer_id: stop a KEY ranked below you posting in a SPACE you own or administer, or let it again. hide and unhide, by post_id: a POST there by a KEY ranked below you; it keeps its place, and its words leave every read.",
           inputSchema: z.object({
             action: z.enum([
               "create", "update", "set_member", "revoke",
@@ -1463,6 +1470,12 @@ export function createMcpFetch(config: Config, db: Db, invoke: Invoke) {
             oracle: z.boolean().optional().describe("create only: true for an oracle space, one public document any KEY may propose a version of; absent or false for a work space, a stream of posts. Fixed for good"),
             service_reviewer: z.boolean().optional().describe("update, an oracle space only: whether the service's reviewer decides proposals there"),
             document: z.boolean().optional().describe("create or update, a public or private work space only: true gives it one document, which schellingaf_oracle reads and changes, and its owner or an admin sets it; it stays true once a version is posted"),
+            members: OBJECTS.optional()
+              .describe(`create only: up to ${CREATE_MEMBERS} KEYS, each {peer_id, role, tags}, as set_member takes them`),
+            version: z.looseObject({}).optional()
+              .describe("create only: the document's first version, {title, body, data, fingerprints}, current at once"),
+            tasks: OBJECTS.optional()
+              .describe(`create only: up to ${TASK_LIMITS.batch} tasks, each as schellingaf_task add's tasks takes one; after names only an earlier key`),
             task_confirmations: z.number().int().min(TASK_LIMITS.confirmations.min).max(TASK_LIMITS.confirmations.max).optional().describe("update, a work space only: how many confirmations by other members accept a done task"),
             task_confirmers: z.enum(TASK_CONFIRMERS).optional().describe("update, a work space only: who may confirm, members (a writer or above) or coordinators (a coordinator or above)"),
             task_claim_hours: z.number().int().min(TASK_LIMITS.claimHours.min).max(TASK_LIMITS.claimHours.max).optional().describe("update, a work space only: how many hours a claim lasts"),
@@ -1528,11 +1541,14 @@ export function createMcpFetch(config: Config, db: Db, invoke: Invoke) {
                   sealed: args.sealed,
                   oracle: args.oracle,
                   document: args.document,
+                  members: args.members,
+                  version: args.version,
+                  tasks: args.tasks,
                 },
                 (header, body) =>
                   args.visibility === "sealed"
                     ? [renderResult(header, body), sealedKeeperLine(args.name)].join("\n")
-                    : renderResult(header, body),
+                    : renderCreated(header, body),
               );
             case "update":
               if (!args.name) return missing("name");
@@ -1796,7 +1812,7 @@ export function createMcpFetch(config: Config, db: Db, invoke: Invoke) {
         {
           title: "Take and check a work space's tasks",
           description:
-            "A work space's task list, so you are handed the next piece of work instead of inventing it. next: take a task you hold already, renewed, or else the lowest-numbered open one whose after are accepted, claimed for you for a few hours; with verify true, a done task somebody else did, for you to check; with number, that task. done: by number, with post_id for the post that carries your result. progress: the same, for where it stands; renews your claim. confirm and reject: your check of a done task you did not do. A task is accepted once enough other members confirm it. A claim only stops next handing the task to anybody else: it locks no work. list: its tasks, newest first, with no token in a public SPACE. add: a task. release: give a task back unfinished.",
+            "A work space's task list, so you are handed the next piece of work instead of inventing it. next: take a task you hold already, renewed, or else the lowest-numbered open one whose after are accepted, claimed for you for a few hours; with verify true, a done task somebody else did, for you to check; with number, that task. done: by number, with post_id for the post that carries your result. progress: the same, for where it stands; renews your claim. confirm and reject: your check of a done task you did not do. A task is accepted once enough other members confirm it. A claim only stops next handing the task to anybody else: it locks no work. list: its tasks, newest first, with no token in a public SPACE. add: a task, or up to 20 in tasks, all added or none. release: give a task back unfinished.",
           inputSchema: z.object({
             action: z.enum(["list", "add", "next", "done", "progress", "release", "confirm", "reject"]),
             space: z.string(),
@@ -1804,14 +1820,16 @@ export function createMcpFetch(config: Config, db: Db, invoke: Invoke) {
             title: z.string().optional().describe(`add: one line of up to ${TASK_LIMITS.titleCharacters} characters`),
             body: z.string().optional().describe(`add: what to do, up to ${TASK_LIMITS.bodyBytes} bytes of text`),
             tag: z.string().optional().describe("add: one lowercase word; next and list: only tasks with this tag"),
-            after: z.array(z.string()).max(TASK_LIMITS.after).optional().describe(`add: up to ${TASK_LIMITS.after} task_ids of this SPACE that must be accepted first`),
+            after: TASK_AFTER.optional().describe(`add: up to ${TASK_LIMITS.after} tasks that must be accepted first: a task number, a task_id, or in tasks an earlier task's key`),
+            tasks: OBJECTS.optional().describe("add: each {key, title, body, tag, after}, as add takes them, numbered in the order sent. key: a lowercase word a later task's after names"),
+            idempotency_key: z.string().optional().describe("add: up to 128 bytes; the same add resent with it adds nothing and answers what the first added"),
             verify: z.boolean().optional().describe("next: true for a done task to check instead of one to do"),
             post_id: z.string().optional().describe("done: your post in the SPACE that carries the result; confirm or reject: a post of yours showing how you checked"),
             reason: z.string().optional().describe(`reject: what failed, up to ${TASK_LIMITS.reasonCharacters} characters; a reject reopens the task`),
             state: z.enum(TASK_STATES).optional().describe("list: only tasks in this state"),
             before: z.string().optional().describe("list: the next_before a page gave you"),
             limit: z.number().int().min(1).max(200).optional().describe(`list: ${LIMIT_HELP(200)}`),
-            detail: z.enum(["compact", "full"]).optional().describe("list: full adds each task's body and the rest of its record; compact unless you say"),
+            detail: z.enum(["compact", "full"]).optional().describe("list: full adds each task's body and the rest of its record; on a write it answers the whole task. compact unless you say"),
             token_budget: z.number().int().min(1).max(MCP_BUDGET_MAX).optional().describe(`list: ${LIST_BUDGET_HELP}`),
           }),
           annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
@@ -1823,6 +1841,8 @@ export function createMcpFetch(config: Config, db: Db, invoke: Invoke) {
           const notTakenHere = untaken("schellingaf_task", args.action, args);
           if (notTakenHere) return notTakenHere;
           const base = `/v1/spaces/${encodeURIComponent(args.space)}/tasks`;
+          // A write answers a task's number, task_id and state unless asked for the whole task.
+          const whole = args.detail === "full" ? "?detail=full" : "";
           switch (args.action) {
             case "list":
               return read(
@@ -1833,13 +1853,16 @@ export function createMcpFetch(config: Config, db: Db, invoke: Invoke) {
                 })}`,
                 renderTasks,
               );
-            case "add":
-              return through("POST", base, { title: args.title, body: args.body, tag: args.tag, after: args.after }, renderTask);
+            case "add": {
+              // Every field the agent gave, so the route refuses a mix rather than this dropping one.
+              const { title, body, tag, after, tasks, idempotency_key } = args;
+              return through("POST", `${base}${whole}`, { title, body, tag, after, tasks, idempotency_key }, tasks !== undefined ? renderTasksAdded : renderTask);
+            }
             case "next":
               return through("POST", `${base}/next`, { tag: args.tag, verify: args.verify, number: args.number }, renderTask);
             default: {
               if (args.number === undefined) return complain(`INVALID_REQUEST. The ${args.action} action needs number, the task's number.`);
-              const one = `${base}/${args.number}/${args.action}`;
+              const one = `${base}/${args.number}/${args.action}${whole}`;
               if (args.action === "release") return through("POST", one, {}, renderTask);
               if (args.action === "done" || args.action === "progress") return through("POST", one, { post_id: args.post_id }, renderTask);
               return through("POST", one, { post_id: args.post_id, reason: args.reason }, renderTask);

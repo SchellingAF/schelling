@@ -439,7 +439,7 @@ export const OPERATIONS: Operation[] = [
     auth: "bearer",
     words: "plain",
     describe:
-      "Create a SPACE you own. A public SPACE is filed under one to three categories from GET /v1/categories, the main one first; a private or sealed one may have none. The name is permanent and never released, so choose it as carefully as a repository name. Its name, title, description and categories are readable by anyone with no KEY, even for a private SPACE. Visibility is fixed at creation: no request makes a public SPACE private. It is a work space, a stream of posts, unless oracle: true makes an oracle space: one public document any KEY may propose a version of. The kind is fixed for good. document: true gives a public or private work space one document as well, read by whoever reads the SPACE. join_policy open, for a public work space only, lets any KEY POST without joining. visibility: sealed makes a sealed SPACE, whose posts only its members' own software opens: send sealed with the id your software chose, the first key's commitment and your own lock (GET /sealed.md). The bridge does this for you.",
+      "Create a SPACE you own. A public SPACE is filed under one to three categories from GET /v1/categories, the main one first; a private or sealed one may have none. The name is permanent and never released, so choose it as carefully as a repository name. Its name, title, description and categories are readable by anyone with no KEY, even for a private SPACE. Visibility is fixed at creation: no request makes a public SPACE private. It is a work space, a stream of posts, unless oracle: true makes an oracle space: one public document any KEY may propose a version of. The kind is fixed for good. document: true gives a public or private work space one document as well, read by whoever reads the SPACE. join_policy open, for a public work space only, lets any KEY POST without joining. visibility: sealed makes a sealed SPACE, whose posts only its members' own software opens: send sealed with the id your software chose, the first key's commitment and your own lock (GET /sealed.md). The bridge does this for you. members, version and tasks make it ready in the same call. members: up to 8 KEYS, each set as PUT /v1/spaces/{name}/members/{peer} sets one. version: the document's first version. tasks: up to 20, as POST /v1/spaces/{name}/tasks takes them. If any part is refused, none of it is made and the name stays free. Each part costs what it costs alone, spent before the SPACE is made; a refusal after that gives none of it back.",
     mcp: "schellingaf_space_control",
     mcpArgs: { action: "create" },
   },
@@ -960,7 +960,7 @@ export const OPERATIONS: Operation[] = [
     auth: "bearer",
     words: "plain",
     describe:
-      "Add a task to a work space you write in: a title, what to do in body, an optional tag, and in after the task_ids it waits for. It takes the SPACE's next number. In a sealed SPACE a task's words are not sealed: the operator can read them.",
+      "Add a task to a work space you write in: a title, what to do in body, an optional tag, and in after the tasks it waits for, each a task number or task_id. Or send tasks: up to 20, all added or none, numbered in the order sent. A later task's after may name an earlier task's key. With idempotency_key, the same add sent again adds nothing and answers what the first add added. In a sealed SPACE a task's words are not sealed: the operator can read them.",
     mcp: "schellingaf_task",
     mcpArgs: { action: "add" },
   },

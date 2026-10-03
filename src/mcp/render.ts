@@ -1191,7 +1191,7 @@ function acceptedHow(required: unknown, confirmers: unknown): string {
  * "12  open  transcription  Transcribe page 3", and when its holder last linked progress,
  * as "12  claimed, progress <at>  implement  Title". The lines are fenced whole, because a
  * title and a tag are what a PEER wrote; the rest of a task is in the JSON beside it, and
- * any one task reads in full from a write on it.
+ * any one task reads in full from a write on it with detail full.
  */
 export function renderTasks(header: string, body: Record<string, any>): string {
   const items: any[] = body.items ?? [];
@@ -1205,12 +1205,21 @@ export function renderTasks(header: string, body: Record<string, any>): string {
   return lines.join("\n");
 }
 
-/** One task in full, as a write on it, or next, leaves it. */
+/**
+ * One task as a write on it, or next, leaves it: in full, or, as a write answers unless
+ * asked for detail full, its number, state and task_id on one line, with no PEER text.
+ */
 export function renderTask(header: string, body: Record<string, any>): string {
   const t = body.task;
   const lines = [header];
   if (!t) {
     lines.push(body.verify ? `no done task in ${spaceName(body.space)} waits for your check` : `no task in ${spaceName(body.space)} is open to you now`);
+    return lines.join("\n");
+  }
+  if (body.replayed) lines.push("this idempotency_key replayed and nothing new was added");
+  if (!("title" in t)) {
+    lines.push(`task ${t.number} in ${spaceName(body.space)}: ${t.state === "done" ? "done, waiting for checks" : t.state}, task_id ${t.task_id}`);
+    if (body.notice) lines.push(body.notice);
     return lines.join("\n");
   }
   const state =
@@ -1240,6 +1249,42 @@ export function renderTask(header: string, body: Record<string, any>): string {
   if (t.rejected) lines.push(...peerField("rejected reason", t.rejected.reason));
   if (t.progress) lines.push(...peerField("progress title", t.progress.title));
   if (body.notice) lines.push(body.notice);
+  return lines.join("\n");
+}
+
+/**
+ * The tasks one add made: one line a task, its number, state, key and task_id, as
+ * "12  open  t1  0199...". No title or body is echoed, so nothing is fenced; the keys are
+ * the caller's own words. A replay says nothing was added again.
+ */
+export function renderTasksAdded(header: string, body: Record<string, any>): string {
+  const items: any[] = body.tasks ?? [];
+  const n = `${items.length} ${items.length === 1 ? "task" : "tasks"}`;
+  const lines = [header, body.replayed
+    ? `already added: ${n} in ${spaceName(body.space)}: this idempotency_key replayed and nothing new was added`
+    : `added ${n} to ${spaceName(body.space)}`];
+  for (const t of items) lines.push(taskAdded(t));
+  if (body.notice) lines.push(body.notice);
+  return lines.join("\n");
+}
+
+/** One task an add made, on one line: its number, state, key and task_id. */
+function taskAdded(t: Record<string, any>): string {
+  return `${t.number}  ${t.state}  ${t.key ?? "-"}  ${t.task_id}`;
+}
+
+/**
+ * A create, as any write, then what made it ready in the same call: its members and their
+ * roles, its first version's seq and state, and one line a task. The keys are the caller's
+ * own words, and no title or body is echoed.
+ */
+export function renderCreated(header: string, body: Record<string, any>): string {
+  const lines = [renderResult(header, body)];
+  if (Array.isArray(body.members) && body.members.length) {
+    lines.push(`members: ${body.members.map((m: any) => `${m.peer_id} ${m.role}`).join(", ")}`);
+  }
+  if (body.version) lines.push(`version: seq ${body.version.seq}, ${body.version.oracle?.state ?? "posted"}`);
+  if (Array.isArray(body.tasks)) for (const t of body.tasks) lines.push(taskAdded(t));
   return lines.join("\n");
 }
 

@@ -186,3 +186,21 @@ export function hintFor(title: string | null | undefined, body: string | null | 
   if (parts.length === 0) return null;
   return `${parts.join("; ")}.\n${HINT_SECOND_LINE}`;
 }
+
+/**
+ * The hint for a write of several texts, a batch of tasks or a ready create, each with its
+ * label (tasks[0] t1, for one with a key), or null when none ran long. Its first line is
+ * HINT_FIRST_LINE for each text that ran long, after its label and a colon, so its words
+ * are the recorded ones: at most three texts named, then "And <r> more." only when there
+ * are more. Then HINT_SECOND_LINE once.
+ */
+export function hintForMany(items: readonly { label: string; title: string | null | undefined; body: string | null | undefined }[]): string | null {
+  const long: string[] = [];
+  for (const item of items) {
+    const one = hintFor(item.title, item.body);
+    if (one !== null) long.push(`${item.label}: ${one.slice(0, one.indexOf("\n"))}`);
+  }
+  if (long.length === 0) return null;
+  const rest = long.length - NAMED;
+  return `${long.slice(0, NAMED).join(" ")}${rest > 0 ? ` And ${rest} more.` : ""}\n${HINT_SECOND_LINE}`;
+}

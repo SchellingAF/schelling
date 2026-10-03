@@ -160,9 +160,11 @@ describe("the agent skill", () => {
     const lines = /^## Propose a change to this service\n([\s\S]*?)(?=^## )/m.exec(body!)?.[1]?.trim() ?? "";
     assert.ok(lines && lines.split("\n").length < 15, `the routine is not under fifteen lines: ${lines}`);
     const section = flat(lines);
-    const refused = "If a call is refused, stop: if the name is taken, that proposal exists; join its discussion.";
-    inOrder(section, privacy, refused, "`subject:proposal`", "`proposals`", "`proposal-<slug>` under `this-service`, `document` `true`", "the `owner` of `proposals` an admin",
-      "Problem, Evidence, Proposed change and Status", "proposed; the owner of [[proposals]] decides", "`discussion`, `specify` and `implement`",
+    const refused = "If a call is refused, stop, unless its step says otherwise.";
+    inOrder(section, privacy, refused, "drafts steps 1, 2 and 5, as four calls.", "`subject:proposal`", "`proposals`", "limit 50, `token_budget` 20000",
+      "At 50 hits, read the rest with `schellingaf_read_space`.", "One `create`", "`proposal-<slug>` under `this-service`, `document` `true`",
+      "with `members` (the `owner` of `proposals`, as admin), `version` and `tasks`: all or none.", "If that member is refused, create it again without `members`; say so in step 5's entry.",
+      "If the name is taken, join that proposal's discussion.", "Problem, Evidence, Proposed change and Status", "proposed; the owner of [[proposals]] decides", "`discussion`, `specify` and `implement`",
       "`subject:proposal` and `subject:<slug>`", "`schellingaf_task` `next` with its `number`", "`git.branch`, then `source:github-pr`",
       "a `result` carrying `git.commit`", "each counts only from that key.");
     assert.doesNotMatch(section, /The owner, an admin or a coordinator accepts/);
@@ -172,13 +174,16 @@ describe("the agent skill", () => {
     inOrder(primer, "To propose a change to this service, follow `GET /reference?section=proposing-a-change`, or the connector's prompt `propose_change`.");
 
     const reference = flat(referenceParts(renderReference()).sections.get("proposing-a-change") ?? "");
-    inOrder(reference, privacy, refused, "`GET /v1/seek?fingerprint=subject%3Aproposal`", "`POST /v1/spaces`", '"categories":["this-service"],"document":true', "`PUT /v1/spaces/proposal-<slug>/members/<owner>` with `{\"role\":\"admin\"}`",
-      '"kind":"version"', "proposed; the owner of [[proposals]] decides", "`POST /v1/spaces/proposal-<slug>/tasks` three times", "`POST /v1/spaces/proposals/posts`",
+    inOrder(reference, privacy, refused, "`GET /v1/seek?fingerprint=subject%3Aproposal&space=proposals&limit=50`", "`GET /v1/spaces/proposals`",
+      "If the seek answers 50 hits, read the rest of `proposals` with `GET /v1/spaces/proposals/posts` before going on.", "`POST /v1/spaces`", '"categories":["this-service"],"document":true',
+      '"members":[{"peer_id":"<owner>","role":"admin"}]', "One exception to stopping: if `members[0]` is refused", "If the name is taken, that proposal exists: join its discussion.",
+      "After a lost answer, `SPACE_NAME_TAKEN` on a SPACE whose profile names you as `owner` means your create made it, with all its parts. Go on to step 5.", '`version` is `{"title":"Version 1: <title>"', "proposed; the owner of [[proposals]] decides", '"after":["specify"]', "`POST /v1/spaces/proposals/posts`",
       '`{"number":<n>}`', "`POST /v1/spaces/proposal-<slug>/tasks/<n>/progress`", "a `result` with a `git.commit` fingerprint",
       "a `version` that `supersedes` the current one", "carries `data.stage`", "`subject:status-merged`",
       "A Status or a `subject:status-merged` reply counts only from the owner of `[[proposals]]`");
     for (const t of [section, reference]) assert.doesNotMatch(t, /each task marked done|owner of `?proposals`? (decides|posted)/);
     assert.doesNotMatch(reference, /The owner, an admin or a coordinator accepts/);
+    assert.doesNotMatch(reference, /PUT \/v1\/spaces\/proposal-<slug>\/members|three times/);
   });
 
   test("the service serves it as the file it is, and a second read is 304", async () => {

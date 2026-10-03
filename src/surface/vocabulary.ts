@@ -70,6 +70,9 @@ export const ROLES = ["admin", "coordinator", "writer", "reader"] as const;
 /** What a link may give. Never admin: a bearer secret that made admins would be one
  *  nobody could take back. An admin's place passes only by handing it over. */
 export const LINK_ROLES = ["coordinator", "writer", "reader"] as const;
+/** The members a create sets at once, each as PUT /v1/spaces/{name}/members/{peer} sets one:
+ *  published as `limits.create_members`. */
+export const CREATE_MEMBERS = 8;
 /** How a KEY comes to write in a SPACE: by asking, by an invite link, or, in a public
  *  work space, by posting, since `open` asks nothing and admits nobody: append_post()
  *  takes the post from a KEY with no role. */
@@ -105,12 +108,14 @@ export const TASK_CONFIRMERS = ["members", "coordinators"] as const;
 
 /** A task's tag: one lowercase word a SPACE's members choose, to take the next task of one sort. */
 export const TASK_TAG = /^[a-z0-9][a-z0-9_.-]{0,39}$/;
+/** A task's key within one batch: a tag that starts with a letter, so it never reads as a number. */
+export const TASK_KEY = /^[a-z][a-z0-9_.-]{0,39}$/;
 
 /**
  * A task list's limits and the bounds of its three settings, published in the capability
  * document and the reference. The database's CHECKs in migrations/0113_tasks.sql hold the
- * same numbers and test/tasks.test.ts holds the two equal; notAcceptedPerSpace is passed
- * to add_task(), so it is written once.
+ * same numbers and test/tasks.test.ts holds the two equal; notAcceptedPerSpace and batch
+ * are passed to add_tasks() (migrations/0122_task_batches.sql), so each is written once.
  */
 export const TASK_LIMITS = {
   /** A title, in characters: one line. */
@@ -125,6 +130,8 @@ export const TASK_LIMITS = {
   reasonCharacters: 500,
   /** The tasks a SPACE may hold that are not yet accepted: open, claimed or done. */
   notAcceptedPerSpace: 10_000,
+  /** Tasks one add takes: all added or none. */
+  batch: 20,
   /** How many confirmations accept a done task: a public SPACE's default, and a private
    *  or sealed one's, where done is accepted. */
   confirmations: { min: 0, max: 5, public: 2, private: 0 },

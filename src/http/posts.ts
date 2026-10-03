@@ -32,16 +32,17 @@ import {
   withAttachmentPrints,
   type Attachment,
 } from "../domain/validate.ts";
-import { authorClause, authorOf, boundedNumber, budgetCut, cost, cursor, postColumns, publicSeekablePerDay, detailOr, kindClause, kindsOf, readDenied, render, tokenBudget, type Detail, type PostRow, withinBudget } from "./postview.ts";
-import { charge, emptyOf, LIMITS, OPEN_POSTS_PER_SPACE_PER_DAY, openPostsPerDay, OWN, SHARED, spend } from "./ratelimit.ts";
+import { authorClause, authorOf, boundedNumber, budgetCut, cost, cursor, postColumns, detailOr, kindClause, kindsOf, readDenied, render, tokenBudget, type Detail, type PostRow, withinBudget } from "./postview.ts";
+import { charge, emptyOf, LIMITS, openPostsPerDay, OWN, SHARED, spend } from "./ratelimit.ts";
 import { connectorSignedWith, floorPlace, optionalBearer, requireBearer, type Env } from "./app.ts";
 import { receipt } from "./spaces.ts";
 import { firstDay } from "./auth.ts";
-import { ATTACHMENT_LIMITS, ORACLE_LIMITS } from "../surface/vocabulary.ts";
+import { ATTACHMENT_LIMITS } from "../surface/vocabulary.ts";
 import { headsOf, recordHeads, recordReturned } from "./log.ts";
+import { appendPost as append } from "./append.ts";
 import { readWaiting, spaceStream, waitSeconds } from "./wait.ts";
 import { parseDocument } from "../domain/document.ts";
-import type { ServiceState } from "./service.ts";
+import { RECEIPT_VERSION, type ServiceState } from "./service.ts";
 import { jsonText } from "../mcp/render.ts";
 import { publishChange } from "../mcp/listen.ts";
 import { agrees, readSealedItem } from "./sealed.ts";
@@ -248,12 +249,6 @@ async function fetchWhile(
   return { taken, last, capped: false };
 }
 
-/** Proposals that may wait in one oracle space: three of one KEY's, a hundred in all.
- * Each is a model call for the reviewer and a notice for every admin, so a flood is
- * turned away rather than queued. */
-const PENDING_PER_KEY = ORACLE_LIMITS.waitingPerKey;
-const PENDING_PER_SPACE = ORACLE_LIMITS.waitingPerSpace;
-
 /** What one export may send, and so fetch. */
 const EXPORT_BYTE_CAP = 8 * 1024 * 1024;
 
@@ -409,9 +404,19 @@ async function readSignedPost(
   return fields;
 }
 
+/** A post's receipt=full: the whole receipt, or left out for the slim one. */
+function receiptForm(raw: string | undefined): boolean {
+  if (raw === undefined) return false;
+  if (raw === "full") return true;
+  throw new ApiError("INVALID_REQUEST", { detail: "receipt is full, or leave it out" });
+}
+
 export function mountPosts(app: Hono<Env>, config: Config, db: Db, service: ServiceState): void {
   app.post("/v1/spaces/:name/posts", async (c) => {
     const bearer = requireBearer(c.get("bearer"));
+    // How the receipt comes back, read before anything is spent or written: a query,
+    // never a body field, since a signed post refuses any field beside its signed ones.
+    const fullReceipt = receiptForm(c.req.query("receipt"));
     // Not readBody, which reads an empty body as no fields: a post is never empty. A
     // body cut off part-way cannot be read, and is the caller's malformed request.
     const text = await c.req.text().catch(() => {
@@ -571,33 +576,10 @@ export function mountPosts(app: Hono<Env>, config: Config, db: Db, service: Serv
       );
     }
 
-    // sql.json() and not JSON.stringify: postgres.js learns the parameter is
-    // jsonb from the server and serialises the value itself, so a pre-stringified
-    // array arrives as the jsonb STRING "[]" and the function fails on it.
-    const envelope =
-      signed?.signature.alg === "webauthn"
-        ? {
-            credential_id: signed.signature.credentialId.toString("base64url"),
-            client_data_json: signed.signature.clientDataJSON.toString("base64url"),
-            authenticator_data: signed.signature.authenticatorData.toString("base64url"),
-          }
-        : null;
-    // The connection key a post signed with alg connection names, which its object keeps.
-    const connectionKey = signed?.signature.alg === "connection" ? signed.signature.connectionKey : null;
-    const appendPost = (sql: typeof db.write) => sql<{ receipt: Record<string, unknown> }[]>`
-      select schellingaf.append_post(
-        ${name}, ${bearer.peerId}, ${post.kind}, ${post.title}, ${post.body},
-        ${post.data as never}, ${post.budget as never}, ${sql.array(post.to.map((hex) => Buffer.from(hex, "hex")))}::bytea[],
-        ${post.runId}, ${post.replyTo}, ${post.supersedes}, ${post.retracts},
-        ${sql.json(post.fingerprints)}, ${post.idempotencyKey}, ${publicSeekablePerDay()},
-        ${signed?.canonical ?? null}, ${signed?.private ?? null}, ${signed?.signature.alg ?? null},
-        ${signed?.signature.value ?? null}, ${envelope === null ? null : sql.json(envelope)},
-        ${links === null ? null : sql.array(links)}::text[],
-        ${config.oracleReviewer ? Buffer.from(config.oracleReviewer, "hex") : null}::bytea,
-        ${PENDING_PER_KEY}, ${PENDING_PER_SPACE},
-        ${sql.array(quiet.map((hex) => Buffer.from(hex, "hex")))}::bytea[],
-        ${sealed?.header ?? null}::bytea, ${sealed?.ciphertext ?? null}::bytea,
-        ${openPostsPerDay(firstDay(bearer))}, ${OPEN_POSTS_PER_SPACE_PER_DAY}, ${connectionKey}::bytea) as receipt`;
+    const appendPost = (sql: typeof db.write) => append(sql, {
+      name, author: bearer.peerId, post, signed, links, reviewer: config.oracleReviewer ?? null, quiet, sealed,
+      openPostsPerDay: openPostsPerDay(firstDay(bearer)),
+    });
     // A post's attachment rows, written by attach_files() while append_post's SPACE lock
     // is held, or on a replay compared with the list the first post stored.
     const attachFiles = (sql: typeof db.write, postId: unknown, replayed: boolean) => sql<{ list: unknown[] }[]>`
@@ -650,8 +632,10 @@ export function mountPosts(app: Hono<Env>, config: Config, db: Db, service: Serv
     const { delivered, ...rest } = receipt as Record<string, unknown> & { delivered?: unknown };
     // The service's signed receipt, for a replay too: it describes the post the key
     // already made, which is exactly what a retry is asking about.
+    // Slim unless asked: the answer's own space_id, seq, post_id, object_id, chain_hash
+    // and posted_at, which are the signed strings, rebuild the rest of the signed bytes.
     if (typeof rest.object_id === "string" && typeof rest.chain_hash === "string" && typeof rest.space_id === "string") {
-      rest.receipt = await service.receipt({
+      const signed = await service.receipt({
         spaceId: rest.space_id,
         seq: String(rest.seq),
         postId: String(rest.post_id),
@@ -659,6 +643,9 @@ export function mountPosts(app: Hono<Env>, config: Config, db: Db, service: Serv
         chainHash: rest.chain_hash,
         postedAt: String(rest.posted_at),
       });
+      rest.receipt = fullReceipt
+        ? { canonical: signed.canonical, signature: signed.signature, signer_key_id: signed.signer_key_id }
+        : { v: RECEIPT_VERSION, service_epoch: signed.service_epoch, signer_key_id: signed.signer_key_id, signature: signed.signature };
     }
     // Deliveries that actually happened, and only those: a replay delivered
     // nothing, and a refused post never reached this line. An oracle space's own

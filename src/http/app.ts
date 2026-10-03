@@ -4,7 +4,7 @@ import { Hono, type Context, type MiddlewareHandler } from "hono";
 import { createHash } from "node:crypto";
 import { readFileSync, statfsSync } from "node:fs";
 import { bodyLimit } from "hono/body-limit";
-import { API_VERSION, envNumber, type Config } from "../config.ts";
+import { API_CHANGES, API_VERSION, envNumber, type Config } from "../config.ts";
 import type { Db } from "../db/sql.ts";
 import { ApiError, ERRORS, refusalBody, toApiError } from "../db/errors.ts";
 import { OPERATIONS, type Operation } from "../surface/operations.ts";
@@ -146,6 +146,7 @@ import {
   SPACE_LIMITS,
   LINK_DEFAULTS,
   LINK_ROLES,
+  CREATE_MEMBERS,
   TASK_CONFIRMERS,
   TASK_LIMITS,
   TASK_STATES,
@@ -1127,6 +1128,8 @@ export function createApp(config: Config, db: Db): Hono<Env> {
    */
   const capabilities = {
     api_version: API_VERSION,
+    // What a new api_version removed or reshaped, newest first, and where it is told.
+    changes: API_CHANGES,
     protocol: {
       peer_id_label: LABEL_PEER_ID,
       challenge_label: LABEL_CHALLENGE,
@@ -1200,6 +1203,8 @@ export function createApp(config: Config, db: Db): Hono<Env> {
       fingerprints_per_post: 32,
       recipients_per_post: 8,
       tags_per_member: 8,
+      // The members one create sets at once, each as PUT .../members/{peer} sets one.
+      create_members: CREATE_MEMBERS,
       page_limit_max: 200,
       seek_limit_max: 50,
       // From the guards themselves, so a published number cannot drift from
@@ -1259,6 +1264,7 @@ export function createApp(config: Config, db: Db): Hono<Env> {
         after: TASK_LIMITS.after,
         reason_characters: TASK_LIMITS.reasonCharacters,
         not_accepted_per_space: TASK_LIMITS.notAcceptedPerSpace,
+        batch: TASK_LIMITS.batch,
         confirmations: {
           min: TASK_LIMITS.confirmations.min,
           max: TASK_LIMITS.confirmations.max,
@@ -1571,7 +1577,7 @@ export function createApp(config: Config, db: Db): Hono<Env> {
       ...(typeof o.mcp === "string" && o.mcpArgs ? { mcp_args: o.mcpArgs } : {}),
       ...(o.mcpVia?.length ? { mcp_via: o.mcpVia } : {}),
     })),
-    notice: "Responses may gain fields. Ignore fields you do not know.",
+    notice: "Responses may gain fields. Ignore fields you do not know. A new api_version may remove or reshape fields: changes lists each.",
   };
 
   let served: { version: string; json: string; etag: string } | null = null;
@@ -2122,7 +2128,7 @@ export function createApp(config: Config, db: Db): Hono<Env> {
     return c.body(null, 204);
   });
 
-  mountSpaces(app, config, db);
+  mountSpaces(app, config, db, service);
   mountSealed(app, config, db);
   mountOAuth(app, config, db);
   mountPosts(app, config, db, service);

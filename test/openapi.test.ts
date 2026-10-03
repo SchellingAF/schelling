@@ -321,11 +321,21 @@ async function scenario() {
   ok(await call("spaces.update", { name: open }, { token: owner.token, json: { task_confirmations: 1, task_claim_hours: 2 } }));
   const task = ok(await call("tasks.add", { name: open }, { token: owner.token, json: { title: "Transcribe page 3", body: "Type it out.", tag: "transcription" } }), 201);
   ok(await call("tasks.add", { name: open }, { token: owner.token, json: { title: "Check page 3", after: [task.task.task_id] } }), 201);
+  // A batch, short and whole, and a replay; and one task's whole answer. From a writer of
+  // its own, whose allowance the rest of the scenario does not need.
+  const batcher = await agent();
+  ok(await call("members.set", { name: open, peer: batcher.peerId }, { token: owner.token, json: { role: "writer" } }));
+  const tasks = { tasks: [{ key: "t1", title: "Transcribe page 4", body: "Type it out." }, { title: "Check page 4", after: ["t1", 1, "2"] }], idempotency_key: "batch-1" };
+  ok(await call("tasks.add", { name: open }, { token: batcher.token, json: tasks }), 201);
+  ok(await call("tasks.add", { name: open }, { token: batcher.token, json: tasks }), 200);
+  ok(await call("tasks.add", { name: open }, { token: batcher.token, query: { detail: "full" }, json: { tasks: [{ key: "t5", title: "Transcribe page 5" }] } }), 201);
+  ok(await call("tasks.add", { name: open }, { token: batcher.token, query: { detail: "full" }, json: { title: "Transcribe page 6" } }), 201);
   ok(await call("tasks.next", { name: open }, { token: member.token, json: { tag: "transcription" } }));
   const working = ok(await call("posts.append", { name: open }, { token: member.token, json: { kind: "progress", body: "Lines 1 to 3 typed." } }), 201);
   ok(await call("tasks.progress", { name: open, number: "1" }, { token: member.token, json: { post_id: working.post_id } }));
   ok(await call("tasks.next", { name: open }, { token: member.token, json: { number: 1 } }));
   const transcribed = ok(await call("posts.append", { name: open }, { token: member.token, json: { kind: "result", body: "Page 3, typed out." } }), 201);
+  ok(await call("posts.append", { name: open }, { token: batcher.token, query: { receipt: "full" }, json: { kind: "obs", body: "Its receipt, whole." } }), 201);
   ok(await call("tasks.done", { name: open, number: "1" }, { token: member.token, json: { post_id: transcribed.post_id } }));
   ok(await call("tasks.next", { name: open }, { token: owner.token, json: { verify: true } }));
   ok(await call("tasks.reject", { name: open, number: "1" }, { token: owner.token, json: { reason: "Line 4 is missing." } }));
@@ -391,6 +401,15 @@ async function scenario() {
   const recent = ok(await call("spaces.list", {}, { query: { oracle: "true", order: "recent", limit: "1" } }));
   ok(await call("spaces.list", {}, { query: { order: "recent", before: recent.next_before } }));
   ok(await call("seek", {}, { query: { q: "slim", oracle: "true" } }));
+
+  // ── a ready SPACE in one call: a member, the document's first version and tasks ──
+  // By a KEY of its own: the create spends five writes, which the owner's scenario needs.
+  const readier = await agent();
+  ok(await call("spaces.create", {}, { token: readier.token, json: {
+    name: `oa-ready-${unique()}`, title: "Ready", members: [{ peer_id: other.peerId, role: "writer", tags: ["checker"] }],
+    version: { title: "Version 1", body: "# Ready\n\nThe first text.", fingerprints: [{ scheme: "subject", value: "ready" }] },
+    tasks: [{ key: "a", title: "First" }, { key: "b", title: "Second", tag: "check", after: ["a"] }],
+  } }), 201);
 
   // ── a work space's document, with a section whose cited post was replaced ────
   const workName = `oa-workdoc-${unique()}`;

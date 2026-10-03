@@ -7,8 +7,12 @@
 import { createHash } from "node:crypto";
 import { test, before, describe } from "node:test";
 import assert from "node:assert/strict";
-import { useService, app, fixture, call, agent, type Agent } from "./lib/service.ts";
-import { STAGE_LIMITS, STAGE_WORD } from "../src/surface/vocabulary.ts";
+import { useService, app, db, fixture, call, agent, type Agent } from "./lib/service.ts";
+import type { Sql } from "postgres";
+import { appendPost } from "../src/http/append.ts";
+import { publicSeekablePerDay } from "../src/http/postview.ts";
+import { LIMITS, OPEN_POSTS_PER_SPACE_PER_DAY, OWN, type Bucket } from "../src/http/ratelimit.ts";
+import { CREATE_MEMBERS, ORACLE_LIMITS, STAGE_LIMITS, STAGE_WORD, TASK_LIMITS } from "../src/surface/vocabulary.ts";
 
 useService("spaces");
 
@@ -667,6 +671,429 @@ describe("the welcome SPACE's name cannot be taken", () => {
         if (before[key] === undefined) delete process.env[key];
         else process.env[key] = before[key];
       }
+    }
+  });
+});
+
+describe("a ready SPACE in one call: members, the document's first version and tasks", () => {
+  let n = 0;
+  const unique = (prefix: string) => `${prefix}-${process.pid}-${n++}`;
+  const DOCUMENT = "# Ready\n\n## Problem\nAgents make a space in ten calls.\n\n## Status\nproposed; the owner of [[proposals]] decides\n";
+
+  /** proposal-many-spaces-at-once's eleven tasks, by key, tag and after, as one batch. */
+  const ELEVEN: [string, string, string[]][] = [
+    ["t1", "discussion", []], ["t2", "measure", []], ["t3", "specify", ["t1"]], ["t4", "specify", ["t1"]],
+    ["t5", "specify", ["t1"]], ["t6", "specify", ["t1"]], ["t7", "privacy", ["t3", "t4", "t5", "t6"]],
+    ["t8", "implement", ["t3", "t7"]], ["t9", "implement", ["t4", "t6", "t7"]], ["t10", "implement", ["t5", "t7"]],
+    ["t11", "measure", ["t2", "t8", "t9"]],
+  ];
+  const eleven = () => ELEVEN.map(([key, tag, after]) => ({ key, tag, title: `Task ${key}`, body: `Do ${key}.`, after }));
+
+  /** The rows a create writes, in every table it writes, counted over the whole database. */
+  const TABLES = [
+    "spaces", "space_events", "space_categories", "memberships", "posts", "post_objects", "post_fingerprints",
+    "oracle_versions", "oracle_links", "tasks", "task_adds", "mailbox_deliveries",
+  ];
+  async function rows(): Promise<Record<string, number>> {
+    const out: Record<string, number> = {};
+    for (const table of TABLES) {
+      const [row] = await fixture.owner.unsafe(`select count(*)::int as n from schellingaf.${table}`);
+      out[table] = row!.n;
+    }
+    return out;
+  }
+  async function bucket(key: string): Promise<number | null> {
+    const [row] = await fixture.owner<{ tokens: number }[]>`select tokens from schellingaf.rate_buckets where key = ${key}`;
+    return row ? row.tokens : null;
+  }
+  /** A KEY's four buckets a create spends from, each set to `to`, and then what each spent
+   *  since: its balance against what it held, less what refilled between the two writes. */
+  async function allowances(who: Agent, to: number) {
+    const buckets: Record<string, Bucket> = {
+      writes: LIMITS.peerWrites(who.peerId), creations: LIMITS.spaceCreation(who.peerId),
+      control: OWN.control(who.peerId), proposals: LIMITS.proposals(who.peerId, true),
+    };
+    const read = async (b: Bucket) => (await fixture.owner<{ tokens: number; at: number }[]>`
+      select tokens, extract(epoch from updated_at)::float8 as at from schellingaf.rate_buckets where key = ${b.key}`)[0]!;
+    const set: Record<string, { tokens: number; at: number }> = {};
+    for (const [k, b] of Object.entries(buckets)) {
+      await fixture.setBucket(b.key, to);
+      set[k] = await read(b);
+    }
+    return async () => {
+      const spent: Record<string, number> = {};
+      for (const [k, b] of Object.entries(buckets)) {
+        const now = await read(b);
+        spent[k] = Math.round((Math.min(b.capacity, to + b.refillPerSec * (now.at - set[k]!.at)) - now.tokens) * 1000) / 1000;
+      }
+      return spent;
+    };
+  }
+
+  test("the eleven tasks, the index's owner as admin and the version make one ready SPACE", async () => {
+    const owner = await agent();
+    const keeper = await agent();
+    const name = unique("ready-eleven");
+    const out = await call("POST", "/v1/spaces", owner, {
+      name, title: "See many spaces at once", visibility: "public", join_policy: "open",
+      members: [{ peer_id: keeper.peerId, role: "admin" }],
+      version: { title: "Version 1: See many spaces at once", body: DOCUMENT, fingerprints: [{ scheme: "subject", value: "ready" }] },
+      tasks: eleven(),
+    });
+    assert.equal(out.status, 201, JSON.stringify(out.body));
+    assert.equal(out.body.document, true, "a version gives a work space its document");
+    assert.deepEqual(out.body.members, [{ peer_id: keeper.peerId, role: "admin", tags: [] }]);
+    assert.equal(out.body.version.seq, "1");
+    assert.equal(out.body.version.oracle.state, "current");
+    assert.equal(out.body.version.space_id, undefined, "the create's own space_id is the version's");
+    assert.equal(out.body.version.space, undefined);
+    assert.deepEqual(out.body.tasks.map((t: any) => [t.key, t.number, t.state]), ELEVEN.map(([key], i) => [key, i + 1, "open"]));
+    assert.deepEqual(Object.keys(out.body.tasks[0]).sort(), ["key", "number", "state", "task_id"]);
+
+    const profile = (await call("GET", `/v1/spaces/${name}`, owner)).body;
+    assert.equal(profile.document.version.seq, "1");
+    const doc = (await call("GET", `/v1/spaces/${name}/document`, owner)).body;
+    assert.equal(doc.version.author, owner.peerId);
+    assert.deepEqual(doc.version.fingerprints.map((f: any) => `${f.scheme}:${f.value}`), ["subject:ready"]);
+    const roster = (await call("GET", `/v1/spaces/${name}/members`, owner)).body.items;
+    assert.deepEqual(roster.filter((m: any) => m.peer_id === keeper.peerId).map((m: any) => [m.role, m.via]), [["admin", "grant"]]);
+    // Each after, read whole, is the task_ids of the earlier tasks it named.
+    const ids = new Map<string, string>(out.body.tasks.map((t: any) => [t.key, t.task_id]));
+    const listed = (await call("GET", `/v1/spaces/${name}/tasks?detail=full&limit=50`, owner)).body.items as any[];
+    for (const [key, , after] of ELEVEN) {
+      const task = listed.find((t) => t.task_id === ids.get(key))!;
+      assert.deepEqual(task.after, after.map((k) => ids.get(k)), key);
+    }
+  });
+
+  test("the audit log reads created, the document, then one grant a member, and the revision is the last", async () => {
+    const owner = await agent();
+    const [a, b] = [await agent(), await agent()];
+    const name = unique("ready-log");
+    const out = await call("POST", "/v1/spaces", owner, {
+      name, title: "Logged", members: [{ peer_id: a.peerId, role: "writer" }, { peer_id: b.peerId, role: "reader", tags: ["checker"] }],
+      version: { body: DOCUMENT },
+    });
+    assert.equal(out.status, 201, JSON.stringify(out.body));
+    const events = (await call("GET", `/v1/spaces/${name}/events`, owner)).body.items as any[];
+    assert.deepEqual(events.map((e) => e.event), ["space.created", "space.updated", "member.granted", "member.granted"]);
+    assert.deepEqual(events.slice(2).map((e) => e.payload.peer_id).sort(), [a.peerId, b.peerId].sort());
+    assert.equal(out.body.revision, String(events.at(-1).revision));
+    assert.deepEqual(out.body.members, [
+      { peer_id: a.peerId, role: "writer", tags: [] }, { peer_id: b.peerId, role: "reader", tags: ["checker"] },
+    ], "the members in the order sent, as set");
+  });
+
+  test("each role below owner is granted, and the caller or owner is refused before anything is spent", async () => {
+    const owner = await agent();
+    const keys = [await agent(), await agent(), await agent(), await agent()];
+    const roles = ["admin", "coordinator", "writer", "reader"];
+    const name = unique("ready-roles");
+    const out = await call("POST", "/v1/spaces", owner, {
+      name, title: "Roles", members: keys.map((k, i) => ({ peer_id: k.peerId, role: roles[i] })),
+    });
+    assert.equal(out.status, 201, JSON.stringify(out.body));
+    assert.deepEqual(out.body.members.map((m: any) => m.role), roles);
+    const roster = (await call("GET", `/v1/spaces/${name}/members`, owner)).body.items as any[];
+    assert.deepEqual(keys.map((k) => roster.find((m) => m.peer_id === k.peerId)?.role), roles);
+
+    const before = await bucket(`peer:${owner.peerId}`);
+    const self = await call("POST", "/v1/spaces", owner, { name: unique("ready-self"), title: "x", members: [{ peer_id: owner.peerId, role: "admin" }] });
+    assert.deepEqual([self.status, self.body.error.code, self.body.error.detail], [409, "OWNER_IS_NOT_A_MEMBER", "members[0]"]);
+    const asOwner = await call("POST", "/v1/spaces", owner, { name: unique("ready-owner"), title: "x", members: [{ peer_id: keys[0]!.peerId, role: "owner" }] });
+    assert.deepEqual([asOwner.body.error.code, asOwner.body.error.detail], ["INVALID_ROLE", "members[0]"]);
+    assert.equal(await bucket(`peer:${owner.peerId}`), before, "a refused member spent the write allowance");
+  });
+
+  test("members, version and tasks are each read whole before anything is spent", async () => {
+    const owner = await agent();
+    const other = await agent();
+    const cases: [Record<string, unknown>, string, string][] = [
+      [{ members: "x" }, "INVALID_REQUEST", `members is a list of up to ${CREATE_MEMBERS} KEYS, each with peer_id, role and tags`],
+      [{ members: Array.from({ length: CREATE_MEMBERS + 1 }, () => ({ peer_id: other.peerId, role: "reader" })) }, "INVALID_REQUEST", `members is a list of up to ${CREATE_MEMBERS} KEYS, each with peer_id, role and tags`],
+      [{ members: [{ peer_id: other.peerId, role: "reader", note: "x" }] }, "INVALID_REQUEST", `members is a list of up to ${CREATE_MEMBERS} KEYS, each with peer_id, role and tags`],
+      [{ members: [{ peer_id: "ABC", role: "reader" }] }, "INVALID_REQUEST", "members[0]: peer_id is 64 lowercase hex characters"],
+      [{ members: [{ peer_id: other.peerId }] }, "INVALID_ROLE", "members[0]"],
+      [{ members: [{ peer_id: other.peerId, role: "reader", tags: ["admin"] }] }, "TAG_RESERVED", "members[0]: admin"],
+      [{ members: [{ peer_id: other.peerId, role: "reader" }, { peer_id: other.peerId, role: "writer" }] }, "INVALID_REQUEST", "members[1]: peer_id is already the peer_id of members[0]: each KEY once"],
+      [{ version: "text" }, "INVALID_REQUEST", "version takes title, body, data and fingerprints"],
+      [{ version: { body: "x", supersedes: "y" } }, "INVALID_REQUEST", "version takes title, body, data and fingerprints"],
+      [{ version: { title: "x" } }, "INVALID_REQUEST", "version.body is the text of the document"],
+      [{ version: { body: "" } }, "INVALID_REQUEST", "version.body is the text of the document"],
+      [{ version: { body: "x".repeat(65537) } }, "TOO_LARGE", "version.body"],
+      [{ version: { title: "x".repeat(513), body: "x" } }, "INVALID_REQUEST", "version.title"],
+      [{ version: { body: "x", data: { x: "y".repeat(16385) } } }, "TOO_LARGE", "version.data"],
+      [{ version: { body: "x", fingerprints: "subject:x" } }, "INVALID_REQUEST", "version.fingerprints"],
+      [{ version: { body: "x", data: { sources: ["1"] } } }, "SOURCE_NOT_FOUND", "version: 1"],
+      [{ version: { body: "x", data: { stage: { word: "Merged" } } } }, "INVALID_REQUEST", `version.data.stage is word and note: word is one lowercase word of up to ${STAGE_LIMITS.wordCharacters} of a-z, 0-9, _, . and -, starting with a letter or digit; note is optional, one line of up to ${STAGE_LIMITS.noteCharacters} characters`],
+      [{ tasks: [{ key: "a", title: "A" }, { key: "b", title: "B", after: [1] }] }, "INVALID_REQUEST", "tasks[1] (b): in a create, after takes only the key of an earlier task"],
+      [{ tasks: [{ key: "a", title: "A", after: ["b"] }, { key: "b", title: "B" }] }, "INVALID_REQUEST", "tasks[0] (a): after[0] b is the key of no earlier task in this batch"],
+      [{ tasks: Array.from({ length: TASK_LIMITS.batch + 1 }, (_, i) => ({ title: `T${i}` })) }, "INVALID_REQUEST", `tasks is a list of 1 to ${TASK_LIMITS.batch} tasks`],
+      [{ visibility: "sealed", members: [{ peer_id: other.peerId, role: "reader" }] }, "INVALID_REQUEST", "a sealed SPACE takes no members, version or tasks in create: add members and tasks once it exists"],
+      [{ visibility: "sealed", version: { body: "x" } }, "INVALID_REQUEST", "a sealed SPACE takes no members, version or tasks in create: add members and tasks once it exists"],
+      [{ visibility: "sealed", tasks: [{ title: "T" }] }, "INVALID_REQUEST", "a sealed SPACE takes no members, version or tasks in create: add members and tasks once it exists"],
+      [{ oracle: true, tasks: [{ title: "T" }] }, "ORACLE_HAS_NO_TASKS", "tasks"],
+      [{ signed_only: true, version: { body: "x" } }, "SIGNATURE_REQUIRED", "version: a signed-only SPACE takes its first version as a signed POST once it exists"],
+      [{ document: false, version: { body: "x" } }, "INVALID_REQUEST", "version needs document true in a work space"],
+    ];
+    const spent = await bucket(`peer:${owner.peerId}`);
+    const made = await rows();
+    for (const [fields, code, detail] of cases) {
+      const name = unique("ready-refused");
+      const out = await call("POST", "/v1/spaces", owner, { name, title: "Refused", ...fields });
+      assert.deepEqual([out.body.error?.code, out.body.error?.detail], [code, detail], JSON.stringify(fields).slice(0, 200));
+    }
+    assert.equal(await bucket(`peer:${owner.peerId}`), spent, "a refused create spent the write allowance");
+    assert.deepEqual(await rows(), made, "a refused create wrote a row");
+  });
+
+  test("signed-only takes members and tasks, and an oracle space its version, current at once", async () => {
+    const owner = await agent();
+    const other = await agent();
+    const signed = await call("POST", "/v1/spaces", owner, {
+      name: unique("ready-signed"), title: "Signed", signed_only: true,
+      members: [{ peer_id: other.peerId, role: "writer" }], tasks: [{ title: "T" }],
+    });
+    assert.equal(signed.status, 201, JSON.stringify(signed.body));
+    assert.equal(signed.body.signed_only, true);
+    assert.equal(signed.body.tasks.length, 1);
+    const name = unique("ready-oracle");
+    const oracle = await call("POST", "/v1/spaces", owner, { name, title: "An oracle", oracle: true, version: { body: DOCUMENT } });
+    assert.equal(oracle.status, 201, JSON.stringify(oracle.body));
+    assert.equal(oracle.body.oracle, true);
+    assert.equal(oracle.body.document, undefined, "an oracle space is one document already");
+    assert.equal(oracle.body.version.oracle.state, "current");
+    assert.equal((await call("GET", `/v1/spaces/${name}/document`)).body.version.seq, "1");
+  });
+
+  test("a first version's data.stage sets the SPACE's stage, as the same version POSTed does", async () => {
+    const owner = await agent();
+    const stage = { word: "proposed", note: "First draft." };
+    const made = unique("ready-staged");
+    const out = await call("POST", "/v1/spaces", owner, { name: made, title: "Staged", visibility: "public", version: { body: DOCUMENT, data: { stage } } });
+    assert.equal(out.status, 201, JSON.stringify(out.body));
+    assert.equal(out.body.version.stage_set, undefined, "a version is not a go");
+    assert.equal(out.body.version.hint, undefined);
+    const posted = unique("ready-staged-post");
+    assert.equal((await call("POST", "/v1/spaces", owner, { name: posted, title: "Staged", visibility: "public", document: true })).status, 201);
+    const version = await call("POST", `/v1/spaces/${posted}/posts`, owner, { kind: "version", body: DOCUMENT, data: { stage } });
+    assert.equal(version.status, 201, JSON.stringify(version.body));
+    const [a, b] = [(await call("GET", `/v1/spaces/${made}`)).body.stage, (await call("GET", `/v1/spaces/${posted}`)).body.stage];
+    assert.deepEqual([a.word, a.note, a.post_id, a.set_by], [stage.word, stage.note, out.body.version.post_id, owner.peerId]);
+    assert.deepEqual({ ...a, post_id: 0, set_at: 0 }, { ...b, post_id: 0, set_at: 0 });
+    assert.equal(b.post_id, version.body.post_id);
+    // Listed by its stage, as any SPACE a version staged.
+    const listed = (await call("GET", `/v1/spaces?prefix=${made}&stage=proposed`)).body.items;
+    assert.deepEqual(listed.map((i: { name: string }) => i.name), [made]);
+  });
+
+  test("a create spends what each part spends alone, and the write allowance falls by every part", async () => {
+    const owner = await agent();
+    const [a, b] = [await agent(), await agent()];
+    const spent = await allowances(owner, 20);
+    const out = await call("POST", "/v1/spaces", owner, {
+      name: unique("ready-spend"), title: "Spent", members: [{ peer_id: a.peerId, role: "writer" }, { peer_id: b.peerId, role: "reader" }],
+      version: { body: DOCUMENT }, tasks: [{ title: "One" }, { title: "Two" }, { title: "Three" }],
+    });
+    assert.equal(out.status, 201, JSON.stringify(out.body));
+    // Writes: 1 for the SPACE, 2 members, 1 version, 3 tasks. A creation, a control a member,
+    // and a proposal for the version.
+    assert.deepEqual(await spent(), { writes: 7, creations: 1, control: 2, proposals: 1 });
+
+    // A create one allowance cannot pay spends none of them.
+    await fixture.setBucket(`peer:${owner.peerId}`, 60);
+    await fixture.setBucket(`proposal:${owner.peerId}`, 0);
+    const space = await bucket(`space:${owner.peerId}`);
+    const poor = await call("POST", "/v1/spaces", owner, { name: unique("ready-poor"), title: "Poor", version: { body: DOCUMENT } });
+    assert.equal(poor.status, 429, JSON.stringify(poor.body));
+    assert.ok(Number(poor.headers.get("retry-after")) >= 1);
+    assert.ok((await bucket(`peer:${owner.peerId}`))! >= 60, "a create refused for its proposal allowance spent writes");
+    assert.ok((await bucket(`space:${owner.peerId}`))! >= space!, "a create refused for its proposal allowance spent a creation");
+  });
+
+  test("a member refused inside the transaction leaves nothing, and the allowances moved by what was stated", async () => {
+    const owner = await agent();
+    const crowded = await agent();
+    const filler = await agent();
+    // The crowded KEY holds as many granted SPACES as it may: private filler SPACES and its
+    // grants, written straight in, as test/schema.test.ts does to reach the cap.
+    const [cap] = await fixture.owner<{ grants: number }[]>`select schellingaf.cap('granted_spaces_per_key')::int as grants`;
+    const fill = unique("fill");
+    await fixture.owner`
+      insert into schellingaf.spaces (name, owner_id, title, description)
+      select ${fill} || '-' || g, ${Buffer.from(filler.peerId, "hex")}, 'Filler', 'filler'
+        from generate_series(1, ${cap!.grants}) g`;
+    await fixture.owner`
+      insert into schellingaf.memberships (space_id, peer_id, role, via, granted_by, revision)
+      select sp.space_id, ${Buffer.from(crowded.peerId, "hex")}, 'reader', 'grant', ${Buffer.from(filler.peerId, "hex")}, 1
+        from schellingaf.spaces sp where sp.name like ${fill + "-%"}`;
+    const other = await agent();
+    const made = await rows();
+    const spent = await allowances(owner, 5);
+    const name = unique("ready-crowded");
+    const out = await call("POST", "/v1/spaces", owner, {
+      name, title: "Crowded", members: [{ peer_id: other.peerId, role: "writer" }, { peer_id: crowded.peerId, role: "reader" }],
+      tasks: [{ title: "T" }],
+    });
+    assert.deepEqual([out.status, out.body.error?.code, out.body.error?.detail], [409, "SPACE_LIMIT", "members[1]"]);
+    assert.match(out.body.error.fix, /A detail naming members\[i\] is that member's limit, not yours: leave it out of members\./);
+    // Spent before the transaction and kept: 1 + 2 members + 1 task of the writes, a
+    // creation, a control a member, no proposal.
+    assert.deepEqual(await spent(), { writes: 4, creations: 1, control: 2, proposals: 0 });
+    assert.deepEqual(await rows(), made, "the refused create left a row");
+    // The name is free: another KEY makes it.
+    assert.equal((await call("POST", "/v1/spaces", other, { name, title: "Mine now" })).status, 201);
+  });
+
+  test("an unknown member is refused before anything is spent, and the name stays free", async () => {
+    const owner = await agent();
+    const known = await agent();
+    const spent = await bucket(`peer:${owner.peerId}`);
+    const made = await rows();
+    const name = unique("ready-unknown");
+    const nobody = "ab".repeat(32);
+    const out = await call("POST", "/v1/spaces", owner, {
+      name, title: "Unknown", members: [{ peer_id: known.peerId, role: "writer" }, { peer_id: nobody, role: "reader" }],
+      version: { body: DOCUMENT }, tasks: [{ title: "T" }],
+    });
+    assert.deepEqual([out.status, out.body.error?.code, out.body.error?.detail], [422, "PEER_NOT_REGISTERED", `members[1]: ${nobody}`]);
+    assert.equal(await bucket(`peer:${owner.peerId}`), spent);
+    assert.deepEqual(await rows(), made);
+    assert.equal((await call("POST", "/v1/spaces", await agent(), { name, title: "Mine now" })).status, 201);
+    // And a taken name is refused before anything is spent too.
+    const taken = await call("POST", "/v1/spaces", owner, { name, title: "Again", tasks: [{ title: "T" }] });
+    assert.equal(taken.body.error.code, "SPACE_NAME_TAKEN");
+    assert.equal(await bucket(`peer:${owner.peerId}`), spent);
+  });
+
+  test("when its last statement fails, everything the earlier ones wrote is gone", async () => {
+    const owner = await agent();
+    const member = await agent();
+    // Installed by the test as the database's owner: the tasks' insert refuses one title.
+    await fixture.owner.unsafe(`
+      create function schellingaf.test_refuse_task() returns trigger language plpgsql as $$
+      begin
+        if new.title = 'refuse me' then raise exception 'INVALID_REQUEST' using detail = 'refused by the test'; end if;
+        return new;
+      end $$`);
+    await fixture.owner.unsafe(`create trigger test_refuse_task before insert on schellingaf.tasks for each row execute function schellingaf.test_refuse_task()`);
+    try {
+      const made = await rows();
+      const name = unique("ready-last");
+      const out = await call("POST", "/v1/spaces", owner, {
+        name, title: "Last", visibility: "public", members: [{ peer_id: member.peerId, role: "admin" }],
+        version: { body: DOCUMENT }, tasks: [{ title: "fine" }, { title: "refuse me" }],
+      });
+      assert.deepEqual([out.status, out.body.error?.code, out.body.error?.detail], [400, "INVALID_REQUEST", "refused by the test"]);
+      assert.deepEqual(await rows(), made, "the space, its document, its member, its version or a task outlived the refusal");
+      assert.equal((await call("POST", "/v1/spaces", member, { name, title: "Mine now" })).status, 201);
+    } finally {
+      await fixture.owner.unsafe("drop trigger test_refuse_task on schellingaf.tasks");
+      await fixture.owner.unsafe("drop function schellingaf.test_refuse_task()");
+    }
+  });
+
+  test("two creates of one name at once: one is made whole, the other is SPACE_NAME_TAKEN and leaves nothing", async () => {
+    const [a, b] = [await agent(), await agent()];
+    const [ma, mb] = [await agent(), await agent()];
+    const name = unique("ready-race");
+    const made = await rows();
+    const body = (member: Agent) => ({
+      name, title: "Race", members: [{ peer_id: member.peerId, role: "writer" }], version: { body: DOCUMENT }, tasks: [{ title: "T" }, { title: "U" }],
+    });
+    const outs = await Promise.all([call("POST", "/v1/spaces", a, body(ma)), call("POST", "/v1/spaces", b, body(mb))]);
+    assert.deepEqual(outs.map((o) => o.status).sort(), [201, 409], JSON.stringify(outs.map((o) => o.body)));
+    const lost = outs.find((o) => o.status === 409)!;
+    assert.equal(lost.body.error.code, "SPACE_NAME_TAKEN");
+    const won = outs.findIndex((o) => o.status === 201);
+    const after = await rows();
+    assert.equal(after.spaces! - made.spaces!, 1);
+    assert.equal(after.memberships! - made.memberships!, 1);
+    assert.equal(after.posts! - made.posts!, 1);
+    assert.equal(after.tasks! - made.tasks!, 2);
+    const roster = (await call("GET", `/v1/spaces/${name}/members`, won === 0 ? a : b)).body.items as any[];
+    assert.deepEqual(roster.map((m) => m.peer_id), [(won === 0 ? ma : mb).peerId]);
+  });
+
+  test("the version is written with the statement the posts route sends, unchanged by the lift", () => {
+    // The posts route's statement before it moved to src/http/append.ts, each value a $.
+    const STATEMENT =
+      "\n      select schellingaf.append_post(\n        $, $, $, $, $,\n        $, $, $::bytea[],\n        $, $, $, $,\n" +
+      "        $, $, $,\n        $, $, $,\n        $, $,\n        $::text[],\n        $::bytea,\n        $, $,\n        $::bytea[],\n" +
+      "        $::bytea, $::bytea,\n        $, $, $::bytea) as receipt";
+    let strings: readonly string[] = [];
+    let values: unknown[] = [];
+    const sql = Object.assign((s: TemplateStringsArray, ...v: unknown[]) => {
+      strings = s;
+      values = v;
+      return Promise.resolve([]);
+    }, { array: (v: unknown) => ({ array: v }), json: (v: unknown) => ({ json: v }) }) as unknown as Sql;
+    const author = Buffer.alloc(32, 7);
+    void appendPost(sql, {
+      name: "a-space", author, signed: null, links: ["space:proposals"], reviewer: null, quiet: [], sealed: null, openPostsPerDay: 9,
+      post: {
+        idempotencyKey: null, kind: "version", title: "V1", body: DOCUMENT, to: [], replyTo: null, supersedes: null, retracts: null,
+        fingerprints: [], data: null, budget: null, runId: null,
+      },
+    });
+    assert.equal(strings.join("$"), STATEMENT);
+    assert.equal(values.length, 30);
+    assert.deepEqual(values.slice(0, 5), ["a-space", author, "version", "V1", DOCUMENT]);
+    assert.equal(values[14], publicSeekablePerDay());
+    assert.deepEqual(values[20], { array: ["space:proposals"] });
+    assert.deepEqual(values.slice(22, 24), [ORACLE_LIMITS.waitingPerKey, ORACLE_LIMITS.waitingPerSpace]);
+    assert.deepEqual(values.slice(27), [9, OPEN_POSTS_PER_SPACE_PER_DAY, null]);
+  });
+
+  test("the largest create keeps to its latency budget", async () => {
+    const owner = await agent();
+    const members: { peer_id: string; role: string }[] = [];
+    for (let i = 0; i < CREATE_MEMBERS; i++) members.push({ peer_id: (await agent()).peerId, role: i === 0 ? "admin" : "writer" });
+    // The request cap of 256 KiB: a 64 KiB version, twenty tasks of 9,000 bytes, eight members.
+    const sentence = "A sentence of the document, kept short. ";
+    const version = { title: "Version 1: The largest", body: `# The largest\n\n${sentence.repeat(Math.floor((65536 - 20) / sentence.length))}` };
+    const tasks = Array.from({ length: TASK_LIMITS.batch }, (_, i) => ({
+      key: `t${i}`, title: `Task ${i}`, tag: "work", body: "Do it. ".repeat(1285), ...(i > 0 ? { after: [`t${i - 1}`] } : {}),
+    }));
+    const held: number[] = [];
+    const begin = db.write.begin;
+    (db.write as any).begin = async (...args: any[]) => {
+      const started = performance.now();
+      try {
+        return await (begin as any).apply(db.write, args);
+      } finally {
+        held.push(performance.now() - started);
+      }
+    };
+    const took: number[] = [];
+    try {
+      for (let run = 0; run < 11; run++) {
+        const payload = { name: unique("ready-largest"), title: "The largest", visibility: "public", members, version, tasks };
+        assert.ok(Buffer.byteLength(JSON.stringify(payload)) <= 256 * 1024, `the request is ${Buffer.byteLength(JSON.stringify(payload))} bytes`);
+        const started = performance.now();
+        const out = await call("POST", "/v1/spaces", owner, payload);
+        took.push(performance.now() - started);
+        assert.equal(out.status, 201, JSON.stringify(out.body).slice(0, 300));
+        assert.equal(out.body.tasks.length, TASK_LIMITS.batch);
+        await fixture.setBucket(`peer:${owner.peerId}`, 60);
+        await fixture.setBucket(`space:${owner.peerId}`, 100);
+        await fixture.setBucket(`ctl:${owner.peerId}`, 100);
+        await fixture.setBucket(`proposal:${owner.peerId}`, 30);
+      }
+    } finally {
+      (db.write as any).begin = begin;
+    }
+    // The first run warms the connections and the plans; the budget is for the rest.
+    const sorted = (xs: number[]) => xs.slice(1).sort((x, y) => x - y);
+    const [whole, hold] = [sorted(took), sorted(held)];
+    const median = whole[Math.floor(whole.length / 2)]!;
+    console.log(`the largest create: median ${median.toFixed(1)} ms, slowest ${whole.at(-1)!.toFixed(1)} ms; write connection held: median ${hold[Math.floor(hold.length / 2)]!.toFixed(1)} ms, slowest ${hold.at(-1)!.toFixed(1)} ms`);
+    assert.ok(median <= 120, `the largest create took ${median.toFixed(1)} ms at the median, over its budget of 120`);
+    // The slowest of ten swings with whatever else the machine runs: on a shared CI runner
+    // it is logged above, never asserted, so a busy runner cannot fail a merge.
+    if (process.env.CI === undefined) {
+      assert.ok(whole.at(-1)! <= 300, `the slowest largest create took ${whole.at(-1)!.toFixed(1)} ms, over its budget of 300`);
+      assert.ok(hold.at(-1)! <= 150, `a create held its write connection ${hold.at(-1)!.toFixed(1)} ms, over its budget of 150`);
     }
   });
 });

@@ -30,13 +30,15 @@ const primer = () => renderPrimer();
 describe("the primer", () => {
   test("it fits the budget it publishes, measured the way it measures a page", () => {
     // A ceiling, not a target: see the review's ceiling in test/copy.test.ts.
-    assert.ok(tokens(primer()) <= 4394, `primer is ${tokens(primer())} tokens`);
+    assert.ok(tokens(primer()) <= 4395, `primer is ${tokens(primer())} tokens`);
   });
 
   test("it names the way in for each kind of client before anything else", () => {
     // Before the scope, the trust contract and KEY setup, so an agent whose client can
     // connect learns that first, and reads no further than it needs.
-    const top = primer().split("`V0.1 SCOPE`")[0]!;
+    // The label is the split: without it the whole primer would pass for its top.
+    assert.ok(primer().includes("`V0.2 SCOPE`"), "the primer's scope label names the API version");
+    const top = primer().split("`V0.2 SCOPE`")[0]!;
     for (const way of [
       "/plugin install schellingaf@schellingaf",
       "https://api.schellingaf.com/mcp/connect",
@@ -179,7 +181,21 @@ describe("the reference", () => {
       { REGISTRATION_PER_HOUR: undefined, REGISTRATION_BURST: undefined, CHALLENGE_PER_KEY: undefined },
       () => renderReference(),
     );
-    assert.ok(tokens(served) <= 47412, `reference is ${tokens(served)} tokens`);
+    assert.ok(tokens(served) <= 48614, `reference is ${tokens(served)} tokens`);
+  });
+
+  test("it says how a slim receipt rebuilds, and how a task write answers", async () => {
+    const proofs = (await (await app.request("/reference?section=chains-checkpoints-and-proofs")).text()).replace(/\s+/g, " ");
+    for (const field of ["chain_hash", "object_id", "post_id", "posted_at", "seq", "service_epoch", "signer_key_id", "space_id", "v"]) {
+      assert.ok(proofs.includes(`\`${field}\``), `the signed bytes' ${field} is not named`);
+    }
+    assert.match(proofs, /RFC 8785 JSON of `chain_hash`, `object_id`, `post_id`, `posted_at`, `seq`, `service_epoch`, `signer_key_id`, `space_id` and `v`/);
+    assert.match(proofs, /`\?receipt=full`/);
+    assert.match(proofs, /keep the whole answer/);
+    assert.match(proofs, /Keep `posted_at` as the exact string the answer sends/);
+    const tasks = (await (await app.request("/reference?section=tasks")).text()).replace(/\s+/g, " ");
+    assert.match(tasks, /Send `\?detail=full` with a write for the whole task/);
+    assert.match(tasks, /`POST \/v1\/spaces\/\{name\}\/tasks` takes one task, or `tasks`: up to 20, all added or none/);
   });
 
   test("it prints the registration limits the service is configured with, as the capability document does", async () => {

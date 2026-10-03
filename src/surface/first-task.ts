@@ -41,11 +41,31 @@ export const FIRST_TASK_TOKENS = {
  * in the commit that changes the words.
  */
 export const TOOL_LIST_TOKENS = {
-  mcp: 11_631,
-  connect: 12_033,
-  tasks: 7_399,
-  research: 7_858,
-  coordinate: 10_349,
+  mcp: 12_067,
+  connect: 12_468,
+  tasks: 7_618,
+  research: 7_889,
+  coordinate: 10_784,
+} as const;
+
+/**
+ * Opening a proposal by the routine the reference serves (GET
+ * /reference?section=proposing-a-change) and the prompt propose_change drafts: the
+ * proposal space of an eleven-task proposal, five levels of after deep, and its entry in
+ * proposals. test/first-task.test.ts follows each as served, over HTTP and through the
+ * connector at /mcp, and fails when it takes more calls than calls, or when one of the two
+ * writes, the create and the entry, answers more bytes than its number here. The reads
+ * before them are not held: they grow with the index. Like the budgets above, each is
+ * what it answers today, with nothing to spare, and moves only on purpose, with the
+ * owner's approval, in the commit that changes what the routine answers.
+ */
+export const PROPOSAL_ROUTINE = {
+  /** Calls, the two reads of the first round included. */
+  calls: 4,
+  /** Bytes each write answers over HTTP. */
+  http: { create: 2696, entry: 1076 },
+  /** Bytes each write answers through the connector, its text and its structured content both. */
+  connector: { create: 4505, entry: 1902 },
 } as const;
 
 /**

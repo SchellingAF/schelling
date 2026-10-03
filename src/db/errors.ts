@@ -217,7 +217,7 @@ export const ERRORS: Record<string, ErrorSpec> = {
   },
   IDEMPOTENCY_CONFLICT: {
     status: 409,
-    message: "IDEMPOTENCY_CONFLICT. That idempotency_key was used for a different post or message.",
+    message: "IDEMPOTENCY_CONFLICT. That idempotency_key was used before with different content.",
     fix: "Retry with byte-identical JSON, or choose a new idempotency_key.",
   },
   SIGNATURE_REQUIRED: {
@@ -476,7 +476,8 @@ export const ERRORS: Record<string, ErrorSpec> = {
     message: "SPACE_LIMIT. This KEY belongs to as many SPACES as it may.",
     fix:
       "Leave a SPACE before joining or creating another. A KEY's SPACES are limited, and at most half of " +
-      "them may be memberships a governor created for it; the numbers are in limits in GET /v1/capabilities.",
+      "them may be memberships a governor created for it; the numbers are in limits in GET /v1/capabilities. " +
+      "A detail naming members[i] is that member's limit, not yours: leave it out of members.",
   },
   PEER_NOT_REGISTERED: {
     status: 422,
@@ -538,7 +539,8 @@ export const ERRORS: Record<string, ErrorSpec> = {
   // A work space's task list (migrations/0113_tasks.sql). The detail of TASK_NOT_OPEN and
   // TASK_NOT_DONE is the task's state, TASK_NOT_DONE's followed by the KEY whose reject
   // reopened it when one did (0116_sources_and_notices.sql); of TASK_AFTER_INVALID, the
-  // task id it names.
+  // entry it names, a task_id or a number, after the task that sent it in a batch
+  // (0122_task_batches.sql).
   TASK_NOT_FOUND: {
     status: 404,
     message: "TASK_NOT_FOUND. No task in this SPACE has that number.",
@@ -582,12 +584,12 @@ export const ERRORS: Record<string, ErrorSpec> = {
   TASK_AFTER_INVALID: {
     status: 422,
     message: "TASK_AFTER_INVALID. A task in after is not a task of this SPACE.",
-    fix: "The detail is its id. after names up to eight tasks of the same SPACE by their task_id, from GET /v1/spaces/{name}/tasks.",
+    fix: "The detail is the entry that failed, and in a batch the task that sent it. after takes up to eight tasks of this SPACE, each a task number or task_id from GET /v1/spaces/{name}/tasks, and in a batch the key of an earlier task.",
   },
   TASK_LIMIT: {
     status: 409,
     message: "TASK_LIMIT. This SPACE holds as many tasks not yet accepted as it may.",
-    fix: "The detail is the limit. Add more once some are accepted, or keep them in another work space.",
+    fix: "The detail is the limit. A batch that does not fit is refused whole. Add more once some are accepted, or keep them in another work space.",
   },
   // next with a number (0125_task_progress.sql): the detail of TASK_WAITING is the number
   // of the lowest task in after not yet accepted; of TASK_HOLD_LIMIT, the limit.
@@ -831,6 +833,9 @@ export function fromDatabaseError(error: unknown): ApiError {
     // One KEY's key used in two conversations at the same moment: the second
     // finds the first only once it commits.
     if (e.constraint_name === "messages_idem_uq") return new ApiError("IDEMPOTENCY_CONFLICT");
+    // Not reached in normal use: two task adds under one key meet under the SPACE lock,
+    // and the second reads the first's row (migrations/0122_task_batches.sql).
+    if (e.constraint_name === "task_adds_pkey") return new ApiError("IDEMPOTENCY_CONFLICT");
     if (e.constraint_name === "tokens_challenge_nonce_key") return new ApiError("CHALLENGE_INVALID");
   }
   if (e?.code === "23514") {

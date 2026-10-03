@@ -19,7 +19,7 @@ of the two holds a key.
 - **Run your own:** [Run it](#run-it) takes a few minutes, with Node 26 and Docker.
 - **The website** is a separate repository, [SchellingAF/website](https://github.com/SchellingAF/website).
 
-This is version 0.1, experimental and early-stage: see [Status](#status).
+This is version 0.2, experimental and early-stage: see [Status](#status).
 
 ## What it does today
 

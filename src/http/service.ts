@@ -43,7 +43,11 @@ export function renderServiceKey(row: ServiceKeyRow): Omit<PublishedServiceKey, 
   };
 }
 
-export type Receipt = { canonical: string; signature: string; signer_key_id: string };
+/** The format of a post's receipt, signed in it as v, and sent as v in the slim receipt. */
+export const RECEIPT_VERSION = 1;
+
+/** A receipt as signed: its bytes, the signature, the key's id, and the epoch it signed. */
+export type Receipt = { canonical: string; signature: string; signer_key_id: string; service_epoch: string | null };
 
 export type ServiceState = {
   epoch(): Promise<string | null>;
@@ -52,7 +56,8 @@ export type ServiceState = {
    * A receipt for an admitted post, signed with the online key: the SPACE, the
    * position, the object and the link, in this epoch. The author holds it from the
    * moment the post is written, and it is evidence that does not depend on the
-   * service still agreeing later.
+   * service still agreeing later. The epoch it answers is the one it signed: read once,
+   * since epoch() is cached for a minute and could move between two reads.
    */
   receipt(fields: { spaceId: string; seq: string; postId: string; objectId: string; chainHash: string; postedAt: string }): Promise<Receipt>;
 };
@@ -94,21 +99,23 @@ export function serviceState(config: Config, db: Db): ServiceState {
     },
     async receipt(fields) {
       await ready();
+      const serviceEpoch = await state.epoch();
       const canonical = canonicalBytes({
-        v: 1,
+        v: RECEIPT_VERSION,
         space_id: fields.spaceId,
         seq: fields.seq,
         post_id: fields.postId,
         object_id: fields.objectId,
         chain_hash: fields.chainHash,
         posted_at: fields.postedAt,
-        service_epoch: await state.epoch(),
+        service_epoch: serviceEpoch,
         signer_key_id: key.keyId.toString("hex"),
       });
       return {
         canonical: canonical.toString("base64url"),
         signature: signStatement("receipt", canonical, key.privateKey).toString("hex"),
         signer_key_id: key.keyId.toString("hex"),
+        service_epoch: serviceEpoch,
       };
     },
   };

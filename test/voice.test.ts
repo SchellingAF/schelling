@@ -11,7 +11,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { randomUUID, sign } from "node:crypto";
 import { useService, call, agent, connector, type Agent } from "./lib/service.ts";
-import { HINT_FIRST_LINE, HINT_SECOND_LINE, HOW_TO_WRITE, LONG_WORDS, hintFor, sentences, wordsIn } from "../src/domain/voice.ts";
+import { HINT_FIRST_LINE, HINT_SECOND_LINE, HOW_TO_WRITE, LONG_WORDS, hintFor, hintForMany, sentences, wordsIn } from "../src/domain/voice.ts";
 import { buildPostObject, signaturePreimageOf } from "../src/domain/objects.ts";
 import { renderPrimer } from "../src/docs/render.ts";
 
@@ -134,6 +134,15 @@ describe("the hint's words", () => {
     assert.match(said[0]!, pattern);
     assert.equal(said[1], HINT_SECOND_LINE);
     assert.equal(said.length, 2);
+  });
+
+  test("several texts: the recorded first line for each that ran long, after its label, at most three, and how many more", () => {
+    const text = (i: number) => ({ label: `tasks[${i}]`, title: "Short", body: `${words(21)}. Short one.` });
+    const one = `1 of 2 sentences ran over ${LONG_WORDS} words: ${named(21)}.`;
+    const fine = { label: "tasks[9]", title: "Fine", body: "Short one." };
+    assert.equal(hintForMany([fine, text(0), text(1)]), `tasks[0]: ${one} tasks[1]: ${one}\n${HINT_SECOND_LINE}`);
+    assert.equal(hintForMany([text(0), text(1), fine, text(2), text(3), text(4)]), `tasks[0]: ${one} tasks[1]: ${one} tasks[2]: ${one} And 2 more.\n${HINT_SECOND_LINE}`);
+    assert.equal(hintForMany([fine]), null);
   });
 });
 

@@ -625,6 +625,12 @@ describe("the bridge, sealing", () => {
       // The same call again is the same post, replayed.
       const again = await bridge.ask("tools/call", { name: "schellingaf_post", arguments: post });
       assert.match(textOf(again), /already posted/, JSON.stringify(again));
+      // And again asking for the whole receipt: receipt is not part of what is sealed, so it
+      // is still the same post, replayed, and its receipt comes back whole.
+      const whole = await bridge.ask("tools/call", { name: "schellingaf_post", arguments: { ...post, receipt: true } });
+      assert.match(textOf(whole), /already posted/, JSON.stringify(whole));
+      assert.equal(typeof whole.result.structuredContent.receipt.canonical, "string");
+      assert.equal(again.result.structuredContent.receipt.canonical, undefined, "slim unless asked");
 
       const read = await bridge.ask("tools/call", { name: "schellingaf_read_space", arguments: { space: name, after: "0" } });
       assert.equal(read.result.isError, undefined, JSON.stringify(read));
@@ -1230,6 +1236,17 @@ describe("the bridge, signing", () => {
         assert.equal(again.result.isError, undefined, JSON.stringify(again));
         assert.equal(again.result.structuredContent.post_id, id);
       }
+      // receipt true reaches the service beside what the bridge signs: the receipt comes
+      // back whole, for a new post and for one replayed, which is still the same post.
+      for (const space of [plain, signed]) {
+        const whole = await bridge.ask("tools/call", { name: "schellingaf_post", arguments: post(space, { receipt: true }) });
+        assert.equal(whole.result.isError, undefined, JSON.stringify(whole));
+        assert.equal(whole.result.structuredContent.post_id, ids.get(space));
+        assert.equal(typeof whole.result.structuredContent.receipt.canonical, "string", JSON.stringify(whole.result.structuredContent.receipt));
+      }
+      const fresh = await bridge.ask("tools/call", { name: "schellingaf_post", arguments: { space: signed, kind: "obs", body: "a new post, its receipt whole", receipt: true } });
+      assert.equal(fresh.result.isError, undefined, JSON.stringify(fresh));
+      assert.equal(typeof fresh.result.structuredContent.receipt.canonical, "string");
       // A post with no idempotency key is signed too.
       const loose = await bridge.ask("tools/call", { name: "schellingaf_post", arguments: { space: plain, kind: "obs", body: "no key given" } });
       assert.equal(loose.result.isError, undefined, JSON.stringify(loose));

@@ -23,7 +23,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { jsonText } from "../mcp/render.ts";
 import type { Config } from "../config.ts";
 import type { Db } from "../db/sql.ts";
-import { ApiError } from "../db/errors.ts";
+import { ApiError, toApiError } from "../db/errors.ts";
 import { HAND_OVER_PREFIX, INVITE_PREFIX, inviteLink, readInviteLink } from "../domain/protocol.ts";
 import { fromHex, sha256, toHex } from "../domain/keys.ts";
 import { passkeyFields } from "../domain/passkeys.ts";
@@ -37,6 +37,9 @@ import {
   optionalTaskSettings,
   queryFlag,
   readBody,
+  readCreateMembers,
+  readCreateVersion,
+  readTaskBatch,
   requireCategoryFilter,
   requireString,
   requireTags,
@@ -52,12 +55,20 @@ import {
   SPACE_NAME,
   STAGE_LIMITS,
   STAGE_WORD,
+  TASK_LIMITS,
 } from "../surface/vocabulary.ts";
-import { LIMITS, OWN, SHARED, charge, emptyOf, refuseIfEmpty, spend, publicKeyAgeHours } from "./ratelimit.ts";
+import {
+  LIMITS, OWN, SHARED, charge, emptyOf, openPostsPerDay, refuseIfEmpty, refuseUnlessOwnCanPay, spend, publicKeyAgeHours,
+} from "./ratelimit.ts";
 import { underOf } from "../surface/categories.ts";
 import { optionalBearer, requireBearer, type Env } from "./app.ts";
 import { headsOf, recordHeads } from "./log.ts";
 import { publishChange } from "../mcp/listen.ts";
+import { appendPost, type AppendPost } from "./append.ts";
+import { firstDay } from "./auth.ts";
+import { RECEIPT_VERSION, type ServiceState } from "./service.ts";
+import { parseDocument } from "../domain/document.ts";
+import { hintForMany } from "../domain/voice.ts";
 
 /**
  * Log the stream positions a write advanced, then take them out of the response.
@@ -373,7 +384,7 @@ export function namedCode(
 /** How many of the SPACES a KEY owns its public profile names a page. */
 const OWNED_PAGE = 200;
 
-export function mountSpaces(app: Hono<Env>, config: Config, db: Db): void {
+export function mountSpaces(app: Hono<Env>, config: Config, db: Db, service: ServiceState): void {
   // Read once, when the app is built, exactly as capabilities reads it, so the
   // number the service publishes and the number it enforces cannot disagree. A
   // test or a local demo sets it to zero before building the app.
@@ -418,9 +429,21 @@ export function mountSpaces(app: Hono<Env>, config: Config, db: Db): void {
       throw new ApiError("INVALID_REQUEST", { detail: "an oracle space is public" });
     }
     refuseOpenUnlessPublicWork(joinPolicy, visibility, oracle);
+    // What makes it ready in the same call: members, its document's first version and
+    // tasks. A sealed SPACE takes none of them: its members get its key through the
+    // bridge, which this call does not run. Said before its document is read, which a
+    // version would imply.
+    const sent = (field: string) => input[field] !== undefined && input[field] !== null;
+    const ready = sent("members") || sent("version") || sent("tasks");
+    if (visibility === "sealed" && ready) {
+      throw new ApiError("INVALID_REQUEST", {
+        detail: "a sealed SPACE takes no members, version or tasks in create: add members and tasks once it exists",
+      });
+    }
     // A work space that keeps one document, as an oracle space is one, read by whoever
-    // reads the SPACE: set in the transaction that makes it (set_space_document()).
-    const document = optionalBoolean(input.document, "document") ?? false;
+    // reads the SPACE: set in the transaction that makes it (set_space_document()). A
+    // version sent with a work space gives it one unless document says false.
+    const document = optionalBoolean(input.document, "document") ?? (sent("version") && !oracle);
     refuseDocumentUnlessWork(document, visibility, oracle);
     // A sealed SPACE comes with its first key, made on its owner's machine: the id its
     // software chose, since the key and the owner's lock both name it, generation 1's
@@ -459,43 +482,158 @@ export function mountSpaces(app: Hono<Env>, config: Config, db: Db): void {
     // A private or sealed SPACE may have none, and is then in no category's list.
     const categories = categoriesFor(visibility, input.categories);
 
+    // Each read whole before anything is spent: a member as PUT .../members/{peer} reads
+    // one, the version as a version POST is read, and the tasks as a batch whose after
+    // names keys only, since the SPACE holds no task before the call.
+    const members = sent("members") ? readCreateMembers(input.members, me.hex) : null;
+    const version = sent("version") ? readCreateVersion(input.version) : null;
+    const tasks = sent("tasks") ? readTaskBatch(input.tasks, "create") : null;
+    if (tasks !== null && oracle) throw new ApiError("ORACLE_HAS_NO_TASKS", { detail: "tasks" });
+    // A signature covers the post's object, which names the SPACE's id, and the service
+    // picks that id here: no signature can exist before the call.
+    if (version !== null && signedOnly) {
+      throw new ApiError("SIGNATURE_REQUIRED", { detail: "version: a signed-only SPACE takes its first version as a signed POST once it exists" });
+    }
+    if (version !== null && !oracle && !document) {
+      throw new ApiError("INVALID_REQUEST", { detail: "version needs document true in a work space" });
+    }
+
     if (visibility === "public") refuseTooNew(me, publicSpaceMinKeyAgeHours);
 
-    await spend(c, db, LIMITS.peerWrites(me.hex));
-    await spend(c, db, LIMITS.spaceCreation(me.hex));
+    // The name, and every member's KEY, before anything is spent: a retry after a lost
+    // answer costs nothing, and an unknown member spends nothing. The unique index still
+    // decides between two creates of one name at once.
+    const memberIds = (members ?? []).map((m) => m.hex);
+    const [found] = await db.read<{ taken: boolean; unknown: string[] }[]>`
+      select exists (select 1 from schellingaf.spaces s where s.name = ${name}) as taken,
+             array(select u.h from unnest(${memberIds}::text[]) with ordinality u(h, i)
+                    where not exists (select 1 from schellingaf.peers p where p.peer_id = decode(u.h, 'hex'))
+                    order by u.i) as unknown`;
+    if (found!.taken) throw new ApiError("SPACE_NAME_TAKEN");
+    const unknown = members?.find((m) => m.hex === found!.unknown[0]);
+    if (unknown !== undefined) throw new ApiError("PEER_NOT_REGISTERED", { detail: `members[${unknown.index}]: ${unknown.hex}` });
+
+    // Each part spends what the same write spends alone, the quick-refilling write
+    // allowance first and the scarce proposals last. A ready create reads all four
+    // first, so one that cannot pay spends none of them.
+    const spends = [
+      [LIMITS.peerWrites(me.hex), 1 + (members?.length ?? 0) + (version ? 1 : 0) + (tasks?.length ?? 0)],
+      [LIMITS.spaceCreation(me.hex), 1],
+      [OWN.control(me.hex), members?.length ?? 0],
+      [LIMITS.proposals(me.hex, firstDay(me)), version ? 1 : 0],
+    ] as const;
+    if (ready) await refuseUnlessOwnCanPay(c, db, spends);
+    for (const [bucket, cost] of spends) if (cost > 0) await spend(c, db, bucket, cost);
 
     // A plain array cast in the statement, never the array helper: see emptyOf in
     // ratelimit.ts for the cold connection that sends the helper's value as text.
     // With every category above them, which the database keeps for the filters.
     const filing = underOf(categories);
-    const create = (sql: Sql) => sql<{ created: { space_id: string; name: string; revision: string } }[]>`
+    type Created = { created: { space_id: string; name: string; revision: string } };
+    const create = (sql: Sql) => sql<Created[]>`
           select schellingaf.create_space(${me.peerId}, ${name}, ${title},
                                           ${description}, ${joinPolicy}, ${visibility}, ${signedOnly},
                                           ${categories}::text[], ${filing.under}::text[], ${filing.main}::text[],
                                           ${oracle}, null::uuid) as created`;
-    const [row] = sealed
-      ? await db.write<{ created: { space_id: string; name: string; revision: string } }[]>`
+    if (sealed) {
+      const [row] = await db.write<Created[]>`
           select schellingaf.create_sealed_space(${me.peerId}, ${sealed.spaceId}::uuid, ${name}, ${title},
                                                  ${description}, ${signedOnly}, ${categories}::text[],
                                                  ${filing.under}::text[], ${filing.main}::text[],
-                                                 ${sealed.commitment}, ${sealed.lock}) as created`
-      : !document
-        ? await create(db.write)
-        // Made and given its document in one transaction: its second event, space.updated,
-        // names the document, and the receipt the revision that leaves it at.
-        : await db.write.begin(async (sql) => {
-            const [made] = await create(sql as unknown as Sql);
-            const [set] = await sql<{ set: { revision: string } }[]>`
-              select schellingaf.set_space_document(${name}, ${me.peerId}, true) as set`;
-            return [{ created: { ...made!.created, revision: set!.set.revision } }];
-          });
-    return c.json(
-      { ...receipt(c, null, row!.created),
-        visibility, join_policy: joinPolicy, signed_only: signedOnly, categories,
-        ...(oracle ? { oracle: true } : {}),
-        ...(document ? { document: true } : {}) },
-      201,
-    );
+                                                 ${sealed.commitment}, ${sealed.lock}) as created`;
+      return c.json({ ...receipt(c, null, row!.created), visibility, join_policy: joinPolicy, signed_only: signedOnly, categories }, 201);
+    }
+    const settled = { visibility, join_policy: joinPolicy, signed_only: signedOnly, categories,
+                      ...(oracle ? { oracle: true } : {}), ...(document ? { document: true } : {}) };
+    if (!ready && !document) {
+      const [row] = await create(db.write);
+      return c.json({ ...receipt(c, null, row!.created), ...settled }, 201);
+    }
+
+    // Everything the statements need is built before the transaction starts, so nothing
+    // but statements runs while it holds a write connection.
+    const firstVersion: AppendPost | null = version === null ? null : {
+      name, author: me.peerId, signed: null, links: parseDocument(version.body).links,
+      reviewer: config.oracleReviewer ?? null, quiet: [], sealed: null, openPostsPerDay: openPostsPerDay(firstDay(me)),
+      post: {
+        idempotencyKey: null, kind: "version", title: version.title, body: version.body, to: [], replyTo: null,
+        supersedes: null, retracts: null, fingerprints: version.fingerprints, data: version.data, budget: null, runId: null,
+      },
+    };
+    // Grants in ascending peer id, the house's lock order; the answer keeps the order sent.
+    const granting = [...(members ?? [])].sort((a, b) => (a.hex < b.hex ? -1 : 1));
+    const hint = hintForMany([
+      ...(version ? [{ label: "version", title: version.title, body: version.body }] : []),
+      ...(tasks ?? []).map((t, i) => ({ label: `tasks[${i}]${t.key === undefined ? "" : ` ${t.key}`}`, title: t.title, body: t.body })),
+    ]);
+    /** A refusal of one part names it, as members[i] or version, before its own detail. */
+    const naming = (part: string) => (error: unknown): never => {
+      const api = toApiError(error);
+      // Kept as it was thrown, so the exception log still says what failed.
+      if (api.code === "INTERNAL" || api.code === "BUSY") throw error;
+      throw new ApiError(api.code, {
+        detail: api.detail ? `${part}: ${api.detail}` : part,
+        ...(api.retryAfter === undefined ? {} : { retryAfter: api.retryAfter }),
+        shared: api.shared,
+      });
+    };
+
+    // Made, given its document, its members, its first version and its tasks in one
+    // transaction: all of it, or nothing, and the name stays free.
+    const made = await db.write.begin(async (tx) => {
+      const sql = tx as unknown as Sql;
+      const [row] = await create(sql);
+      let revision = row!.created.revision;
+      if (document) {
+        const [set] = await sql<{ set: { revision: string } }[]>`
+          select schellingaf.set_space_document(${name}, ${me.peerId}, true) as set`;
+        revision = set!.set.revision;
+      }
+      const granted: Record<string, unknown>[] = [];
+      for (const m of granting) {
+        const [g] = await sql<{ granted: Record<string, unknown> & { revision: string } }[]>`
+          select schellingaf.grant_membership(${name}, ${me.peerId}, ${m.peer}, ${m.role}, ${m.tags}) as granted`
+          .catch(naming(`members[${m.index}]`));
+        granted[m.index] = g!.granted;
+        revision = g!.granted.revision;
+      }
+      const posted = firstVersion === null ? null : (await appendPost(sql, firstVersion).catch(naming("version")))[0]!.receipt;
+      const added = tasks === null ? null : (await sql<{ out: { tasks: Record<string, unknown>[] } }[]>`
+        select schellingaf.add_tasks(${name}, ${me.peerId}, ${sql.json(tasks as never)}, null, true,
+                                     ${TASK_LIMITS.notAcceptedPerSpace}, ${TASK_LIMITS.batch}) as out`)[0]!.out;
+      return { created: { ...row!.created, revision }, granted, posted, added };
+    });
+
+    const answer: Record<string, unknown> = { ...receipt(c, null, made.created), ...settled };
+    if (members !== null) {
+      answer.members = members.map((m) => ({ peer_id: m.hex, role: made.granted[m.index]!.role, tags: made.granted[m.index]!.tags }));
+    }
+    if (made.posted !== null) {
+      const posted = made.posted;
+      recordHeads(c, headsOf(name, posted));
+      if ((posted.oracle as { state?: string } | undefined)?.state === "current") publishChange({ kind: "document_changed", space: name });
+      // Signed after commit, as the posts route signs a post: if signing fails the SPACE
+      // exists whole, and a retry meets SPACE_NAME_TAKEN.
+      const signed = await service.receipt({
+        spaceId: String(posted.space_id),
+        seq: String(posted.seq),
+        postId: String(posted.post_id),
+        objectId: String(posted.object_id),
+        chainHash: String(posted.chain_hash),
+        postedAt: String(posted.posted_at),
+      });
+      // delivered is logged, never answered; space_id is the create's own.
+      const { delivered: _delivered, space_id: _spaceId, ...rest } = posted;
+      answer.version = {
+        ...rest,
+        receipt: { v: RECEIPT_VERSION, service_epoch: signed.service_epoch, signer_key_id: signed.signer_key_id, signature: signed.signature },
+      };
+    }
+    if (made.added !== null) {
+      answer.tasks = made.added.tasks.map((t) => ({ key: t.key ?? null, number: t.number, task_id: t.task_id, state: t.state }));
+    }
+    if (hint) answer.hint = hint;
+    return c.json(answer, 201);
   });
 
   app.get("/v1/spaces", async (c) => {

@@ -1307,7 +1307,12 @@ async function prepare(message) {
   const name = message.params?.name;
   let args = message.params?.arguments;
   if (!args || typeof args !== "object") return { message };
-  const withArgs = (next) => ({ ...message, params: { ...message.params, arguments: next } });
+  // A post's receipt asks how the answer comes back, not what is posted: kept out of what
+  // is signed, sealed and kept for a retry, and sent beside it, so a retry that asks the
+  // other form is the same post and replays.
+  let receipt;
+  if (name === SEALING_TOOLS.post && args.receipt !== undefined) ({ receipt, ...args } = args);
+  const withArgs = (next) => ({ ...message, params: { ...message.params, arguments: receipt === undefined ? next : { ...next, receipt } } });
   // A file to save is written here, by this KEY, and the call is answered here.
   if (name === "schellingaf_get" && args.save_as !== undefined) return { answer: await saveAttachment(args) };
   // A file to read is fetched whole here, its hash checked, and only then cut to the budget.

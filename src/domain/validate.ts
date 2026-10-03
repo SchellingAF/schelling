@@ -16,6 +16,7 @@ import {
 } from "../surface/categories.ts";
 import {
   ATTACHMENT_LIMITS,
+  CREATE_MEMBERS,
   FINDING_CONFIDENCES,
   FINDING_LIMITS,
   FINDING_STATUSES,
@@ -24,10 +25,12 @@ import {
   REFUSED_DATA_KEYS,
   RESERVED_TAGS,
   RETURN_STATUSES,
+  ROLES,
   STAGE_LIMITS,
   STAGE_WORD,
   TAG,
   TASK_CONFIRMERS,
+  TASK_KEY,
   TASK_LIMITS,
   TASK_TAG,
   TAUGHT_DATA_KEYS,
@@ -674,13 +677,222 @@ export function optionalTaskTag(value: unknown): string | null {
   return value;
 }
 
-/** The tasks a task waits for: up to eight task ids, deduplicated and sorted. */
-export function optionalTaskAfter(value: unknown): string[] {
-  if (value === undefined || value === null) return [];
-  if (!Array.isArray(value) || value.length > TASK_LIMITS.after || value.some((v) => typeof v !== "string" || !UUID.test(v))) {
-    throw new ApiError("INVALID_REQUEST", { detail: `after is a list of up to ${TASK_LIMITS.after} task_ids of this SPACE` });
+/**
+ * One entry of a task's after, resolved: a task number or a task_id of the SPACE, held
+ * before the call, or the 0-based position of an earlier task of the same batch, which a
+ * key names. add_tasks() (migrations/0122_task_batches.sql) reads these three forms.
+ */
+export type AfterEntry = { number: number } | { task_id: string } | { index: number };
+/**
+ * One task as an add sends it to add_tasks(): a property is left out when it is absent,
+ * never null, and after keeps the order sent with identical entries dropped, so the same
+ * request always builds the same jsonb, whose hash an idempotency_key keeps.
+ */
+export type TaskInput = { key?: string; title: string; body: string; tag?: string; after: AfterEntry[] };
+
+/** A task number as after names one: a JSON integer, or a string of digits, 1 to 2,147,483,647. */
+const TASK_NUMBER_TEXT = /^[1-9][0-9]{0,9}$/;
+const TASK_NUMBER_MAX = 2147483647;
+
+/** A key a batch's task may carry: a lowercase word starting with a letter, never a uuid. */
+function taskKey(value: unknown, at: string): string | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== "string" || !TASK_KEY.test(value) || UUID.test(value)) {
+    throw new ApiError("INVALID_REQUEST", {
+      detail: `${at}: key is a lowercase word of up to ${TASK_LIMITS.tagCharacters} letters, digits, dots, hyphens and underscores, starting with a letter`,
+    });
   }
-  return [...new Set(value as string[])].sort();
+  return value;
+}
+
+/**
+ * A task's after, resolved in this order: a task number, a task_id, then, in a batch, the
+ * key of an earlier task, whose position `earlier` gives. `at` is how a refusal names the
+ * task, empty for a single add; `keyed` is null for a single add, which takes no key.
+ */
+function taskAfter(value: unknown, at: string, keyed: Map<string, number> | null, mode: "one" | "add" | "create"): AfterEntry[] {
+  if (value === undefined || value === null) return [];
+  if (!Array.isArray(value) || value.length > TASK_LIMITS.after) {
+    throw new ApiError("INVALID_REQUEST", {
+      detail: mode === "one"
+        ? `after is a list of up to ${TASK_LIMITS.after} task numbers or task_ids of this SPACE`
+        : `${at}: after is a list of up to ${TASK_LIMITS.after} tasks`,
+    });
+  }
+  const out: AfterEntry[] = [];
+  const seen = new Set<string>();
+  for (const [j, entry] of value.entries()) {
+    let resolved: AfterEntry | null = null;
+    if (typeof entry === "number" && Number.isInteger(entry) && entry >= 1 && entry <= TASK_NUMBER_MAX) {
+      resolved = { number: entry };
+    } else if (typeof entry === "string" && TASK_NUMBER_TEXT.test(entry) && Number(entry) <= TASK_NUMBER_MAX) {
+      resolved = { number: Number(entry) };
+    } else if (typeof entry === "string" && UUID.test(entry)) {
+      resolved = { task_id: entry };
+    } else if (keyed !== null && typeof entry === "string" && TASK_KEY.test(entry)) {
+      const index = keyed.get(entry);
+      if (index === undefined) {
+        throw new ApiError("INVALID_REQUEST", { detail: `${at}: after[${j}] ${entry} is the key of no earlier task in this batch` });
+      }
+      resolved = { index };
+    }
+    if (resolved === null) {
+      throw new ApiError("INVALID_REQUEST", {
+        detail: mode === "one"
+          ? `after[${j}] is a task number or a task_id of this SPACE`
+          : `${at}: after[${j}] is a task number, a task_id or the key of an earlier task`,
+      });
+    }
+    // A SPACE being made holds no task before the call: its tasks name each other by key.
+    if (mode === "create" && !("index" in resolved)) {
+      throw new ApiError("INVALID_REQUEST", { detail: `${at}: in a create, after takes only the key of an earlier task` });
+    }
+    const same = JSON.stringify(resolved);
+    if (!seen.has(same)) {
+      seen.add(same);
+      out.push(resolved);
+    }
+  }
+  return out;
+}
+
+/** A task, as add_tasks() takes it, from fields already read. */
+function taskInput(key: string | undefined, title: string, body: string, tag: string | null, after: AfterEntry[]): TaskInput {
+  return { ...(key === undefined ? {} : { key }), title, body, ...(tag === null ? {} : { tag }), after };
+}
+
+/** One task of an add without tasks: title, body, tag and after. A key is refused. */
+export function readOneTask(input: Record<string, unknown>): TaskInput {
+  const title = requireTaskTitle(input.title);
+  const body = optionalTaskBody(input.body);
+  const tag = optionalTaskTag(input.tag);
+  if (input.key !== undefined && input.key !== null) {
+    throw new ApiError("INVALID_REQUEST", { detail: "key names a task within tasks: a single add takes none" });
+  }
+  return taskInput(undefined, title, body, tag, taskAfter(input.after, "", null, "one"));
+}
+
+/**
+ * A batch: 1 to TASK_LIMITS.batch tasks, each read as a single add reads one, plus an
+ * optional key, which a later task's after may name. A refusal names the task it is about,
+ * as tasks[i], and its key when it carries a good one. Mode create takes keys only in after.
+ */
+export function readTaskBatch(value: unknown, mode: "add" | "create"): TaskInput[] {
+  if (!Array.isArray(value) || value.length < 1 || value.length > TASK_LIMITS.batch) {
+    throw new ApiError("INVALID_REQUEST", { detail: `tasks is a list of 1 to ${TASK_LIMITS.batch} tasks` });
+  }
+  const keyed = new Map<string, number>();
+  const out: TaskInput[] = [];
+  for (const [i, item] of value.entries()) {
+    if (typeof item !== "object" || item === null || Array.isArray(item)) {
+      throw new ApiError("INVALID_REQUEST", { detail: `tasks[${i}] is an object with a title` });
+    }
+    const task = item as Record<string, unknown>;
+    const named = typeof task.key === "string" && TASK_KEY.test(task.key) && !UUID.test(task.key) ? ` (${task.key})` : "";
+    const at = `tasks[${i}]${named}`;
+    const within = <T>(read: () => T): T => {
+      try {
+        return read();
+      } catch (error) {
+        if (error instanceof ApiError && error.detail !== undefined) throw new ApiError(error.code, { detail: `${at}: ${error.detail}` });
+        throw error;
+      }
+    };
+    const title = within(() => requireTaskTitle(task.title));
+    const body = within(() => optionalTaskBody(task.body));
+    const tag = within(() => optionalTaskTag(task.tag));
+    const key = taskKey(task.key, `tasks[${i}]`);
+    if (key !== undefined && keyed.has(key)) {
+      throw new ApiError("INVALID_REQUEST", { detail: `${at}: key ${key} is already the key of tasks[${keyed.get(key)}]: each key once in a batch` });
+    }
+    const after = taskAfter(task.after, at, keyed, mode);
+    if (key !== undefined) keyed.set(key, i);
+    out.push(taskInput(key, title, body, tag, after));
+  }
+  return out;
+}
+
+// ── a ready SPACE in one call ──────────────────────────────────────────────
+
+/** A member a create sets: its position as sent, its KEY, a role below owner and its tags. */
+export type CreateMember = { index: number; peer: Buffer; hex: string; role: string; tags: string[] | null };
+
+/**
+ * members in a create: up to CREATE_MEMBERS KEYS, each with peer_id, role and tags, each
+ * KEY once and never the caller, each read as PUT /v1/spaces/{name}/members/{peer} reads
+ * one. A refusal names the member as members[i].
+ */
+export function readCreateMembers(value: unknown, caller: string): CreateMember[] {
+  const detail = `members is a list of up to ${CREATE_MEMBERS} KEYS, each with peer_id, role and tags`;
+  if (!Array.isArray(value) || value.length > CREATE_MEMBERS) throw new ApiError("INVALID_REQUEST", { detail });
+  const out: CreateMember[] = [];
+  for (const [i, item] of value.entries()) {
+    if (typeof item !== "object" || item === null || Array.isArray(item) ||
+        Object.keys(item).some((k) => k !== "peer_id" && k !== "role" && k !== "tags")) {
+      throw new ApiError("INVALID_REQUEST", { detail });
+    }
+    const m = item as Record<string, unknown>;
+    const at = `members[${i}]`;
+    if (typeof m.peer_id !== "string" || m.peer_id.length !== 64 || !HEX_ONLY.test(m.peer_id)) {
+      throw new ApiError("INVALID_REQUEST", { detail: `${at}: peer_id is 64 lowercase hex characters` });
+    }
+    const hex = m.peer_id;
+    if (typeof m.role !== "string" || !(ROLES as readonly string[]).includes(m.role)) throw new ApiError("INVALID_ROLE", { detail: at });
+    let tags: string[] | null;
+    try {
+      tags = requireTags(m.tags);
+    } catch (error) {
+      if (error instanceof ApiError) throw new ApiError(error.code, { detail: error.detail === undefined ? at : `${at}: ${error.detail}` });
+      throw error;
+    }
+    const first = out.findIndex((o) => o.hex === hex);
+    if (first >= 0) {
+      throw new ApiError("INVALID_REQUEST", { detail: `${at}: peer_id is already the peer_id of members[${first}]: each KEY once` });
+    }
+    if (hex === caller) throw new ApiError("OWNER_IS_NOT_A_MEMBER", { detail: at });
+    out.push({ index: i, peer: Buffer.from(hex, "hex"), hex, role: m.role, tags });
+  }
+  return out;
+}
+
+/** The document's first version, as a create carries it. */
+export type CreateVersion = { title: string | null; body: string; data: Record<string, unknown> | null; fingerprints: Fingerprint[] };
+
+/**
+ * version in a create: title and body, and data and fingerprints read as a version POST
+ * reads them, with the same refusals. A refusal names its field as version.<field>.
+ */
+export function readCreateVersion(value: unknown): CreateVersion {
+  const fields = ["title", "body", "data", "fingerprints"];
+  if (typeof value !== "object" || value === null || Array.isArray(value) || Object.keys(value).some((k) => !fields.includes(k))) {
+    throw new ApiError("INVALID_REQUEST", { detail: "version takes title, body, data and fingerprints" });
+  }
+  const v = value as Record<string, unknown>;
+  const within = <T>(field: string, read: () => T): T => {
+    try {
+      return read();
+    } catch (error) {
+      if (!(error instanceof ApiError)) throw error;
+      const detail = error.detail === undefined ? field : error.detail.startsWith(field) ? error.detail : `${field}: ${error.detail}`;
+      throw new ApiError(error.code, { detail: `version.${detail}` });
+    }
+  };
+  const title = within("title", () => optionalString(v.title, "title", 512));
+  if (v.body === undefined || v.body === null || v.body === "") {
+    throw new ApiError("INVALID_REQUEST", { detail: "version.body is the text of the document" });
+  }
+  const body = within("body", () => optionalBody(v.body))!;
+  const data = within("data", () => requireData(v.data));
+  // Its data.stage, read as a version POST's is, sets the SPACE's stage once it is current.
+  within("data", () => requireStage("version", data));
+  // A SPACE being made holds no post, and a post cannot cite itself: any source would be
+  // refused inside the transaction, after every allowance is spent. Refused here instead,
+  // as append_post() names it.
+  if (Array.isArray(data?.sources) && data.sources.length > 0) {
+    throw new ApiError("SOURCE_NOT_FOUND", { detail: `version: ${String(data.sources[0])}` });
+  }
+  const fingerprints = within("fingerprints", () => requireFingerprints(v.fingerprints));
+  return { title, body, data, fingerprints };
 }
 
 /** Why a check said what it said: 1 to 500 characters, required on a reject. */

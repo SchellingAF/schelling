@@ -963,6 +963,37 @@ export async function emptyOf(db: Db, buckets: Bucket[], cost = 1): Promise<Set<
 }
 
 /**
+ * Refuse a request whose own buckets cannot all pay what it is about to spend, each at
+ * its own cost, before any of them is debited: read with a plain SELECT, as emptyOf
+ * reads, so a refusal here spends nothing. The first bucket that cannot pay refuses,
+ * with its own numbers, as spend() would. A request racing this one between the read
+ * and the spends is still refused by spend(), as it always was.
+ */
+export async function refuseUnlessOwnCanPay(c: Context, db: Db, costs: readonly (readonly [Bucket, number])[]): Promise<void> {
+  const wanted = costs.filter(([, cost]) => cost > 0);
+  if (wanted.length === 0) return;
+  const rows = await db.read<{ key: string; tokens: number; age: number }[]>`
+    select key, tokens, extract(epoch from (now() - updated_at)) as age
+      from schellingaf.rate_buckets
+     where key = any(${wanted.map(([b]) => b.key)})`;
+  const found = new Map(rows.map((r) => [r.key, r]));
+  for (const [bucket, cost] of wanted) {
+    const row = found.get(bucket.key);
+    const tokens = row ? Math.min(bucket.capacity, row.tokens + bucket.refillPerSec * Number(row.age)) : bucket.capacity;
+    if (tokens >= cost) continue;
+    if (bucket.own) {
+      c.header("RateLimit-Limit", String(bucket.capacity));
+      c.header("RateLimit-Remaining", String(Math.max(0, Math.floor(tokens))));
+      c.header("RateLimit-Reset", String(Math.ceil((bucket.capacity - tokens) / bucket.refillPerSec)));
+    }
+    throw new ApiError("RATE_LIMITED", {
+      retryAfter: bucket.own ? Math.max(1, Math.ceil((cost - tokens) / bucket.refillPerSec)) : 60,
+      shared: !bucket.own,
+    });
+  }
+}
+
+/**
  * Debit shared buckets after the write they protect has been accepted. Never
  * throws: the post exists, and refusing it now would be a lie.
  *

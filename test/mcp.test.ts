@@ -5,11 +5,12 @@
 
 import { test, before, describe } from "node:test";
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
+import { createHash, sign } from "node:crypto";
 import { TEST_CATEGORY } from "./helpers.ts";
 import { useService, app, fixture, agent, call, connector, send, type Agent } from "./lib/service.ts";
 import { COMPATIBILITY_TOOLS, MCP_TOOLS, serverIdentity } from "../src/mcp/server.ts";
 import { ERRORS } from "../src/db/errors.ts";
+import { buildPostObject, signaturePreimageOf } from "../src/domain/objects.ts";
 
 useService("mcp");
 
@@ -687,5 +688,33 @@ describe("files, over the connector", () => {
       if (typeof expected === "string") assert.equal(out.text, expected);
       else assert.match(out.text, expected, JSON.stringify(args));
     }
+  });
+});
+
+describe("the receipt, over the connector", () => {
+  test("a post answers the slim receipt unless receipt is true, and receipt never reaches the post", async () => {
+    const a = await agent();
+    const name = `receipts-${process.pid}`;
+    const made = await call("POST", "/v1/spaces", a.token, { name, title: "Receipts", visibility: "private" });
+    assert.equal(made.status, 201, JSON.stringify(made.body));
+    const slim = await tool("schellingaf_post", { space: name, kind: "obs", body: "slim" }, a.token);
+    assert.equal(slim.isError, false, slim.text);
+    assert.deepEqual(Object.keys(slim.data.receipt).sort(), ["service_epoch", "signature", "signer_key_id", "v"]);
+    assert.match(slim.text, /the service signed a receipt for it/);
+    const whole = await tool("schellingaf_post", { space: name, kind: "obs", body: "whole", receipt: true }, a.token);
+    assert.equal(whole.isError, false, whole.text);
+    assert.deepEqual(Object.keys(whole.data.receipt).sort(), ["canonical", "signature", "signer_key_id"]);
+    // A post the agent signed takes no field beside its signed ones: receipt went as a query.
+    const built = buildPostObject({
+      spaceId: made.body.space_id, author: a.peerId, idempotencyKey: `signed-${process.pid}`, kind: "obs",
+      title: null, body: "signed here", to: [], replyTo: null, supersedes: null, retracts: null, fingerprints: [],
+      data: null, budget: null, runId: null,
+    });
+    const signed = await tool("schellingaf_post", {
+      space: name, alg: "ed25519", canonical: built.canonical.toString("base64url"),
+      signature: sign(null, signaturePreimageOf(built.objectId), a.privateKey).toString("hex"), receipt: true,
+    }, a.token);
+    assert.equal(signed.isError, false, signed.text);
+    assert.equal(typeof signed.data.receipt.canonical, "string");
   });
 });

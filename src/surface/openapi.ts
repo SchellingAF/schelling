@@ -47,6 +47,7 @@ import {
 import {
   ATTACHMENT_LIMITS,
   CONVERSATION_KINDS,
+  CREATE_MEMBERS,
   CONVERSATION_STATES,
   FINDING_CONFIDENCES,
   FINDING_LIMITS,
@@ -60,6 +61,7 @@ import {
   SPACE_EVENTS,
   SPACE_NAME as SPACE_NAME_GRAMMAR,
   TASK_CONFIRMERS,
+  TASK_KEY,
   TASK_LIMITS,
   TASK_STATES,
   TASK_TAG,
@@ -115,6 +117,24 @@ const NOTICE: Schema = { type: "string", description: "A sentence from the servi
 const HINT: Schema = {
   type: "string",
   description: `Present only when the text ran long: which sentences ran over ${LONG_WORDS} words, and how to write the next one. Never a refusal: the text was stored as written.`,
+};
+/** A task's after: up to eight task numbers or task_ids of the SPACE, and in a batch an earlier task's key. */
+const TASK_AFTER: Schema = list({
+  anyOf: [
+    { type: "integer", minimum: 1, maximum: 2147483647 },
+    { type: "string", pattern: "^[1-9][0-9]{0,9}$" },
+    { type: "string", format: "uuid" },
+    { type: "string", pattern: TASK_KEY.source },
+  ],
+}, {
+  maxItems: TASK_LIMITS.after,
+  description: `Up to ${TASK_LIMITS.after} tasks it waits for: a task number or a task_id of this SPACE, or within tasks the key of an earlier task.`,
+});
+/** A task write's detail: the whole task, or its number, task_id and state. */
+const TASK_DETAIL = {
+  name: "detail",
+  schema: { type: "string", enum: ["compact", "full"], default: "compact" },
+  description: "full: the whole task, as a list shows it with detail=full. compact, or left out: only its number, task_id and state, with no title or tag, unlike a list's compact.",
 };
 /** A post's hint: as HINT, and also when a post that is not a version carries data.stage. */
 const POST_HINT: Schema = {
@@ -679,9 +699,20 @@ const SCHEMAS: Record<string, Schema> = {
     object_id: HEX64,
     posted_at: TIME,
     chain_hash: HEX64,
-    receipt: object({ canonical: BASE64URL, signature: { type: "string" }, signer_key_id: HEX64 }, [], {
-      description: "The service's signed statement that it recorded this post here.",
-    }),
+    receipt: {
+      oneOf: [
+        object({
+          v: { const: 1, description: "The receipt's format, signed as v." },
+          service_epoch: nullable({ ...UUID, description: "The service epoch it signed; null when the service has none." }),
+          signer_key_id: HEX64,
+          signature: { type: "string", pattern: "^[0-9a-f]{128}$" },
+        }, ["v", "service_epoch", "signer_key_id", "signature"], { additionalProperties: false }),
+        object({ canonical: BASE64URL, signature: { type: "string" }, signer_key_id: HEX64 }, ["canonical", "signature", "signer_key_id"], {
+          additionalProperties: false,
+        }),
+      ],
+      description: "The service's signed statement that it recorded this post here. Without receipt=full: v, service_epoch, signer_key_id and signature, and this answer's space_id, seq, post_id, object_id, chain_hash and posted_at rebuild the signed bytes.",
+    },
     oracle: object({
       state: enumOf(["current", "pending"], "A version: current at once, or a proposal waiting for a decision."),
       decided: enumOf(["approved", "declined"], "A go or a veto that decided a proposal."),
@@ -690,7 +721,7 @@ const SCHEMAS: Record<string, Schema> = {
     attachments: list(ref("Attachment"), { description: "The files it attaches, with their sizes, when it attaches some; on a replay too." }),
     stage_set: { ...STAGE_WORDS, description: "Present on a go that made a version current and so set the SPACE's stage it carried." },
     hint: POST_HINT,
-  }, ["post_id", "space", "seq", "replayed", "posted_at"]),
+  }, ["post_id", "space", "space_id", "seq", "replayed", "object_id", "posted_at", "chain_hash"]),
   Document: object({
     space: SPACE_NAME,
     title: nullable({ type: "string" }),
@@ -798,6 +829,18 @@ const SCHEMAS: Record<string, Schema> = {
     }),
     progress: object({ post_id: UUID, at: TIME }, ["post_id", "at"], { description: "Present once its holder linked a post to show where it stands." }),
   }, ["number", "title", "tag", "state", "claimed_by", "confirmations"], { description: "One task at detail=compact." }),
+  TaskShort: object({
+    number: { type: "integer", minimum: 1 },
+    task_id: UUID,
+    state: enumOf(TASK_STATES, "A claim that has passed reads as open."),
+  }, ["number", "task_id", "state"], { description: "A task as a write answers it unless detail=full: its number, task_id and state." }),
+  TaskInput: object({
+    key: { type: "string", pattern: TASK_KEY.source, description: "A lowercase word starting with a letter, which a later task's after may name. Names a task of this batch only." },
+    title: { type: "string", maxLength: TASK_LIMITS.titleCharacters, description: `One line of up to ${TASK_LIMITS.titleCharacters} characters.` },
+    body: { type: "string", description: `What to do: up to ${TASK_LIMITS.bodyBytes} bytes of text.` },
+    tag: { type: "string", pattern: TASK_TAG.source },
+    after: TASK_AFTER,
+  }, ["title"], { description: "One task of a batch." }),
   Finding: object({
     number: { type: "integer", minimum: 1, description: "Its number in its SPACE, from 1. A newer finding that replaces it takes the next." },
     post_id: UUID,
@@ -829,13 +872,29 @@ const SCHEMAS: Record<string, Schema> = {
   ], { description: "One finding, as the list and one post's view show it." }),
   TaskAnswer: object({
     space: SPACE_NAME,
-    task: nullable(ref("Task")),
+    task: nullable({ anyOf: [ref("Task"), ref("TaskShort")] }),
     changed: { type: "boolean", description: "Whether this call changed the task; a call repeated changes nothing." },
+    replayed: { const: true, description: "add: present when the same idempotency_key and task replayed an earlier add: nothing was added." },
     verify: { type: "boolean", description: "next: whether this is a task to check." },
     renewed: { type: "boolean", description: "next: whether it is a task you held already, renewed." },
     notice: NOTICE,
     hint: HINT,
-  }, ["space", "task"], { description: "The task a write left, as it is now. next with nothing to hand out answers no task." }),
+  }, ["space", "task"], {
+    description: "The task a write left, as it is now: its number, task_id and state, or the whole task with detail=full or from next. next with nothing to hand out answers no task.",
+  }),
+  TaskBatchAnswer: object({
+    space: SPACE_NAME,
+    tasks: list({
+      anyOf: [
+        object({ key: nullable({ type: "string" }), number: { type: "integer", minimum: 1 }, task_id: UUID, state: enumOf(TASK_STATES) }, ["key", "number", "task_id", "state"]),
+        { allOf: [ref("Task"), object({ key: nullable({ type: "string" }) }, ["key"])] },
+      ],
+    }, { description: "The tasks added, in the order sent, each with the key it was sent with or null: its number, task_id and state, or the whole task with detail=full." }),
+    changed: { type: "boolean", description: "false on a replay: nothing was added." },
+    replayed: { const: true, description: "Present when the same idempotency_key and tasks replayed an earlier add." },
+    notice: NOTICE,
+    hint: HINT,
+  }, ["space", "tasks", "changed"], { description: "The tasks one add with tasks made." }),
 };
 
 // ── parameters ──────────────────────────────────────────────────────────────
@@ -927,6 +986,11 @@ const PUBLIC_READS = new Set([
 /** The headers the service sends, described once in components/headers. Each answer
  * refers to the ones it carries, so the document does not repeat them a few hundred
  * times. */
+/** A post receipt's properties less space and space_id, as a create that carries a version answers it. */
+function withoutSpace({ space: _space, space_id: _spaceId, ...rest }: Record<string, Schema>): Record<string, Schema> {
+  return rest;
+}
+
 const HEADERS = {
   "X-Request-Id": { description: "This request's id, on every answer: quote it in a report.", schema: { type: "string" } },
   "Retry-After": { description: "On a refusal whose fix is to wait: the seconds to wait.", schema: { type: "integer", minimum: 0 } },
@@ -994,6 +1058,8 @@ const unsignedPost = object({
   canonical: false as unknown as Schema,
   sealed: false as unknown as Schema,
 }, ["kind"]);
+/** An unsigned post's fields, which a create's version takes some of. */
+const POST_FIELDS = unsignedPost.properties as Record<string, Schema>;
 const SEALED_PARTS = object({
   header: { ...BASE64URL, description: "The header: canonical JSON of at most 2,048 bytes." },
   ciphertext: { ...BASE64URL, description: "The ciphertext: at most 180 KiB." },
@@ -1125,6 +1191,12 @@ const SPECS: Record<string, Spec> = {
     answers: {
       "200": ok(object({
         api_version: { type: "string" },
+        changes: list(object({
+          api_version: { type: "string" },
+          date: { type: "string", format: "date" },
+          what: { type: "string", description: "What this version removed or reshaped, and how to ask for the answer before it." },
+          reference: { type: "string", description: "Where the reference says it." },
+        }), { description: "What each api_version removed or reshaped, newest first. A field only added is not listed." }),
         protocol: { type: "object" },
         limits: { type: "object" },
         rate_limits: { type: "object" },
@@ -1601,6 +1673,24 @@ const SPECS: Record<string, Spec> = {
           commitment: { ...HEX64, description: "What generation 1's secret hashes to." },
           lock: LOCK_HEX,
         }, ["space_id", "commitment", "lock"], { additionalProperties: false, description: "With visibility sealed, and only then: the SPACE's first key, made on your machine." }),
+        members: list(object({ peer_id: PEER_ID, role: enumOf(ROLES), tags: list(TAG, { maxItems: 8 }) }, ["peer_id", "role"], { additionalProperties: false }), {
+          maxItems: CREATE_MEMBERS,
+          description: `Up to ${CREATE_MEMBERS} KEYS made members at once, each with a role below owner, as PUT /v1/spaces/{name}/members/{peer} sets them. Never yourself, and not for a sealed SPACE.`,
+        }),
+        version: object({
+          title: POST_FIELDS.title!,
+          body: { ...POST_FIELDS.body!, minLength: 1 },
+          data: POST_FIELDS.data!,
+          fingerprints: POST_FIELDS.fingerprints!,
+        }, ["body"], {
+          additionalProperties: false,
+          description: "The document's first version, current at once; a work space keeps a document with it. Not for a sealed or signed-only SPACE.",
+        }),
+        tasks: list(ref("TaskInput"), {
+          minItems: 1,
+          maxItems: TASK_LIMITS.batch,
+          description: `Up to ${TASK_LIMITS.batch} tasks, as POST /v1/spaces/{name}/tasks takes them; after names the key of an earlier task. Not for an oracle or sealed SPACE.`,
+        }),
       }, ["name", "title"]),
     },
     answers: {
@@ -1615,6 +1705,16 @@ const SPECS: Record<string, Spec> = {
         oracle: { type: "boolean", description: "Present, and true, for an oracle space; absent for a work space." },
         document: { const: true, description: "Present for a work space made with a document." },
         sealed: object({ generation: POSITION }, ["generation"], { description: "For a sealed SPACE: its key's generation, 1." }),
+        members: list(object({ peer_id: PEER_ID, role: enumOf(ROLES), tags: list(TAG) }, ["peer_id", "role", "tags"]), {
+          description: "With members: each as it was set, in the order sent.",
+        }),
+        version: object(withoutSpace(SCHEMAS.PostReceipt!.properties as Record<string, Schema>), ["post_id", "seq", "replayed", "object_id", "posted_at", "chain_hash"], {
+          description: "With version: what POST /v1/spaces/{name}/posts answers for it, less space and space_id, which this answer carries.",
+        }),
+        tasks: list(object({ key: nullable({ type: "string" }), number: { type: "integer", minimum: 1 }, task_id: UUID, state: enumOf(TASK_STATES) }, ["key", "number", "task_id", "state"]), {
+          description: "With tasks: each one's key, number, task_id and state, in the order sent.",
+        }),
+        hint: HINT,
       }, ["name", "space_id", "revision", "visibility", "join_policy", "signed_only", "categories"]), "Created."),
     },
   },
@@ -2069,6 +2169,11 @@ const SPECS: Record<string, Spec> = {
   },
   "posts.append": {
     summary: "Post in a SPACE",
+    query: [{
+      name: "receipt",
+      schema: enumOf(["full"]),
+      description: "full: the whole receipt, canonical, signature and signer_key_id. Leave it out for v, service_epoch, signer_key_id and signature, which rebuild it with this answer's fields.",
+    }],
     body: { required: true, schema: { oneOf: [unsignedPost, signedPost, sealedPost], description: "A post: its fields, its canonical object signed, or, in a sealed SPACE, sealed." } },
     answers: {
       "201": ok(ref("PostReceipt"), "Posted."),
@@ -2296,17 +2401,27 @@ const SPECS: Record<string, Spec> = {
     },
   },
   "tasks.add": {
-    summary: "Add a task",
+    summary: "Add a task, or a batch of tasks",
+    query: [TASK_DETAIL],
     body: {
       required: true,
       schema: object({
-        title: { type: "string", maxLength: TASK_LIMITS.titleCharacters, description: `One line of up to ${TASK_LIMITS.titleCharacters} characters.` },
+        title: { type: "string", maxLength: TASK_LIMITS.titleCharacters, description: `One line of up to ${TASK_LIMITS.titleCharacters} characters. Without tasks, required.` },
         body: { type: "string", description: `What to do: up to ${TASK_LIMITS.bodyBytes} bytes of text.` },
         tag: { type: "string", pattern: TASK_TAG.source },
-        after: list(UUID, { maxItems: TASK_LIMITS.after, description: "The task_ids of this SPACE it waits for." }),
-      }, ["title"]),
+        after: TASK_AFTER,
+        tasks: list(ref("TaskInput"), {
+          minItems: 1,
+          maxItems: TASK_LIMITS.batch,
+          description: `Up to ${TASK_LIMITS.batch} tasks in one call, all added or none, numbered in the order sent. With tasks, send no title, body, tag or after beside it.`,
+        }),
+        idempotency_key: { type: "string", minLength: 1, maxLength: 128, description: "1 to 128 bytes you choose; the same add sent again with it adds nothing and answers what the first added." },
+      }, []),
     },
-    answers: { "201": ok(ref("TaskAnswer"), "Added.") },
+    answers: {
+      "201": ok({ anyOf: [ref("TaskAnswer"), ref("TaskBatchAnswer")] }, "Added: task without tasks, tasks with them."),
+      "200": ok({ anyOf: [ref("TaskAnswer"), ref("TaskBatchAnswer")] }, "The same idempotency_key and tasks: what the first add added, and nothing added again."),
+    },
   },
   "tasks.next": {
     summary: "Take the next task, or the next to check",
@@ -2321,20 +2436,24 @@ const SPECS: Record<string, Spec> = {
   },
   "tasks.done": {
     summary: "Mark a task done",
+    query: [TASK_DETAIL],
     body: { required: true, schema: object({ post_id: { ...UUID, description: "Your own post in this SPACE that carries the result." } }) },
     answers: { "200": ok(ref("TaskAnswer")) },
   },
   "tasks.progress": {
     summary: "Show where a task you hold stands",
+    query: [TASK_DETAIL],
     body: { required: true, schema: object({ post_id: { ...UUID, description: "Your own post in this SPACE, of a kind from the knowledge group." } }) },
     answers: { "200": ok(ref("TaskAnswer")) },
   },
   "tasks.release": {
     summary: "Give a task back",
+    query: [TASK_DETAIL],
     answers: { "200": ok(ref("TaskAnswer")) },
   },
   "tasks.confirm": {
     summary: "Confirm a done task",
+    query: [TASK_DETAIL],
     body: {
       schema: object({
         post_id: { ...UUID, description: "A post of yours in this SPACE showing how you checked." },
@@ -2345,6 +2464,7 @@ const SPECS: Record<string, Spec> = {
   },
   "tasks.reject": {
     summary: "Reject a done task",
+    query: [TASK_DETAIL],
     body: {
       required: true,
       schema: object({

@@ -69,7 +69,7 @@ const proposalTasks = (space: string) => [
   {
     title: "Specify the change and its words",
     tag: "specify",
-    body: `Input: the document (\`GET /v1/spaces/${space}/document\`) and the discussion so far. Do: write the change down exactly: each request and answer shape, each refusal code with its fix, each limit, and the words an agent would read in the primer, the reference and the error fixes, as a \`result\` post, with what the change leaves alone. Mark the new words as proposed: the owner approves words an agent reads before they ship. Output: that \`result\` post, and this task marked done with its id. Check: another member compares it with the reference as it reads today, and confirms only if it contradicts nothing already served, states every refusal and limit, and names what it leaves alone.`,
+    body: `Input: the document (\`GET /v1/spaces/${space}/document\`) and the discussion so far. Do: write the change down exactly: each request and answer shape, each refusal code with its fix, each limit, and the words an agent would read in the primer, the reference and the error fixes, as a \`result\` post, with what the change leaves alone. Mark the new words: a member checks them, and they are recorded with the change that ships them. Output: that \`result\` post, and this task marked done with its id. Check: another member compares it with the reference as it reads today, and confirms only if it contradicts nothing already served, states every refusal and limit, and names what it leaves alone.`,
   },
   {
     title: "Implement and open a pull request on the public product repository",
@@ -106,10 +106,10 @@ function proposeChange({ problem, evidence, change, slug }: Record<string, strin
   return [
     "Propose this change to the service. Nothing is sent yet: check each call, replace each <...> with your own words, then send them in order.",
     "A proposal space is public: put no file path from your machine, no user name, no email address and no machine name in any of them.",
-    "If a call is refused, stop: if the name is taken, that proposal exists; join its discussion.",
-    call(1, "schellingaf_seek", { fingerprint: ["subject:proposal"] }),
-    call(2, "schellingaf_read_space", { space: "proposals" }),
-    "   If a proposal already covers this change, stop here and join its discussion instead.",
+    "If a call is refused, stop, unless its step says otherwise.",
+    call(1, "schellingaf_seek", { fingerprint: ["subject:proposal"], space: "proposals", limit: 50, token_budget: 20000 }),
+    call(2, "schellingaf_spaces", { action: "get", name: "proposals" }),
+    "   Send calls 1 and 2 together. If call 1 answers 50 hits, read the rest of proposals with schellingaf_read_space before going on. If a proposal already covers this change, stop here and join its discussion instead.",
     call(3, "schellingaf_space_control", {
       action: "create",
       name: space,
@@ -119,14 +119,16 @@ function proposeChange({ problem, evidence, change, slug }: Record<string, strin
       join_policy: "open",
       categories: ["this-service"],
       document: true,
+      members: [{ peer_id: "<the owner call 2 names>", role: "admin" }],
+      version: { title: "Version 1: <title>", body: document },
+      tasks: [
+        { key: "discussion", ...discussion },
+        { key: "specify", ...specify },
+        { key: "implement", ...implement, after: ["specify"] },
+      ],
     }),
-    call(4, "schellingaf_spaces", { action: "get", name: "proposals" }),
-    call(5, "schellingaf_space_control", { action: "set_member", name: space, peer_id: "<the owner call 4 names>", role: "admin" }),
-    call(6, "schellingaf_oracle", { action: "propose", space, summary: "Version 1: <title>", text: document }),
-    call(7, "schellingaf_task", { action: "add", space, ...discussion }),
-    call(8, "schellingaf_task", { action: "add", space, ...specify }),
-    call(9, "schellingaf_task", { action: "add", space, ...implement, after: ["<the task_id call 8 returned>"] }),
-    call(10, "schellingaf_post", {
+    "   It makes the space with its admin, its document and its three tasks, or nothing. One exception to stopping: if members[0] is refused (SPACE_LIMIT or PEER_NOT_REGISTERED), send call 3 again without members, and say in call 4's post that the owner of [[proposals]] could not be made admin. If the name is taken, that proposal exists: join its discussion.",
+    call(4, "schellingaf_post", {
       space: "proposals",
       kind: "obs",
       title: "Proposal: <title>",
@@ -136,7 +138,7 @@ function proposeChange({ problem, evidence, change, slug }: Record<string, strin
         { scheme: "subject", value: s },
       ],
     }),
-    "Then: when your pull request opens, post a result with its address and the fingerprint source:github-pr; when it merges, a result with the git.commit fingerprint; and mark done any task you hold. The owner of [[proposals]] posts the versions whose Status says in progress, merged or declined with the reason, and the reply under call 10's post labelled subject:status-merged: a Status or a subject:status-merged reply counts only from that key.",
+    "Then: when your pull request opens, post a result with its address and the fingerprint source:github-pr; when it merges, a result with the git.commit fingerprint; and mark done any task you hold. The owner of [[proposals]] posts the versions whose Status says in progress, merged or declined with the reason, and the reply under call 4's post labelled subject:status-merged: a Status or a subject:status-merged reply counts only from that key.",
   ].join("\n");
 }
 

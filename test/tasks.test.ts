@@ -36,8 +36,10 @@ async function grant(owner: Agent, name: string, who: Agent, role: string) {
   assert.equal(out.status, 200, JSON.stringify(out.body));
 }
 
+/** A write's whole task, as these tests read it: without detail=full a write answers only
+ *  the task's number, task_id and state ("short answers to task writes" below). */
 async function add(who: Agent, name: string, fields: Record<string, unknown> = {}) {
-  return call("POST", `/v1/spaces/${name}/tasks`, who.token, { title: "Transcribe page 3", ...fields });
+  return call("POST", `/v1/spaces/${name}/tasks?detail=full`, who.token, { title: "Transcribe page 3", ...fields });
 }
 
 async function added(who: Agent, name: string, fields: Record<string, unknown> = {}) {
@@ -68,7 +70,7 @@ async function posted(who: Agent, name: string, kind = "progress", title = "On b
 }
 
 async function act(who: Agent, name: string, number: number, action: string, fields: Record<string, unknown> = {}) {
-  return call("POST", `/v1/spaces/${name}/tasks/${number}/${action}`, who.token, fields);
+  return call("POST", `/v1/spaces/${name}/tasks/${number}/${action}?detail=full`, who.token, fields);
 }
 
 async function list(who: Agent | null, name: string, query = "") {
@@ -1073,6 +1075,343 @@ describe("the list", () => {
   });
 });
 
+describe("short answers to task writes", () => {
+  /** A write as an agent sends it: no detail unless one is given. */
+  const write = (who: Agent, path: string, fields: Record<string, unknown> = {}) => call("POST", path, who.token, fields);
+  const SHORT = ["number", "state", "task_id"];
+
+  /** The list's item for task n, read whole, as the reference says to read one. */
+  async function listed(name: string, n: number) {
+    const page = await list(null, name, `?before=${n + 1}&limit=1`);
+    assert.equal(page.status, 200, JSON.stringify(page.body));
+    return page.body.items[0];
+  }
+
+  test("add, done, confirm, reject and release answer the task's number, task_id and state, and next the whole task", async () => {
+    const { owner, a, b, c, name } = await crew();
+    const tasks = `/v1/spaces/${name}/tasks`;
+    const made = await write(owner, tasks, { title: "Transcribe page 3", body: "Type it out." });
+    assert.equal(made.status, 201, JSON.stringify(made.body));
+    assert.deepEqual(Object.keys(made.body.task).sort(), SHORT);
+    assert.deepEqual([made.body.task.number, made.body.task.state], [1, "open"]);
+    assert.equal(made.body.changed, true);
+    assert.match(made.body.notice, /PEER content/);
+    // A whole task is one read away.
+    assert.equal((await listed(name, 1)).task_id, made.body.task.task_id);
+
+    const taken = await next(a, name);
+    assert.equal(taken.body.task.body, "Type it out.", "next hands over the whole task, body included");
+    const done = await write(a, `${tasks}/1/done`, { post_id: await result(a, name) });
+    assert.equal(done.status, 200, JSON.stringify(done.body));
+    assert.deepEqual(Object.keys(done.body.task).sort(), SHORT);
+    assert.equal(done.body.task.state, "done");
+    for (const [who, action, fields] of [[b, "confirm", {}], [c, "reject", { reason: "Line 4 is missing." }]] as const) {
+      const out = await write(who, `${tasks}/1/${action}`, fields);
+      assert.equal(out.status, 200, JSON.stringify(out.body));
+      assert.deepEqual(Object.keys(out.body.task).sort(), SHORT, action);
+      assert.equal(typeof out.body.changed, "boolean");
+      assert.match(out.body.notice, /PEER content/);
+    }
+    await next(a, name);
+    const released = await write(a, `${tasks}/1/release`);
+    assert.equal(released.status, 200, JSON.stringify(released.body));
+    assert.deepEqual(released.body.task, { number: 1, task_id: made.body.task.task_id, state: "open" });
+    // compact is the short answer too, as the list names it.
+    const compact = await write(owner, `${tasks}?detail=compact`, { title: "Transcribe page 4" });
+    assert.deepEqual(Object.keys(compact.body.task).sort(), SHORT);
+  });
+
+  test("with detail=full each answers the whole task, as the list shows it", async () => {
+    const { owner, a, b, c, name } = await crew();
+    const tasks = `/v1/spaces/${name}/tasks`;
+    const full = async (who: Agent, path: string, fields: Record<string, unknown> = {}) => {
+      const out = await write(who, `${path}?detail=full`, fields);
+      assert.ok(out.status === 200 || out.status === 201, JSON.stringify(out.body));
+      assert.deepEqual(out.body.task, await listed(name, out.body.task.number));
+      return out.body.task;
+    };
+    assert.equal((await full(owner, tasks, { title: "Transcribe page 3", body: "Type it out." })).body, "Type it out.");
+    await next(a, name);
+    await full(a, `${tasks}/1/done`, { post_id: await result(a, name) });
+    await full(b, `${tasks}/1/confirm`);
+    await full(c, `${tasks}/1/reject`, { reason: "Line 4 is missing." });
+    await next(a, name);
+    await full(a, `${tasks}/1/release`);
+  });
+
+  test("a detail that is neither compact nor full is refused before anything is written", async () => {
+    const { owner, a, name } = await crew();
+    const tasks = `/v1/spaces/${name}/tasks`;
+    const refused = await write(owner, `${tasks}?detail=x`, { title: "Not added" });
+    assert.equal(refused.status, 400, JSON.stringify(refused.body));
+    assert.equal(refused.body.error.code, "INVALID_REQUEST");
+    assert.equal(refused.body.error.detail, "detail is compact or full");
+    assert.equal(refused.headers.get("RateLimit-Remaining"), null, "nothing was spent");
+    assert.deepEqual((await list(null, name)).body.items, []);
+    await added(owner, name);
+    await next(a, name);
+    const done = await write(a, `${tasks}/1/done?detail=x`, { post_id: await result(a, name) });
+    assert.equal(done.status, 400, JSON.stringify(done.body));
+    assert.equal(done.body.error.detail, "detail is compact or full");
+    assert.equal((await listed(name, 1)).state, "claimed", "the task is still claimed");
+  });
+
+  test("through the connector a write is one line, with no PEER text, and detail full is the whole task", async () => {
+    const { owner, a, name } = await crew();
+    const tool = async (args: Record<string, unknown>, who: Agent) =>
+      (await connector("tools/call", { name: "schellingaf_task", arguments: { space: name, ...args } }, who.token)).message.result;
+    const made = await tool({ action: "add", title: "Transcribe page 3", body: "Type it out." }, owner);
+    assert.notEqual(made.isError, true, made.content[0].text);
+    assert.match(made.content[0].text, /^task 1 in "[^"]+": open, task_id [0-9a-f-]{36}$/m);
+    assert.doesNotMatch(made.content[0].text, /<<<peer task body>>>/);
+    assert.deepEqual(Object.keys(made.structuredContent.task).sort(), SHORT);
+    const whole = await tool({ action: "add", title: "Transcribe page 4", body: "Type it out.", detail: "full" }, owner);
+    assert.match(whole.content[0].text, /<<<peer task body>>>\nType it out\.\n<<<end task body>>>/);
+
+    await next(a, name);
+    const done = await tool({ action: "done", number: 1, post_id: await result(a, name) }, a);
+    assert.notEqual(done.isError, true, done.content[0].text);
+    assert.match(done.content[0].text, /task 1 in "[^"]+": done, waiting for checks, task_id /);
+  });
+});
+
+/** The eleven tasks of proposal-many-spaces-at-once, as one batch: key, tag and the keys it waits for. */
+const ELEVEN: [key: string, tag: string, after: string[]][] = [
+  ["t1", "discussion", []], ["t2", "measure", []], ["t3", "specify", ["t1"]], ["t4", "specify", ["t1"]],
+  ["t5", "specify", ["t1"]], ["t6", "specify", ["t1"]], ["t7", "privacy", ["t3", "t4", "t5", "t6"]],
+  ["t8", "implement", ["t3", "t7"]], ["t9", "implement", ["t4", "t6", "t7"]], ["t10", "implement", ["t5", "t7"]],
+  ["t11", "measure", ["t2", "t8", "t9"]],
+];
+const eleven = () => ELEVEN.map(([key, tag, after]) => ({ key, title: `Task ${key}`, body: `Do ${key}.`, tag, ...(after.length ? { after } : {}) }));
+
+describe("tasks in a batch", () => {
+  const batch = (who: Agent, name: string, body: Record<string, unknown>, query = "") =>
+    call("POST", `/v1/spaces/${name}/tasks${query}`, who.token, body);
+  const count = async (name: string) => (await list(null, name, "?limit=200")).body.items.length;
+  const addsOf = async (name: string) => {
+    const [row] = await fixture.owner<{ n: number }[]>`
+      select count(*)::int as n from schellingaf.task_adds a join schellingaf.spaces s on s.space_id = a.space_id where s.name = ${name}`;
+    return row!.n;
+  };
+
+  test("eleven tasks in one call: numbered in the order sent, each waiting for the tasks its keys name", async () => {
+    const { owner, name } = await crew();
+    const out = await batch(owner, name, { tasks: eleven() });
+    assert.equal(out.status, 201, JSON.stringify(out.body));
+    assert.deepEqual(out.body.tasks.map((t: any) => [t.key, t.number, t.state]), ELEVEN.map(([key], i) => [key, i + 1, "open"]));
+    assert.deepEqual(Object.keys(out.body.tasks[0]).sort(), ["key", "number", "state", "task_id"]);
+    assert.equal(out.body.changed, true);
+    assert.match(out.body.notice, /PEER content/);
+    const idOf = new Map<string, string>(out.body.tasks.map((t: any) => [t.key, t.task_id]));
+    const items = (await list(null, name, "?limit=50")).body.items as any[];
+    for (const [key, tag, after] of ELEVEN) {
+      const t = items.find((i) => i.task_id === idOf.get(key))!;
+      assert.equal(t.tag, tag);
+      assert.deepEqual([...t.after].sort(), after.map((k) => idOf.get(k)!).sort(), key);
+    }
+    // detail=full answers every task whole, each with its key.
+    const whole = await batch(owner, name, { tasks: [{ key: "w", title: "Whole", body: "All of it." }, { title: "Keyless", after: ["w", 1] }] }, "?detail=full");
+    assert.equal(whole.status, 201, JSON.stringify(whole.body));
+    assert.deepEqual(whole.body.tasks.map((t: any) => [t.key, t.number, t.body]), [["w", 12, "All of it."], [null, 13, ""]]);
+    assert.deepEqual([...whole.body.tasks[1].after].sort(), [whole.body.tasks[0].task_id, idOf.get("t1")].sort());
+    // next hands out t1 first: it waits for nothing.
+    assert.equal((await next(owner, name)).body.task.number, 1);
+  });
+
+  test("a refused batch adds nothing, and the refusal names the task and the entry", async () => {
+    const { owner, name } = await crew();
+    const tasks = eleven();
+    tasks[10]!.after = ["t2", "t8", 99] as never;
+    const out = await batch(owner, name, { tasks, idempotency_key: "refused-1" });
+    assert.equal(out.status, 422, JSON.stringify(out.body));
+    assert.equal(out.body.error.code, "TASK_AFTER_INVALID");
+    assert.equal(out.body.error.detail, "tasks[10] (t11): after[2] 99");
+    assert.equal(await count(name), 0);
+    assert.equal(await addsOf(name), 0, "no idempotency row");
+    assert.equal((await added(owner, name)).number, 1, "the next add takes 1");
+    // A task_id of another SPACE names no task here either.
+    const other = await workSpace(owner);
+    const foreign = await added(owner, other);
+    const stray = await batch(owner, name, { tasks: [{ title: "x" }, { key: "k", title: "y", after: [foreign.task_id] }] });
+    assert.equal(stray.status, 422, JSON.stringify(stray.body));
+    assert.equal(stray.body.error.detail, `tasks[1] (k): after[0] ${foreign.task_id}`);
+    assert.equal(await count(name), 1);
+  });
+
+  test("keys and the shape of a batch are checked before anything is spent", async () => {
+    const { owner, name } = await crew();
+    for (const [body, detail] of [
+      [{ tasks: [{ key: "a", title: "x", after: ["b"] }, { key: "b", title: "y" }] }, "tasks[0] (a): after[0] b is the key of no earlier task in this batch"],
+      [{ tasks: [{ key: "a", title: "x", after: ["a"] }] }, "tasks[0] (a): after[0] a is the key of no earlier task in this batch"],
+      [{ tasks: [{ title: "x", after: ["zz"] }] }, "tasks[0]: after[0] zz is the key of no earlier task in this batch"],
+      [{ tasks: [{ key: "a", title: "x" }, { key: "a", title: "y" }] }, "tasks[1] (a): key a is already the key of tasks[0]: each key once in a batch"],
+      [{ tasks: [{ key: "abcdef01-2345-7000-8000-000000000000", title: "x" }] }, "tasks[0]: key is a lowercase word of up to 40 letters, digits, dots, hyphens and underscores, starting with a letter"],
+      [{ tasks: [{ key: "1a", title: "x" }] }, "tasks[0]: key is a lowercase word of up to 40 letters, digits, dots, hyphens and underscores, starting with a letter"],
+      [{ title: "x", key: "a" }, "key names a task within tasks: a single add takes none"],
+      [{ title: "x", tasks: [{ title: "y" }] }, "title belongs to one task: send it inside tasks, or send no tasks"],
+      [{ tasks: ["x"] }, "tasks[0] is an object with a title"],
+      [{ tasks: [{ title: "x" }, { key: "k", title: "" }] }, "tasks[1] (k): title is one line of 1 to 200 characters"],
+      [{ tasks: [{ key: "k", title: "x", after: [{}] }] }, "tasks[0] (k): after[0] is a task number, a task_id or the key of an earlier task"],
+      [{ title: "x", after: [0] }, "after[0] is a task number or a task_id of this SPACE"],
+      [{ title: "x", after: ["t1"] }, "after[0] is a task number or a task_id of this SPACE"],
+      [{ tasks: [] }, "tasks is a list of 1 to 20 tasks"],
+      [{ tasks: Array.from({ length: TASK_LIMITS.batch + 1 }, (_, i) => ({ title: `t${i}` })) }, "tasks is a list of 1 to 20 tasks"],
+      [{ tasks: [{ title: "x", after: Array.from({ length: TASK_LIMITS.after + 1 }, (_, i) => i + 1) }] }, "tasks[0]: after is a list of up to 8 tasks"],
+      [{ title: "x", after: Array.from({ length: TASK_LIMITS.after + 1 }, (_, i) => i + 1) }, "after is a list of up to 8 task numbers or task_ids of this SPACE"],
+      [{ title: "x", idempotency_key: "" }, "idempotency_key"],
+    ] as const) {
+      const out = await batch(owner, name, body as Record<string, unknown>);
+      assert.equal(out.status, 400, `${JSON.stringify(body).slice(0, 100)}: ${JSON.stringify(out.body)}`);
+      assert.equal(out.body.error.code, "INVALID_REQUEST");
+      assert.equal(out.body.error.detail, detail);
+      assert.equal(out.headers.get("RateLimit-Remaining"), null, `spent on ${detail}`);
+    }
+    assert.equal(await count(name), 0);
+  });
+
+  test("a single add takes a task number in after, as a number or as digits, and keeps the task_id", async () => {
+    const { owner, name } = await crew();
+    const first = await added(owner, name);
+    assert.deepEqual((await added(owner, name, { title: "Second", after: [1] })).after, [first.task_id]);
+    assert.deepEqual((await added(owner, name, { title: "Third", after: ["1", first.task_id] })).after, [first.task_id]);
+    const none = await add(owner, name, { after: [99] });
+    assert.equal(none.status, 422, JSON.stringify(none.body));
+    assert.equal(none.body.error.code, "TASK_AFTER_INVALID");
+    assert.equal(none.body.error.detail, "99");
+  });
+
+  test("a batch that does not fit under the SPACE's ceiling is refused whole", async () => {
+    const owner = await agent();
+    const name = await workSpace(owner);
+    const key = Buffer.from(owner.peerId, "hex");
+    const some = (n: number) => db.write`
+      select schellingaf.add_tasks(${name}, ${key}, ${db.write.json(Array.from({ length: n }, (_, i) => ({ title: `t${i}`, body: "", after: [] })))},
+                                   null, true, 3, ${TASK_LIMITS.batch})`;
+    await some(2);
+    await assert.rejects(some(2), /TASK_LIMIT/);
+    assert.equal(await count(name), 2, "nothing of the refused batch was added");
+    await some(1);
+    assert.equal(await count(name), 3);
+  });
+
+  test("a batch spends one write a task, all or nothing", async () => {
+    const { owner, name } = await crew();
+    await added(owner, name);
+    const bucket = `peer:${owner.peerId}`;
+    const tokens = async () => (await fixture.owner<{ tokens: number }[]>`select tokens from schellingaf.rate_buckets where key = ${bucket}`)[0]!.tokens;
+    const before = await tokens();
+    const twenty = Array.from({ length: TASK_LIMITS.batch }, (_, i) => ({ title: `Page ${i}` }));
+    const out = await batch(owner, name, { tasks: twenty });
+    assert.equal(out.status, 201, JSON.stringify(out.body));
+    const spent = before - (await tokens());
+    // Twenty, less what refilled in the milliseconds between, at half a write a second.
+    assert.ok(spent > 19.5 && spent <= 20, `spent ${spent}`);
+    assert.equal(Number(out.headers.get("RateLimit-Remaining")), Math.floor(await tokens()));
+    await fixture.setBucket(bucket, 19);
+    const short = await batch(owner, name, { tasks: twenty });
+    assert.equal(short.status, 429, JSON.stringify(short.body));
+    assert.equal(short.body.error.code, "RATE_LIMITED");
+    assert.equal(await count(name), 21, "nothing added");
+  });
+
+  test("an idempotency_key replays the first add and refuses other tasks under it", async () => {
+    const { owner, name } = await crew();
+    const first = await batch(owner, name, { tasks: eleven(), idempotency_key: "run-7-batch-1" });
+    assert.equal(first.status, 201, JSON.stringify(first.body));
+    const again = await batch(owner, name, { tasks: eleven(), idempotency_key: "run-7-batch-1" });
+    assert.equal(again.status, 200, JSON.stringify(again.body));
+    assert.equal(again.body.replayed, true);
+    assert.equal(again.body.changed, false);
+    assert.deepEqual(again.body.tasks, first.body.tasks, "the same tasks, as they stand now");
+    assert.equal(await count(name), 11, "added once");
+    const other = eleven();
+    other[0]!.title = "Another title";
+    const conflict = await batch(owner, name, { tasks: other, idempotency_key: "run-7-batch-1" });
+    assert.equal(conflict.status, 409, JSON.stringify(conflict.body));
+    assert.equal(conflict.body.error.code, "IDEMPOTENCY_CONFLICT");
+    assert.equal(await count(name), 11);
+
+    // One task, the same way; a number and its digits are the same request.
+    const one = await add(owner, name, { title: "One", after: [1], idempotency_key: "run-7-add-1" });
+    assert.equal(one.status, 201, JSON.stringify(one.body));
+    const oneAgain = await add(owner, name, { title: "One", after: ["1"], idempotency_key: "run-7-add-1" });
+    assert.equal(oneAgain.status, 200, JSON.stringify(oneAgain.body));
+    assert.equal(oneAgain.body.replayed, true);
+    assert.equal(oneAgain.body.task.task_id, one.body.task.task_id);
+    assert.equal(oneAgain.body.task.key, undefined, "a single add answers no key");
+    assert.equal((await add(owner, name, { title: "Two", idempotency_key: "run-7-add-1" })).body.error.code, "IDEMPOTENCY_CONFLICT");
+    assert.equal(await count(name), 12);
+    assert.equal(await addsOf(name), 2);
+  });
+
+  test("an idempotency_key is one KEY's in one SPACE, and a replay is checked as any add is", async () => {
+    const { owner, a, reader, name } = await crew();
+    const body = { tasks: [{ key: "x", title: "Same" }], idempotency_key: "shared-key" };
+    const mine = await batch(owner, name, body);
+    assert.equal(mine.status, 201, JSON.stringify(mine.body));
+    // Another KEY, the same key and tasks, the same SPACE: its own new task.
+    const theirs = await batch(a, name, body);
+    assert.equal(theirs.status, 201, JSON.stringify(theirs.body));
+    assert.notEqual(theirs.body.tasks[0].task_id, mine.body.tasks[0].task_id);
+    // The same KEY and key in another SPACE: new tasks there.
+    const elsewhere = await workSpace(owner);
+    const there = await batch(owner, elsewhere, body);
+    assert.equal(there.status, 201, JSON.stringify(there.body));
+    assert.equal(there.body.tasks[0].number, 1);
+    // A replay after the KEY lost its role is refused, and shows no task.
+    await grant(owner, name, a, "reader");
+    const denied = await batch(a, name, body);
+    assert.equal(denied.status, 403, JSON.stringify(denied.body));
+    assert.equal(denied.body.error.code, "TASK_DENIED");
+    assert.equal(denied.body.tasks, undefined);
+    assert.equal((await batch(reader, name, body)).body.error.code, "TASK_DENIED");
+    assert.equal(await count(name), 2);
+  });
+
+  test("the idempotency rows are read by add_tasks alone", async () => {
+    const owner = await agent();
+    const name = await workSpace(owner);
+    assert.equal((await add(owner, name, { idempotency_key: "kept" })).status, 201);
+    await assert.rejects(fixture.api`select 1 from schellingaf.task_adds`, /permission denied/);
+    const [fn] = await fixture.owner<{ open: boolean; api: boolean }[]>`
+      select array_to_string(coalesce(p.proacl, '{}'), ',') ~ '(^|,)=X/' as open,
+             has_function_privilege('schellingaf_api', p.oid, 'execute') as api
+        from pg_proc p where p.oid = 'schellingaf.add_tasks(text, bytea, jsonb, text, boolean, integer, integer)'::regprocedure`;
+    assert.deepEqual(fn, { open: false, api: true });
+    await assert.rejects(fixture.owner`update schellingaf.task_adds set idempotency_key = 'other'`, /IMMUTABLE_RECORD/);
+  });
+
+  test("two batches at once number forty tasks without a gap, each batch in one run", async () => {
+    const { owner, a, name } = await crew();
+    const twenty = (who: string) => Array.from({ length: TASK_LIMITS.batch }, (_, i) => ({ title: `${who} ${i}` }));
+    const [one, two] = await Promise.all([batch(owner, name, { tasks: twenty("owner") }), batch(a, name, { tasks: twenty("a") })]);
+    assert.equal(one.status, 201, JSON.stringify(one.body));
+    assert.equal(two.status, 201, JSON.stringify(two.body));
+    const numbers = [one, two].map((out) => out.body.tasks.map((t: any) => t.number) as number[]);
+    for (const run of numbers) assert.deepEqual(run, Array.from({ length: TASK_LIMITS.batch }, (_, i) => run[0]! + i));
+    assert.deepEqual([...numbers[0]!, ...numbers[1]!].sort((x, y) => x - y), Array.from({ length: 40 }, (_, i) => i + 1));
+  });
+
+  test("a batch answers one hint naming the tasks that ran long", async () => {
+    const { owner, name } = await crew();
+    const long = Array.from({ length: 24 }, (_, i) => `word${i}`).join(" ");
+    const out = await batch(owner, name, { tasks: [{ key: "t1", title: "Short", body: `${long}. Short one.` }, { title: long }, { title: "Fine" }] });
+    assert.equal(out.status, 201, JSON.stringify(out.body));
+    const [first, second] = (out.body.hint as string).split("\n");
+    // Each text's line is the single hint's recorded first line, after its label.
+    assert.equal(first, 'tasks[0] t1: 1 of 2 sentences ran over 20 words: 24 ("word0 word1 word2 word3 word4 ..."). tasks[1]: Title ran 24 words.');
+    assert.match(second!, /^Next time, split each long sentence/);
+    assert.equal((await batch(owner, name, { tasks: [{ title: "Short" }] })).body.hint, undefined);
+  });
+
+  test("add_tasks takes its two limits from the route, and holds the same numbers when it is not given them", async () => {
+    const [row] = await db.write<{ args: string }[]>`
+      select pg_get_function_arguments('schellingaf.add_tasks(text, bytea, jsonb, text, boolean, integer, integer)'::regprocedure) as args`;
+    assert.match(row!.args, new RegExp(`p_not_accepted_max integer DEFAULT ${TASK_LIMITS.notAcceptedPerSpace}\\b`));
+    assert.match(row!.args, new RegExp(`p_batch_max integer DEFAULT ${TASK_LIMITS.batch}\\b`));
+  });
+});
+
 /** How many hours a task's claim still runs, as an answer gives it. */
 const hoursLeft = (task: Record<string, any>) => (Date.parse(task.claimed_until) - Date.now()) / 3_600_000;
 
@@ -1398,7 +1737,7 @@ describe("the connector", () => {
 
   test("a task's whole life, through schellingaf_task", async () => {
     const { owner, a, b, c, name } = await crew();
-    const made = await tool({ action: "add", space: name, title: "Transcribe page 3", body: "Type it out.", tag: "transcription" }, owner);
+    const made = await tool({ action: "add", space: name, title: "Transcribe page 3", body: "Type it out.", tag: "transcription", detail: "full" }, owner);
     assert.equal(made.isError, false, made.text);
     assert.match(made.text, /^reading as /);
     assert.match(made.text, /task 1 in "tasks-\d+-\d+": open/);
@@ -1413,14 +1752,14 @@ describe("the connector", () => {
     const taken = await tool({ action: "next", space: name }, a);
     assert.match(taken.text, /task 1 in "[^"]+": claimed by [0-9a-f]{64} until /);
     const post = await result(a, name);
-    const done = await tool({ action: "done", space: name, number: 1, post_id: post }, a);
+    const done = await tool({ action: "done", space: name, number: 1, post_id: post, detail: "full" }, a);
     assert.equal(done.isError, false, done.text);
     assert.match(done.text, new RegExp(`result post ${post}`));
 
     const check = await tool({ action: "next", space: name, verify: true }, b);
     assert.match(check.text, /for you to check/);
     assert.equal((await tool({ action: "confirm", space: name, number: 1 }, b)).isError, false);
-    const rejected = await tool({ action: "reject", space: name, number: 1, reason: "Line 4 is missing." }, c);
+    const rejected = await tool({ action: "reject", space: name, number: 1, reason: "Line 4 is missing.", detail: "full" }, c);
     assert.equal(rejected.isError, false, rejected.text);
     assert.match(rejected.text, /task 1 in "[^"]+": open/);
     assert.match(rejected.text, /<<<peer rejected reason>>>\nLine 4 is missing\.\n<<<end rejected reason>>>/);
@@ -1439,6 +1778,25 @@ describe("the connector", () => {
     assert.match(noKey.text, /TOKEN_MISSING/);
   });
 
+  test("add with tasks renders one line a task, with no title or body", async () => {
+    const { owner, name } = await crew();
+    const out = await tool({ action: "add", space: name, tasks: [{ key: "t1", title: "Discuss", body: "Talk it over." }, { title: "Specify", after: ["t1"] }] }, owner);
+    assert.equal(out.isError, false, out.text);
+    assert.match(out.text, /^added 2 tasks to "[^"]+"$/m);
+    assert.match(out.text, /^1 {2}open {2}t1 {2}[0-9a-f-]{36}$/m);
+    assert.match(out.text, /^2 {2}open {2}- {2}[0-9a-f-]{36}$/m);
+    assert.doesNotMatch(out.text, /Discuss|Talk it over/);
+    assert.deepEqual(out.json.tasks.map((t: any) => [t.key, t.number]), [["t1", 1], [null, 2]]);
+    const again = await tool({ action: "add", space: name, tasks: [{ title: "Again" }], idempotency_key: "k1" }, owner);
+    assert.equal(again.isError, false, again.text);
+    const replayed = await tool({ action: "add", space: name, tasks: [{ title: "Again" }], idempotency_key: "k1" }, owner);
+    assert.match(replayed.text, /already added: 1 task in "[^"]+": this idempotency_key replayed and nothing new was added/);
+    // A mix is the route's to refuse: the connector sends every field it was given.
+    const mixed = await tool({ action: "add", space: name, title: "Lone", tasks: [{ title: "Batch" }] }, owner);
+    assert.equal(mixed.isError, true);
+    assert.match(mixed.text, /title belongs to one task/);
+  });
+
   test("next with number and progress, through schellingaf_task: the same routes and the same refusals", async () => {
     const { owner, a, b, name } = await crew();
     const first = await added(owner, name);
@@ -1450,7 +1808,7 @@ describe("the connector", () => {
     assert.equal(taken.isError, false, taken.text);
     assert.match(taken.text, new RegExp(`task 1 in "[^"]+": claimed by ${a.peerId} until `));
     const post = await posted(a, name);
-    const linked = await tool({ action: "progress", space: name, number: 1, post_id: post }, a);
+    const linked = await tool({ action: "progress", space: name, number: 1, post_id: post, detail: "full" }, a);
     assert.equal(linked.isError, false, linked.text);
     assert.match(linked.text, new RegExp(`progress post ${post} by ${a.peerId} at `));
     assert.match(linked.text, /<<<peer progress title>>>\nOn branch many-tasks\n<<<end progress title>>>/);
@@ -1576,6 +1934,46 @@ describe("the plans inside the task functions", () => {
     assert.ok(!scans.some((n) => n["Node Type"] === "Seq Scan"), `take_task counted every task:\n${shown}`);
     assert.ok(scans.some((n) => n["Index Name"] === "tasks_waiting_idx"), shown);
   });
+  test("add_tasks counts the tasks waiting in their indexes and finds what after names by key, under a generic plan", async () => {
+    const owner = await agent();
+    const name = await workSpace(owner);
+    const post = await result(owner, name);
+    await fixture.owner`
+      insert into schellingaf.tasks (space_id, number, title, created_by, state, claimed_by, claimed_until,
+                                     done_post_id, done_at, accepted_at)
+      select s.space_id, g, 'task ' || g, s.owner_id, x.state,
+             case when x.state <> 'open' then s.owner_id end,
+             case when x.state = 'claimed' then now() + interval '1 hour' end,
+             case when x.state in ('done', 'accepted') then ${post}::uuid end,
+             case when x.state in ('done', 'accepted') then now() end,
+             case when x.state = 'accepted' then now() end
+        from schellingaf.spaces s
+        cross join generate_series(1, 3000) g
+        cross join lateral (select case when g <= 2990 then 'accepted' when g % 3 = 0 then 'open'
+                                        when g % 3 = 1 then 'claimed' else 'done' end as state) x
+       where s.name = ${name}`;
+    await fixture.owner`analyze schellingaf.tasks`;
+    const [known] = await fixture.owner<{ id: string }[]>`
+      select t.task_id::text as id from schellingaf.tasks t join schellingaf.spaces s on s.space_id = t.space_id
+       where s.name = ${name} and t.number = 2995`;
+    const key = Buffer.from(owner.peerId, "hex");
+    const tasks = [
+      { key: "a", title: "One", body: "", after: [{ number: 12 }, { task_id: known!.id }] },
+      { title: "Two", body: "", after: [{ index: 0 }, { number: 2999 }] },
+    ];
+    const plans = await plansInside(async (tx) => {
+      await tx.unsafe("set local plan_cache_mode = force_generic_plan");
+      await tx`select schellingaf.add_tasks(${name}, ${key}, ${tx.json(tasks as never)}, 'planned', true, 10000, 20)`;
+    });
+    const inside = plans.filter((p) => /\btasks [a-z]\b/.test(p["Query Text"]) && !/add_tasks\(/.test(p["Query Text"]));
+    assert.ok(inside.length >= 5, `auto_explain logged too few statements of add_tasks:\n${plans.map((p) => p["Query Text"]).join("\n--\n")}`);
+    const scans = inside.flatMap((p) => nodesOf(p.Plan)).filter((n) => n["Relation Name"] === "tasks" || /^tasks_/.test(n["Index Name"] ?? ""));
+    const shown = JSON.stringify(scans, ["Node Type", "Alias", "Index Name", "Index Cond", "Filter"], 1);
+    assert.ok(!scans.some((n) => n["Node Type"] === "Seq Scan"), `add_tasks walked every task:\n${shown}`);
+    for (const index of ["tasks_waiting_idx", "tasks_done_idx", "tasks_space_id_number_key", "tasks_pkey"]) {
+      assert.ok(scans.some((n) => n["Index Name"] === index), `${index} unused:\n${shown}`);
+    }
+  });
 });
 
 describe("the documents", () => {
@@ -1587,7 +1985,7 @@ describe("the documents", () => {
     assert.match(caps.modules.tasks.note, /a confirmation, an acceptance, a reject or a give-back by somebody else reaches its holder's mailbox, and a reject its confirmers' too\./);
     assert.deepEqual(caps.limits.tasks, {
       title_characters: 200, body_bytes: 16384, tag_characters: 40, after: 8, reason_characters: 500,
-      not_accepted_per_space: 10000,
+      not_accepted_per_space: 10000, batch: 20,
       confirmations: { min: 0, max: 5, default_public: 2, default_private_or_sealed: 0 },
       confirmers: ["members", "coordinators"], confirmers_default: "members",
       claim_hours: { min: 1, max: 24, default: 4 },

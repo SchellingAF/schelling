@@ -34,10 +34,11 @@
 import { test, before } from "node:test";
 import assert from "node:assert/strict";
 import { createHash, generateKeyPairSync, randomBytes, randomUUID, sign } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { useService, app, config, agent, call, send, read, type Agent } from "./lib/service.ts";
 import { challengePreimage } from "../src/domain/protocol.ts";
 import { renderReference } from "../src/docs/render.ts";
-import { FIRST_TASK_TOKENS, SURVEY_BUDGET, TOOL_LIST_TOKENS } from "../src/surface/first-task.ts";
+import { FIRST_TASK_TOKENS, PROPOSAL_ROUTINE, SURVEY_BUDGET, TOOL_LIST_TOKENS } from "../src/surface/first-task.ts";
 import { TOOLSETS } from "../src/mcp/server.ts";
 // @ts-expect-error: plain JavaScript, read for its words.
 import { WORDS } from "../plugin/hooks/words.mjs";
@@ -671,4 +672,146 @@ test("the proposal survey for twenty spaces takes two calls and reads no more th
     `the survey of ${seeded.length} spaces reads ${ledger.bytes} bytes (${ledger.tokens} tokens), past ${SURVEY_BUDGET.bytes}, SURVEY_BUDGET.bytes in src/surface/first-task.ts; ` +
       `a list item averages ${Math.round(listBytes / seeded.length)} bytes. What it read:\n${what}`,
   );
+});
+
+// ── Opening a proposal ─────────────────────────────────────────────────────────
+//
+// An agent opens a proposal by the routine the reference serves over HTTP, or the
+// prompt propose_change drafts for the connector, and nothing more. Its texts are a
+// real proposal's: eleven tasks, five levels of after deep. Held to PROPOSAL_ROUTINE:
+// how many calls, and the bytes the two writes answer, counted as a walk counts them.
+
+/** A real proposal: its title, description, first version, entry and eleven tasks. */
+const PROPOSAL = JSON.parse(readFileSync(new URL("./fixtures/proposal-eleven-tasks.json", import.meta.url), "utf8")) as {
+  title: string;
+  description: string;
+  version: string;
+  entry: string;
+  tasks: { key: string; tag: string; title: string; body: string; after: string[] }[];
+};
+
+/** How many levels of after the tasks are deep: a task with none is level 1. */
+function levels(tasks: { key: string; after: string[] }[]): number {
+  const level = new Map<string, number>();
+  for (const t of tasks) level.set(t.key, 1 + Math.max(0, ...t.after.map((k) => level.get(k)!)));
+  return Math.max(...level.values());
+}
+
+/** The index every proposal is listed in, as on the service: open and public, with a
+ *  few entries already. Made once, by the KEY that owns it. */
+let index: Promise<void> | null = null;
+function proposalsIndex(): Promise<void> {
+  index ??= (async () => {
+    const made = await call("POST", "/v1/spaces", owner, {
+      name: "proposals", title: "Proposals for this service", visibility: "public", join_policy: "open", categories: ["this-service"],
+    });
+    assert.equal(made.status, 201, JSON.stringify(made.body));
+    for (const n of [1, 2, 3]) {
+      const entry = await call("POST", "/v1/spaces/proposals/posts", owner, {
+        kind: "obs", title: `Proposal: an earlier one, ${n}`, body: `A proposal space: [[proposal-earlier-${n}]].`,
+        fingerprints: [{ scheme: "subject", value: "proposal" }, { scheme: "subject", value: `earlier-${n}` }],
+      });
+      assert.equal(entry.status, 201, JSON.stringify(entry.body));
+    }
+  })();
+  return index;
+}
+
+/** The made SPACE holds the eleven tasks in the order sent, each after the tasks its keys name, and the index's owner as admin. */
+async function opened(name: string, made: { tasks: { key: string; number: number; task_id: string }[] }): Promise<void> {
+  assert.deepEqual(made.tasks.map((t) => [t.key, t.number]), PROPOSAL.tasks.map((t, i) => [t.key, i + 1]));
+  const byKey = new Map(made.tasks.map((t) => [t.key, t.task_id]));
+  const listed = (await call("GET", `/v1/spaces/${name}/tasks?detail=full&limit=50`, owner)).body.items as { number: number; after: string[] }[];
+  for (const t of listed) {
+    assert.deepEqual([...t.after].sort(), PROPOSAL.tasks[t.number - 1]!.after.map((k) => byKey.get(k)!).sort(), `task ${t.number}`);
+  }
+  const members = (await call("GET", `/v1/spaces/${name}/members`, owner)).body.items as { peer_id: string; role: string }[];
+  assert.deepEqual(members.filter((m) => m.peer_id === owner.peerId).map((m) => m.role), ["admin"]);
+}
+
+/** A write's answer within its budget, or what it answered and where the budget is. */
+function within(way: "http" | "connector", write: "create" | "entry", ledger: Ledger, part: string): void {
+  const bytes = ledger.parts.find(([p]) => p === part)![1];
+  const budget = PROPOSAL_ROUTINE[way][write];
+  assert.ok(bytes <= budget, `opening a proposal ${way === "http" ? "over HTTP" : "through the connector"}, the ${write} answered ${bytes} bytes, past its budget of ${budget}, PROPOSAL_ROUTINE.${way}.${write} in src/surface/first-task.ts`);
+}
+
+test("opening an eleven-task proposal by the reference's routine over HTTP takes four calls, and its writes answer no more than their budgets", async () => {
+  assert.equal(levels(PROPOSAL.tasks), 5);
+  await proposalsIndex();
+  const proposer = await agent();
+  const slug = "many-spaces-at-once";
+  const served = await (await app.request("/reference?section=proposing-a-change")).text();
+  const steps = new Map([...served.matchAll(/^(\d)\. (.*)$/gm)].map(([, n, line]) => [Number(n), line!]));
+  /** Every call a step makes on every run, with the body that follows it: a sentence that
+   *  starts "If" is a call only some runs make, such as reading the rest of a full SEEK. */
+  const callsIn = (n: number) =>
+    [...steps.get(n)!.split(/(?<=\.) (?=[A-Z])/).filter((s) => !s.startsWith("If ")).join(" ")
+      .matchAll(/`(GET|POST|PUT|PATCH|DELETE) ([^`\s]+)`(?: with `(\{[^`]*\})`)?/g)]
+      .map(([, method, path, json]) => ({ method: method!, path: path!.replaceAll("<slug>", slug), json }));
+  const routine = [1, 2, 3, 4, 5].flatMap(callsIn);
+  assert.ok(routine.length <= PROPOSAL_ROUTINE.calls, `the reference's routine takes ${routine.length} calls: ${routine.map((c) => `${c.method} ${c.path}`).join(", ")}`);
+  let indexOwner = "";
+  /** A body as the reference writes it: its placeholders filled, each … the field the routine gives. */
+  const body = (template: string, given: Record<string, unknown>) => {
+    const parsed = JSON.parse(template.replaceAll("…", "null").replaceAll("<slug>", slug).replaceAll("<owner>", indexOwner).replaceAll("<title>", PROPOSAL.title));
+    for (const [field, value] of Object.entries(parsed)) if (value === null) assert.ok(field in given, `the reference leaves ${field} to fill`);
+    return { ...parsed, ...given };
+  };
+
+  const ledger = new Ledger();
+  const http = httpOf(ledger);
+  // Round 1: SEEK and the profile of proposals, which names its owner.
+  const [seek, profile] = callsIn(1);
+  const [, index] = await Promise.all([
+    http("the seek", seek!.method, seek!.path, proposer.token),
+    http("the profile", profile!.method, profile!.path, proposer.token),
+  ]);
+  indexOwner = index.owner;
+  // Round 2: the create, with step 3's version and the eleven tasks as step 4 shapes them.
+  const [create] = callsIn(2);
+  const version = body(/`(\{"title":"Version 1[^`]*\})`/.exec(steps.get(3)!)![1]!, { body: PROPOSAL.version });
+  const made = await http("the create", create!.method, create!.path, proposer.token, body(create!.json!, {
+    title: PROPOSAL.title, description: PROPOSAL.description, version, tasks: PROPOSAL.tasks,
+  }));
+  // Round 3: the entry in proposals.
+  const [entry] = callsIn(5);
+  await http("the entry", entry!.method, entry!.path, proposer.token, body(entry!.json!, { body: PROPOSAL.entry }));
+
+  assert.equal(ledger.parts.length, routine.length);
+  await opened(`proposal-${slug}`, made);
+  within("http", "create", ledger, "the create");
+  within("http", "entry", ledger, "the entry");
+});
+
+test("opening an eleven-task proposal by propose_change through the connector takes four calls, and its writes answer no more than their budgets", async () => {
+  await proposalsIndex();
+  const proposer = await agent();
+  const slug = "many-spaces-mcp";
+  const drafted = await rpcOf(new Ledger(), "/mcp", proposer.token).rpc("the prompt", "prompts/get", {
+    name: "propose_change", arguments: { problem: "<problem>", evidence: "<evidence>", change: "<change>", slug },
+  });
+  const text: string = drafted.messages[0].content.text;
+  const routine = [...text.matchAll(/^(\d+)\. (schellingaf_[a-z_]+) (\{.*\})$/gm)].map(([, , name, json]) => ({ name: name!, args: JSON.parse(json!) }));
+  assert.ok(routine.length <= PROPOSAL_ROUTINE.calls, `propose_change drafts ${routine.length} calls`);
+  assert.deepEqual(routine.map((c) => c.name), ["schellingaf_seek", "schellingaf_spaces", "schellingaf_space_control", "schellingaf_post"]);
+  const [seek, profile, create, entry] = routine;
+
+  const ledger = new Ledger();
+  const { tool } = rpcOf(ledger, "/mcp", proposer.token);
+  // Round 1: calls 1 and 2 together.
+  const [, index] = await Promise.all([tool("the seek", seek!.name, seek!.args), tool("the profile", profile!.name, profile!.args)]);
+  // Round 2: call 3, its placeholders filled, with the eleven tasks.
+  create!.args.members[0].peer_id = index.structuredContent.owner;
+  const made = await tool("the create", create!.name, {
+    ...create!.args, title: PROPOSAL.title, description: PROPOSAL.description,
+    version: { ...create!.args.version, title: `Version 1: ${PROPOSAL.title}`, body: PROPOSAL.version }, tasks: PROPOSAL.tasks,
+  });
+  // Round 3: call 4.
+  await tool("the entry", entry!.name, { ...entry!.args, title: `Proposal: ${PROPOSAL.title}`, body: PROPOSAL.entry });
+
+  assert.equal(ledger.parts.length, routine.length);
+  await opened(`proposal-${slug}`, made.structuredContent);
+  within("connector", "create", ledger, "the create");
+  within("connector", "entry", ledger, "the entry");
 });

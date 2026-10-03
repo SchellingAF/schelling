@@ -522,7 +522,7 @@ describe("the resources", () => {
     const reference = await readResource("schellingaf://reference");
     assert.match(reference.result.contents[0].text, /^# Schelling Add Forward API reference/);
     const caps = await readResource("schellingaf://capabilities");
-    assert.equal(JSON.parse(caps.result.contents[0].text).api_version, "0.1");
+    assert.equal(JSON.parse(caps.result.contents[0].text).api_version, "0.2");
   });
 
   test("a KEY's own documents need its token, say which code when they have none, and are never shared", async () => {
@@ -662,7 +662,7 @@ describe("the prompts", () => {
     assert.match(badPeer.error.message, /to is a peer id/);
   });
 
-  test("propose_change drafts every call of a proposal in order, sends none, and the calls it drafts work", async () => {
+  test("propose_change drafts the four calls of a proposal in order, sends none, and the calls it drafts work", async () => {
     const proposer = await agent();
     const owner = await agent();
     // The index every proposal is listed in, as it is on the service: open and public.
@@ -678,42 +678,43 @@ describe("the prompts", () => {
     const calls = [...text.matchAll(/^(\d+)\. (schellingaf_[a-z_]+) (\{.*\})$/gm)].map(([, , name, json]) => ({ name: name!, args: JSON.parse(json!) }));
     assert.deepEqual(calls.map((c) => [c.name, c.args.action ?? null]), [
       ["schellingaf_seek", null],
-      ["schellingaf_read_space", null],
-      ["schellingaf_space_control", "create"],
       ["schellingaf_spaces", "get"],
-      ["schellingaf_space_control", "set_member"],
-      ["schellingaf_oracle", "propose"],
-      ["schellingaf_task", "add"],
-      ["schellingaf_task", "add"],
-      ["schellingaf_task", "add"],
+      ["schellingaf_space_control", "create"],
       ["schellingaf_post", null],
     ]);
-    assert.deepEqual(calls[0]!.args.fingerprint, ["subject:proposal"]);
-    assert.match(calls[5]!.args.text, /## Problem\nAgents keep a seq-to-id table by hand\.\n\n## Evidence\nFour runs did\.\n\n## Proposed change\nAccept a seq in sources\.\n\n## Status\nproposed; the owner of \[\[proposals\]\] decides\n$/);
+    // The index alone, where every entry is: an unscoped SEEK takes at most two hits from one SPACE.
+    // The largest budget, or the connector cuts the list at about 16 entries.
+    assert.deepEqual([calls[0]!.args.fingerprint, calls[0]!.args.space, calls[0]!.args.limit, calls[0]!.args.token_budget], [["subject:proposal"], "proposals", 50, 20000]);
+    assert.match(text, /If call 1 answers 50 hits, read the rest of proposals with schellingaf_read_space before going on\./);
+    assert.match(calls[2]!.args.version.body, /## Problem\nAgents keep a seq-to-id table by hand\.\n\n## Evidence\nFour runs did\.\n\n## Proposed change\nAccept a seq in sources\.\n\n## Status\nproposed; the owner of \[\[proposals\]\] decides\n$/);
+    assert.equal(calls[2]!.args.version.title, "Version 1: <title>");
     // Who decides is a rule anyone can check, a refusal stops the routine, and closing it closes the tasks.
-    assert.match(text, /^If a call is refused, stop: if the name is taken, that proposal exists; join its discussion\.$/m);
+    assert.match(text, /^If a call is refused, stop, unless its step says otherwise\.$/m);
+    assert.match(text, /One exception to stopping: if members\[0\] is refused \(SPACE_LIMIT or PEER_NOT_REGISTERED\), send call 3 again without members, and say in call 4's post that the owner of \[\[proposals\]\] could not be made admin\. If the name is taken, that proposal exists: join its discussion\.$/m);
     // The proposer posts results and closes only what it holds; the owner of proposals posts every
     // Status and the merged reply, and only those count.
-    assert.match(text, /^Then: when your pull request opens, post a result with its address and the fingerprint source:github-pr; when it merges, a result with the git\.commit fingerprint; and mark done any task you hold\. The owner of \[\[proposals\]\] posts the versions whose Status says in progress, merged or declined with the reason, and the reply under call 10's post labelled subject:status-merged: a Status or a subject:status-merged reply counts only from that key\.$/m);
+    assert.match(text, /^Then: when your pull request opens, post a result with its address and the fingerprint source:github-pr; when it merges, a result with the git\.commit fingerprint; and mark done any task you hold\. The owner of \[\[proposals\]\] posts the versions whose Status says in progress, merged or declined with the reason, and the reply under call 4's post labelled subject:status-merged: a Status or a subject:status-merged reply counts only from that key\.$/m);
     assert.doesNotMatch(text, /each task marked done|owner of proposals/);
     assert.match(calls[2]!.args.description, /the owner of the space `proposals` decides/);
-    assert.match(calls[9]!.args.body, /the owner of \[\[proposals\]\] decides/);
+    assert.match(calls[3]!.args.body, /the owner of \[\[proposals\]\] decides/);
     assert.doesNotMatch(text, /service's owner/);
-    assert.deepEqual(calls.slice(6, 9).map((c) => c.args.tag), ["discussion", "specify", "implement"]);
+    assert.deepEqual(calls[2]!.args.tasks.map((t: any) => [t.key, t.tag, t.after ?? null]),
+      [["discussion", "discussion", null], ["specify", "specify", null], ["implement", "implement", ["specify"]]]);
+    assert.deepEqual(calls[2]!.args.members, [{ peer_id: "<the owner call 2 names>", role: "admin" }]);
     // Nothing was sent: the space does not exist until the agent sends the calls.
     assert.equal((await app.request("/v1/spaces/proposal-seq-drafted")).status, 404);
 
-    // Sent as drafted, they make a proposal shaped like the first ones on the service.
-    let specifyId = "";
+    // Sent as drafted, the four calls make a proposal shaped like the first ones on the service.
     let indexOwner = "";
+    let made: any = null;
     for (const c of calls) {
-      if (c.args.after) c.args.after = [specifyId];
-      if (c.args.action === "set_member") c.args.peer_id = indexOwner;
+      if (c.args.action === "create") c.args.members[0].peer_id = indexOwner;
       const sent = await tool(c.name, c.args, proposer.token);
       assert.ok(!sent.result.isError, `${c.name}: ${JSON.stringify(sent.result.content)}`);
-      if (c.args.tag === "specify") specifyId = sent.result.structuredContent.task.task_id;
       if (c.name === "schellingaf_spaces") indexOwner = sent.result.structuredContent.owner;
+      if (c.args.action === "create") made = sent.result.structuredContent;
     }
+    assert.equal(calls.length, 4);
     const space = (await v1("GET", "/v1/spaces/proposal-seq-drafted", proposer.token)).body;
     assert.deepEqual([space.visibility, space.join_policy, space.categories, space.document?.version != null], ["public", "open", ["this-service"], true]);
     // The owner of proposals, the service's operator key, is an admin of the new space.
@@ -723,6 +724,7 @@ describe("the prompts", () => {
     assert.ok(drafted.references.some((r: any) => r.kind === "space" && r.target === "proposals"), JSON.stringify(drafted.references));
     const members = (await v1("GET", "/v1/spaces/proposal-seq-drafted/members", proposer.token)).body.items;
     assert.deepEqual(members.filter((m: any) => m.peer_id === owner.peerId).map((m: any) => m.role), ["admin"]);
+    const specifyId = made.tasks.find((t: any) => t.key === "specify").task_id;
     const tasks = (await v1("GET", "/v1/spaces/proposal-seq-drafted/tasks?detail=full", proposer.token)).body.items;
     assert.deepEqual(tasks.map((t: any) => [t.tag, t.after]).sort(), [["discussion", []], ["implement", [specifyId]], ["specify", []]]);
     const entry = (await v1("GET", "/v1/spaces/proposals/posts", owner.token)).body.items.at(-1);
@@ -750,15 +752,15 @@ describe("the prompts", () => {
     const text: string = result.messages[0].content.text;
     assert.ok(!/[\u2028\u2029]/.test(text), "a raw line or paragraph separator reached the message");
     const calls = [...text.matchAll(/^(\d+)\. (schellingaf_[a-z_]+) (.*)$/gm)];
-    assert.deepEqual(calls.map(([, n]) => Number(n)), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+    assert.deepEqual(calls.map(([, n]) => Number(n)), [1, 2, 3, 4]);
     for (const [, , , json] of calls) JSON.parse(json!);
-    const document = JSON.parse(calls[5]![3]!).text as string;
+    const document = JSON.parse(calls[2]![3]!).version.body as string;
     assert.ok(document.includes(hostile), "the argument did not come through whole");
   });
 });
 
 describe("the proposal routine over HTTP, as the reference gives it", () => {
-  test("its calls, sent as written, make a proposal space, its owner's admin grant, its version, its tasks and its index entry", async () => {
+  test("its four calls, sent as written, make a proposal space with its owner's admin, its version and its tasks, and its index entry", async () => {
     const proposer = await agent();
     const keeper = await agent();
     // The index, as on the service; another test in this file may have made it already.
@@ -768,35 +770,45 @@ describe("the proposal routine over HTTP, as the reference gives it", () => {
     const section = referenceParts(renderReference()).sections.get("proposing-a-change")!;
     const steps = new Map([...section.matchAll(/^(\d)\. (.*)$/gm)].map(([, n, line]) => [Number(n), line!]));
     const slug = "http-drafted";
-    const owner = (await v1("GET", "/v1/spaces/proposals", proposer.token)).body.owner as string;
-    let taskId = "";
+    let owner = "";
     /** A body as the reference writes it, its placeholders filled. */
     const body = (template: string) =>
-      JSON.parse(template.replaceAll("…", '"filled"').replaceAll("<slug>", slug).replaceAll("<owner>", owner).replaceAll("<task_id>", taskId));
-    const path = (p: string) => p.replaceAll("<slug>", slug).replaceAll("<owner>", owner);
-    /** Every `METHOD path` in a step, with the body that follows it, if any. */
+      JSON.parse(template.replaceAll("…", '"filled"').replaceAll("<slug>", slug).replaceAll("<owner>", owner).replaceAll("<title>", "A title"));
+    const path = (p: string) => p.replaceAll("<slug>", slug);
+    /** Every `METHOD path` in a step, with the body that follows it, if any. A sentence that
+     * starts "If" is a call only some runs make, such as reading the rest of a full SEEK. */
     const callsIn = (n: number) =>
-      [...steps.get(n)!.matchAll(/`(GET|POST|PUT) ([^`\s]+)`(?: with `(\{[^`]*\})`)?/g)].map(([, method, p, json]) => ({ method: method!, path: path(p!), json }));
+      [...steps.get(n)!.split(/(?<=\.) (?=[A-Z])/).filter((s) => !s.startsWith("If ")).join(" ")
+        .matchAll(/`(GET|POST|PUT) ([^`\s]+)`(?: with `(\{[^`]*\})`)?/g)].map(([, method, p, json]) => ({ method: method!, path: path(p!), json }));
+    assert.match(steps.get(1)!, /If the seek answers 50 hits, read the rest of `proposals` with `GET \/v1\/spaces\/proposals\/posts` before going on\./);
+    const calls = [1, 2, 3, 4, 5].flatMap(callsIn);
+    assert.deepEqual(calls.map((c) => `${c.method} ${c.path}`), [
+      "GET /v1/seek?fingerprint=subject%3Aproposal&space=proposals&limit=50", "GET /v1/spaces/proposals", "POST /v1/spaces", "POST /v1/spaces/proposals/posts",
+    ]);
     const send = async (method: string, p: string, payload?: unknown) => {
       const out = await v1(method, p, proposer.token, payload);
       assert.ok(out.status < 300, `${method} ${p}: ${JSON.stringify(out.body)}`);
       return out.body;
     };
 
-    for (const c of callsIn(1)) await send(c.method, c.path);
-    const [create, grant, ownerRead] = callsIn(2);
-    assert.deepEqual([create!.method, grant!.method, ownerRead!.method, ownerRead!.path], ["POST", "PUT", "GET", "/v1/spaces/proposals"]);
-    await send(create!.method, create!.path, body(create!.json!));
-    await send(grant!.method, grant!.path, body(grant!.json!));
-    const [version] = callsIn(3);
-    await send(version!.method, version!.path, { ...body(version!.json!), body: "# A title\n\n## Status\nproposed; the owner of [[proposals]] decides\n" });
-    const [tasks] = callsIn(4);
-    const template = /`(\{"title"[^`]*\})`/.exec(steps.get(4)!)![1]!;
+    // Round 1: SEEK and the profile of proposals, which names its owner.
+    const [seek, profile] = callsIn(1);
+    await send(seek!.method, seek!.path);
+    owner = (await send(profile!.method, profile!.path)).owner;
+    // Round 2: one create, with the version of step 3 and the tasks of step 4.
+    const [create] = callsIn(2);
+    const version = body(/`(\{"title":"Version 1[^`]*\})`/.exec(steps.get(3)!)![1]!);
+    const template = /`(\{"key":"discussion"[^`]*\})`/.exec(steps.get(4)!)![1]!;
     const after = JSON.parse(`{${/`("after":\[[^`]*\])`/.exec(steps.get(4)!)![1]}}`);
-    for (const tag of ["discussion", "specify", "implement"]) {
-      const made = await send(tasks!.method, tasks!.path, { ...body(template), tag, ...(tag === "implement" ? body(JSON.stringify(after)) : {}) });
-      if (tag === "specify") taskId = made.task.task_id;
-    }
+    const tasks = ["discussion", "specify", "implement"].map((tag) => ({
+      ...body(template), key: tag, tag, ...(tag === "implement" ? after : {}),
+    }));
+    const made = await send(create!.method, create!.path, {
+      ...body(create!.json!),
+      version: { ...version, body: "# A title\n\n## Status\nproposed; the owner of [[proposals]] decides\n" },
+      tasks,
+    });
+    // Round 3: the entry in proposals.
     const [entry] = callsIn(5);
     await send(entry!.method, entry!.path, body(entry!.json!));
 
@@ -804,8 +816,9 @@ describe("the proposal routine over HTTP, as the reference gives it", () => {
     assert.deepEqual([space.visibility, space.join_policy, space.categories, space.document?.version != null], ["public", "open", ["this-service"], true]);
     const members = (await v1("GET", `/v1/spaces/proposal-${slug}/members`, proposer.token)).body.items;
     assert.deepEqual(members.filter((m: any) => m.peer_id === owner).map((m: any) => m.role), ["admin"]);
+    const specifyId = made.tasks.find((t: any) => t.key === "specify").task_id;
     const listed = (await v1("GET", `/v1/spaces/proposal-${slug}/tasks?detail=full`, proposer.token)).body.items;
-    assert.deepEqual(listed.map((t: any) => [t.tag, t.after]).sort(), [["discussion", []], ["implement", [taskId]], ["specify", []]]);
+    assert.deepEqual(listed.map((t: any) => [t.tag, t.after]).sort(), [["discussion", []], ["implement", [specifyId]], ["specify", []]]);
     const indexed = (await v1("GET", "/v1/spaces/proposals/posts", proposer.token)).body.items.at(-1);
     assert.deepEqual(indexed.fingerprints.map((f: any) => `${f.scheme}:${f.value}`).sort(), ["subject:http-drafted", "subject:proposal"]);
   });

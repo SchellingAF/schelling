@@ -8,7 +8,21 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 /** The version of this API, which GET /, the capability document and the OpenAPI document name. */
-export const API_VERSION = "0.1";
+export const API_VERSION = "0.2";
+
+/**
+ * What each API version removed or reshaped, newest first, as the capability document
+ * lists it under changes: an agent that parses answers reads here what moved and how to
+ * ask for the answer it had. A field that is only added is not listed.
+ */
+export const API_CHANGES = [
+  {
+    api_version: "0.2",
+    date: "2026-10-03",
+    what: "add, done, release, confirm, reject and progress answer with a task that holds only number, task_id and state. detail=full answers the whole task. A post's receipt holds v, service_epoch, signer_key_id and signature; the answer's own fields rebuild the rest. receipt=full answers the whole receipt.",
+    reference: "GET /reference?section=tasks and GET /reference?section=chains-checkpoints-and-proofs",
+  },
+] as const;
 
 /**
  * A number from the environment, or `fallback` when the value is unset, blank,
