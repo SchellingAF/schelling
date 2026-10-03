@@ -24,8 +24,8 @@ import { UUID, byteLength, optionalCategories, optionalString, readBody, require
 import { ORACLE_LIMITS, SPACE_NAME, VERSION_STATES } from "../surface/vocabulary.ts";
 import { underOf } from "../surface/categories.ts";
 import {
-  authorClause, authorOf, boundedNumber, budgetCut, cursor, detailOr, itemsWithin, kindClause, kindsOf, optionalTokenBudget,
-  PAGE_DETAILS, postColumns, readDenied, render, timeCursor, tokenBudget, type PostRow, withinBudget,
+  authorClause, authorOf, boundedNumber, budgetCut, cursor, cutText, detailOr, itemsWithin, kindClause, kindsOf, optionalTokenBudget,
+  PAGE_DETAILS, postColumns, readDenied, render, SECTION_ID, timeCursor, tokenBudget, type PostRow, withinBudget,
 } from "./postview.ts";
 import { ANON_READS_PER_MINUTE, LIMITS, READS_PER_MINUTE, limitMoreReads, publicKeyAgeHours, readKey, spend } from "./ratelimit.ts";
 import { optionalBearer, requireBearer, type Env } from "./app.ts";
@@ -149,31 +149,10 @@ function before(raw: string | undefined): bigint | null {
   return n > 0n ? n : null;
 }
 
-/** What a section id may look like, before it is looked up: the grammar makes each one
- *  from its heading, lowercased (src/domain/document.ts). */
-const SECTION_ID = /^[\p{L}\p{N}-]{1,72}$/u;
-
 /** How many SPACES one read across documents names at most, and how many of them one
  *  read of the caller's read limit pays for: a call naming 6 to 10 counts as two reads. */
 export const DOCUMENTS_MAX = 20;
 export const DOCUMENTS_PER_READ = 5;
-
-/**
- * A document's text as far as a token budget goes, at three bytes a token: cut at the
- * last line end inside it, or where a character begins when its first line is longer
- * than that. Null when the whole text fits.
- */
-function cutText(text: string, budgetTokens: number): string | null {
-  const limit = budgetTokens * 3;
-  const bytes = Buffer.from(text, "utf8");
-  if (bytes.length <= limit) return null;
-  const end = bytes.lastIndexOf(0x0a, limit);
-  if (end > 0) return bytes.subarray(0, end).toString("utf8");
-  let at = limit;
-  // A UTF-8 continuation byte is 10xxxxxx: step back to the byte a character starts at.
-  while (at > 0 && (bytes[at]! & 0xc0) === 0x80) at--;
-  return bytes.subarray(0, at).toString("utf8");
-}
 
 export function mountOracle(app: Hono<Env>, db: Db): void {
   const publicSpaceMinKeyAgeHours = publicKeyAgeHours();
@@ -189,7 +168,7 @@ export function mountOracle(app: Hono<Env>, db: Db): void {
       throw new ApiError("INVALID_REQUEST", { detail: "section is a section id the document names" });
     }
     const at = c.req.query("version") ? cursor(c.req.query("version"), "version") : null;
-    // None unless sent: the text, or the section's, is cut to it at a line end.
+    // None unless sent: the text, or the section's, is cut to it as cutText() cuts: at the last line end inside it, or mid-line.
     const budgetTokens = optionalTokenBudget(c.req.query("token_budget"));
 
     const found = await db.readTx(me, async (sql) => {

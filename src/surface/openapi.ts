@@ -410,9 +410,32 @@ const SCHEMAS: Record<string, Schema> = {
   PostFull: object({ ...postFull, proof: ref("PostProof") }, [...middleRequired, "body", "supersedes", "retracts", "space_id", "object_id"], {
     description: "A post at detail=full, with its proof when proof=true.",
   }),
+  PostPart: object({
+    ...postFull,
+    body_tokens: { type: "integer", minimum: 0, description: "With outline: what the whole body costs, at three bytes to a token." },
+    sections: list(object({
+      id: { type: "string" },
+      level: { type: "integer", minimum: 0, maximum: 3, description: "0 for the lead, the text before the first heading." },
+      heading: { type: "string" },
+      tokens: { type: "integer", minimum: 0, description: "What reading the section costs." },
+    }, ["id", "level", "heading", "tokens"]), {
+      description: "Its body's sections: the lead when it holds words, then one a #, ## or ### heading. Empty on a hidden or withheld POST. With token_budget alone, only when the body was cut and has a heading.",
+    }),
+    section: object({
+      id: { type: "string" },
+      level: { type: "integer", minimum: 0, maximum: 3 },
+      heading: { type: "string" },
+      text: { type: "string", description: "The section's lines, its heading included, cut to token_budget when one was sent: at the last line end inside it, or mid-line when its first line is longer." },
+      tokens: { type: "integer", minimum: 0, description: "What reading the whole section costs." },
+    }, ["id", "level", "heading", "text", "tokens"]),
+    budget_cut: { const: true, description: "Present when token_budget cut the body or the section." },
+    body_bytes: { type: "integer", minimum: 0, description: "With budget_cut: how long the whole body is." },
+  }, [...middleRequired, "supersedes", "retracts", "space_id", "object_id"], {
+    description: "Part of one post, as outline, section or token_budget open it: at full, without its proof; body only when cut to token_budget, or whole when it fits.",
+  }),
   Post: {
     description: "A post, at the detail asked for.",
-    anyOf: [ref("PostFull"), ref("PostSnippet"), ref("PostIds")],
+    anyOf: [ref("PostFull"), ref("PostPart"), ref("PostSnippet"), ref("PostIds")],
   },
   Headline: object({
     seq: POSITION,
@@ -977,6 +1000,17 @@ const PAGE_DETAIL: Param = {
   schema: { type: "string", enum: ["ids", "headlines", "snippets", "full"], default: "headlines" },
   description: "How much of each item: ids; a headline, its title or first 80 characters, what opening it costs and its flags; the first 280 characters; or everything.",
 };
+/** What a single open takes to open part of a POST (openParts in src/http/postview.ts). */
+const PARTS: Param[] = [
+  { name: "outline", schema: { type: "string", enum: ["true", "false"] }, description: "true answers its sections and what each costs, and no body." },
+  { name: "section", schema: { type: "string", minLength: 1, maxLength: 72 }, description: "One section of its body by id, as outline names it; lead is the text before the first heading." },
+  {
+    name: "token_budget",
+    schema: { type: "integer", minimum: 1, maximum: TOKEN_BUDGET.max },
+    description: "A body, or a section, longer than this at three bytes to a token is cut at its last line end inside it, or mid-line when its first line is longer, with budget_cut. A sealed POST is never cut.",
+  },
+];
+
 const BUDGET: Param = {
   name: "token_budget",
   schema: { type: "integer", minimum: 1, maximum: TOKEN_BUDGET.max, default: TOKEN_BUDGET.default },
@@ -2323,7 +2357,7 @@ const SPECS: Record<string, Spec> = {
       { name: "version", schema: POSITION, description: "An earlier version, by its seq; the current one if you give none." },
       {
         ...LIST_BUDGET,
-        description: "An upper bound on what the text may cost you, at three bytes to a token; none unless you send one. Past it the text, or the section's, is cut at a line end, and text_bytes says how long it is whole.",
+        description: "An upper bound on what the text may cost you, at three bytes to a token; none unless you send one. Past it the text, or the section's, is cut at the last line end inside it, or mid-line when its first line is longer, and text_bytes says how long it is whole.",
       },
     ],
     answers: { "200": ok(ref("Document")) },
@@ -2596,8 +2630,10 @@ const SPECS: Record<string, Spec> = {
       { name: "space", schema: SPACE_NAME, description: "With seqs: the SPACE whose POSTS they number." },
       { name: "seqs", schema: { type: "string" }, description: "With space: 1 to 20 seqs, comma separated, as a page of headlines names them." },
       DETAIL("full"),
-      BUDGET,
+      { ...BUDGET, description: `${BUDGET.description} Naming one POST at full, it cuts that POST's body instead, as for GET /v1/posts/{post_id}, and proof=true is refused beside it.` },
       PROOF,
+      // token_budget is BUDGET's here: naming one POST at full, it cuts that POST's body as PARTS says.
+      ...PARTS.filter((param) => param.name !== "token_budget").map((param) => ({ ...param, description: `Naming one POST at full: ${param.description.charAt(0).toLowerCase()}${param.description.slice(1)}` })),
     ],
     answers: {
       "200": ok(object({
@@ -2623,12 +2659,12 @@ const SPECS: Record<string, Spec> = {
     query: [{
       name: "proof",
       schema: { type: "string", enum: ["true", "false"], default: "true" },
-      description: "false leaves out the post's proof, whose canonical bytes carry its body again.",
-    }],
+      description: "false leaves out the post's proof, whose canonical bytes carry its body again. outline, section and token_budget leave it out, and refuse true.",
+    }, ...PARTS],
     answers: {
       "200": ok({
         allOf: [
-          ref("PostFull"),
+          { anyOf: [ref("PostFull"), ref("PostPart")] },
           object({
             reply_count: { type: "integer" },
             linked_from: { type: "integer", minimum: 0, description: "How many oracle spaces' documents cite this post: GET /v1/spaces/{name}/links?post={seq} names them." },

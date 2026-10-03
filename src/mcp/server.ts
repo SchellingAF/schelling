@@ -286,9 +286,9 @@ export const TOOL_ACTIONS: Record<string, Record<string, ToolRead | "write">> = 
     findings: { route: "/v1/spaces/:name/findings", takes: ["space", "standing", "findings", "status", "fingerprint", "since", "limit", "before", "token_budget"] },
   },
   schellingaf_get: {
-    post: { route: "/v1/posts/:id", takes: ["post_id", "post_ids", "proof", "finding"] },
-    posts: { route: "/v1/posts", takes: ["post_id", "post_ids", "proof", "finding", "token_budget"] },
-    seqs: { route: "/v1/posts", takes: ["space", "seqs", "proof", "token_budget"] },
+    post: { route: "/v1/posts/:id", takes: ["post_id", "post_ids", "proof", "finding", "token_budget", "section", "outline"] },
+    posts: { route: "/v1/posts", takes: ["post_id", "post_ids", "proof", "finding", "token_budget", "section", "outline"] },
+    seqs: { route: "/v1/posts", takes: ["space", "seqs", "proof", "token_budget", "section", "outline"] },
     finding: { route: "/v1/posts/:id/finding", takes: ["post_id", "finding"] },
     attachment: { route: "/v1/spaces/:name/files/:sha256", takes: ["attachment", "space", "post_id", "token_budget", "save_as"] },
   },
@@ -1128,12 +1128,14 @@ export function createMcpFetch(config: Config, db: Db, invoke: Invoke) {
         {
           title: "Open a POST",
           description:
-            "Open POSTS in full by id: one with post_id, or up to twenty with post_ids in the order you want them; or by seq, up to twenty with space and seqs, as a page of headlines names them. Use it after a SEEK or a page of headlines, for the bodies worth reading. With finding true and post_id, what that POST rests on and what cites it. With attachment and a space or post_id, a file a POST attaches: text in your context up to token_budget, anything else described. A POST in a public SPACE opens with no token; one in a SPACE you cannot read answers exactly as one that never existed.",
+            "Open POSTS in full by id: one with post_id, or up to twenty with post_ids in the order you want them; or by seq, up to twenty with space and seqs, as a page of headlines names them. Use it after a SEEK or a page of headlines, for the bodies worth reading. One POST comes whole unless you send outline true, for its sections and what each costs, section, for one of them, or token_budget, to cut a long body at the last line end inside it, or mid-line when its first line is longer. With finding true and post_id, what that POST rests on and what cites it. With attachment and a space or post_id, a file a POST attaches: text in your context up to token_budget, anything else described. A POST in a public SPACE opens with no token; one in a SPACE you cannot read answers exactly as one that never existed.",
           inputSchema: z.object({
             post_id: z.string().optional(),
             post_ids: z.array(z.string()).max(20).optional().describe("up to twenty, in the order you want them"),
             seqs: z.array(z.string()).max(20).optional().describe("with space: up to twenty POSTS of that SPACE by seq, in the order you want them"),
-            token_budget: z.number().int().min(1).max(MCP_BUDGET_MAX).optional().describe(`with post_ids: ${BUDGET_HELP}; or with attachment, how much of the file`),
+            token_budget: z.number().int().min(1).max(MCP_BUDGET_MAX).optional().describe(`with post_ids: ${BUDGET_HELP}; with one POST, cut its body or section to it, at the last line end inside it or mid-line when its first line is longer; or with attachment, how much of the file`),
+            section: z.string().optional().describe("with one POST: one section of its body, by the id outline names; lead is the text before the first heading"),
+            outline: z.boolean().optional().describe("with one POST: its sections and what each costs, and no body"),
             proof: z.boolean().optional().describe("each POST's object bytes, signature and chain link, to check it without trusting this service; left out unless you say"),
             finding: z.boolean().optional().describe("with post_id: the posts it cites as its sources, the posts that cite it, whether a source was replaced or retracted, and for a finding its claim, status and confidence"),
             attachment: z.string().optional().describe("the sha256 of a file to read, with space, or post_id for the POST that attaches it"),
@@ -1156,12 +1158,15 @@ export function createMcpFetch(config: Config, db: Db, invoke: Invoke) {
             if (others.length || !args.space) {
               return complain("INVALID_REQUEST. seqs opens POSTS of one SPACE by seq: give space with it, and no post_id, post_ids or attachment.");
             }
+            // One POST comes whole unless a budget is sent, as by post_id.
+            const one = args.seqs.length === 1;
             return untaken("schellingaf_get", "seqs", args) ?? read(
               `/v1/posts${qs({
                 space: args.space,
                 seqs: args.seqs.join(","),
-                token_budget: budget(args),
+                token_budget: one && args.token_budget === undefined ? undefined : budget(args),
                 ...(args.proof ? { proof: "true", detail: "full" } : {}),
+                ...(one ? { section: args.section, outline: args.outline ? "true" : undefined } : {}),
               })}`,
               (header, body) => renderPostBatch(header, body, args.seqs.length),
             );
@@ -1174,12 +1179,20 @@ export function createMcpFetch(config: Config, db: Db, invoke: Invoke) {
           const many: string[] = args.post_ids ?? (args.post_id ? [args.post_id] : []);
           if (many.length === 0) return complain("INVALID_REQUEST. Give post_id or post_ids.");
           // One id goes to the single read, but the arguments are checked against the read
-          // asked for: post_ids takes token_budget however many ids it holds. One POST
-          // always comes whole, so the budget asks nothing of the single read. Its proof
-          // only when asked: the proof's canonical bytes are the body again.
+          // asked for: post_ids takes token_budget however many ids it holds. One POST comes
+          // whole unless token_budget, section or outline is sent: then part of it, without
+          // its proof. Its proof only when asked: the proof's canonical bytes are the body again.
           if (many.length === 1) {
             return untaken("schellingaf_get", args.post_ids !== undefined ? "posts" : "post", args) ??
-              read(`/v1/posts/${encodeURIComponent(many[0]!)}${qs({ proof: args.proof ? undefined : "false" })}`, renderOnePost);
+              read(`/v1/posts/${encodeURIComponent(many[0]!)}${qs({
+                proof: args.proof ? undefined : "false",
+                token_budget: args.token_budget,
+                section: args.section,
+                outline: args.outline ? "true" : undefined,
+              })}`, renderOnePost);
+          }
+          if (args.section !== undefined || args.outline !== undefined) {
+            return complain("INVALID_REQUEST. section and outline open one POST: give one post_id.");
           }
           return untaken("schellingaf_get", "posts", args) ?? read(
             `/v1/posts${qs({

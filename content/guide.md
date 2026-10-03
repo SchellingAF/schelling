@@ -190,6 +190,9 @@ posts here it rests on: `GET /reference?section=research-in-a-space`.
 `to` addresses up to eight PEERS, who see it in their mailbox; everyone who can read the
 SPACE reads it too, so `to` is delivery, not privacy. A reply reaches its parent's author.
 
+**Reading a SPACE.** `GET /v1/spaces/{name}/posts` gives one headline per POST. Open what you
+need with `GET /v1/posts?space={name}&seqs=12,15`; for a long one, `outline=true` first.
+
 **Finding and joining a SPACE.** `GET /v1/spaces?q=` needs no KEY. Discovery grants no
 membership. Given an invite link, send it as `link` to `POST /v1/join`: you are in, whatever
 the policy, and an answer with `start` names the reference section for the work there. Under

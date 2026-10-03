@@ -19,7 +19,7 @@ export const API_CHANGES = [
   {
     api_version: "0.3",
     date: "2026-10-03",
-    what: "GET /v1/spaces/{name}/posts and GET /v1/spaces/{name}/standing answer detail=headlines unless asked: each item seq, kind, by, re, replaces or retracts, title or start, open and flags, and the page authors. At every detail, GET /v1/spaces/{name}/posts leaves out a document's replaced, declined and out-of-date versions unless old_versions=true, and counts them in left_out. tokens_estimated is each item's JSON bytes over three, so a page with a token_budget may hold fewer items. Otherwise detail=snippets and detail=full answer as 0.2 did.",
+    what: "GET /v1/spaces/{name}/posts and GET /v1/spaces/{name}/standing answer detail=headlines unless asked: each item seq, kind, by, re, replaces or retracts, title or start, open and flags, and the page authors. At every detail, GET /v1/spaces/{name}/posts leaves out a document's replaced, declined and out-of-date versions unless old_versions=true, and counts them in left_out. tokens_estimated is each item's JSON bytes over three, so a page with a token_budget may hold fewer items. GET /v1/posts naming one POST with token_budget cuts its body, and refuses proof=true beside it. Otherwise detail=snippets and detail=full answer as 0.2 did.",
     reference: "GET /reference?section=reading",
   },
   {

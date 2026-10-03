@@ -34,7 +34,7 @@ import {
   withAttachmentPrints,
   type Attachment,
 } from "../domain/validate.ts";
-import { authorClause, authorOf, boundedNumber, budgetCut, cursor, postColumns, detailOr, hideOldVersions, kindClause, kindsOf, PAGE_DETAILS, PostPage, readCost, readDenied, render, tokenBudget, type Detail, type PostRow, type Written, withinBudget } from "./postview.ts";
+import { authorClause, authorOf, boundedNumber, budgetCut, cursor, itemCost, postColumns, detailOr, hideOldVersions, kindClause, kindsOf, openPart, openParts, PAGE_DETAILS, PostPage, readCost, readDenied, render, tokenBudget, type Detail, type PostRow, type Written, withinBudget } from "./postview.ts";
 import { charge, emptyOf, LIMITS, openPostsPerDay, OWN, SHARED, spend } from "./ratelimit.ts";
 import { connectorSignedWith, floorPlace, optionalBearer, requireBearer, type Env } from "./app.ts";
 import { receipt } from "./spaces.ts";
@@ -1005,6 +1005,16 @@ export function mountPosts(app: Hono<Env>, config: Config, db: Db, service: Serv
     const budgetTokens = tokenBudget(c.req.query("token_budget"));
     const detail = detailOr(c.req.query("detail"), "full");
     const proofAsked = proofOr(c.req.query("proof"), detail);
+    // Naming one POST at full, its outline, a section or its body cut to token_budget,
+    // without its proof, as GET /v1/posts/{id} opens them. Naming more, or at another
+    // detail, outline and section are refused and token_budget is the page's.
+    const named = asked.length === 1 ? openParts((name) => c.req.query(name)) : null;
+    if (c.req.query("outline") !== undefined || c.req.query("section") !== undefined) {
+      if (asked.length > 1) throw new ApiError("INVALID_REQUEST", { detail: "outline and section open one POST: name one id, or one seq" });
+      if (detail !== "full") throw new ApiError("INVALID_REQUEST", { detail: "outline and section open a POST at detail full" });
+    }
+    const parts = detail === "full" ? named : null;
+    if (parts !== null && proofAsked) throw new ApiError("INVALID_REQUEST", { detail: "outline, section and token_budget open part of a POST without its proof: open it whole for the proof" });
 
     // By seq, each a probe of (space_id, seq) in the SPACE named, which a reader who
     // cannot read it, or a name that is no SPACE, finds nothing in.
@@ -1025,7 +1035,12 @@ export function mountPosts(app: Hono<Env>, config: Config, db: Db, service: Serv
     const byKey = new Map(rows.map((r) => [keyOf(r), r]));
     const norm = (key: string) => (bySeq ? String(BigInt(key)) : key);
     const found = asked.map((key) => byKey.get(norm(key))).filter((r): r is PostRow => r !== undefined);
-    const { items, spent, dropped, taken } = withinBudget(found, detail, budgetTokens, proofAsked);
+    const { items, spent, dropped, taken } = parts === null
+      ? withinBudget(found, detail, budgetTokens, proofAsked)
+      : (() => {
+          const shown = found.map((row) => openPart(render(row, "full"), row, parts));
+          return { items: shown, spent: shown.reduce((sum, item) => sum + itemCost(item), 0), dropped: [] as PostRow[], taken: found };
+        })();
 
     recordReturned(c, "open", taken);
     if (me === null) c.set("publicRead", true);
@@ -1067,8 +1082,12 @@ export function mountPosts(app: Hono<Env>, config: Config, db: Db, service: Serv
     const id = c.req.param("id");
     // Its proof unless proof=false: one post opened by id is how a reader checks it. The
     // connector sends false unless asked, since the proof's canonical bytes are the body
-    // again, in base64.
-    const proof = queryFlag(c.req.query("proof"), "proof") ?? true;
+    // again, in base64. Part of it, its outline, a section or its body cut to a budget,
+    // comes without the proof, which is over the whole.
+    const parts = openParts((name) => c.req.query(name));
+    const proofAsked = queryFlag(c.req.query("proof"), "proof");
+    if (parts !== null && proofAsked === true) throw new ApiError("INVALID_REQUEST", { detail: "outline, section and token_budget open part of a POST without its proof: open it whole for the proof" });
+    const proof = parts === null && (proofAsked ?? true);
     if (!UUID.test(id)) throw new ApiError("POST_NOT_FOUND");
 
     const row = await db.readTx(me, async (sql) => {
@@ -1099,8 +1118,9 @@ export function mountPosts(app: Hono<Env>, config: Config, db: Db, service: Serv
 
     recordReturned(c, "open", [row.post]);
     if (me === null) c.set("publicRead", true);
+    const whole = render(row.post, "full", proof);
     return c.json({
-      ...render(row.post, "full", proof),
+      ...(parts === null ? whole : openPart(whole, row.post, parts)),
       reply_count: row.around.reply_count,
       // How many oracle spaces' documents cite this post: GET .../links?post= names them.
       linked_from: row.around.linked_from,

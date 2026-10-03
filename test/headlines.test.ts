@@ -204,7 +204,7 @@ describe("headlines are the default of a SPACE's posts and what stands, and of n
     assert.ok(structuredContent.authors);
     assert.ok(structuredContent.items.every((i: any) => typeof i.by === "string"));
     const text = content[0].text as string;
-    assert.match(text, new RegExp(`^8 headline\\(s\\) in "${name}", head ${at.withheld.seq}, next_after ${at.withheld.seq}\\. open: tokens to read a POST whole; open by seq with schellingaf_get space and seqs, or GET /v1/posts\\?space=<name>&seqs=57,58\\.$`, "m"));
+    assert.match(text, new RegExp(`^8 headline\\(s\\) in "${name}", head ${at.withheld.seq}, next_after ${at.withheld.seq}\\. open: tokens to read a POST whole; open by seq with schellingaf_get space and seqs, or GET /v1/posts\\?space=<name>&seqs=57,58, and a long one with outline true first\\.$`, "m"));
     assert.match(text, new RegExp(`^\\[${at.reply.seq}\\] WARN ${member.peerId.slice(0, 8)}, re ${at.titled.seq}, open [\\d,]+$`, "m"));
     assert.match(text, /<<<peer title>>>\nThe pin breaks scipy 1\.14\n<<<end title>>>/);
     assert.match(text, /<<<peer start>>>\nThe runner image/);

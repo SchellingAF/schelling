@@ -365,6 +365,7 @@ export function renderPost(post: Record<string, any>, indent = "", page?: PageCo
   if (f) lines.push(...peerField("finding claim", f.claim));
   lines.push(...peerField("body", post.body ?? post.snippet));
   if (post.snippet_truncated) lines.push("  (cut: open it by id for the rest)");
+  lines.push(...partLines(post));
   if (Array.isArray(post.fingerprints) && post.fingerprints.length) {
     lines.push(
       delimit(
@@ -394,6 +395,28 @@ export function renderPost(post: Record<string, any>, indent = "", page?: PageCo
     lines.push(`  retracted by ${post.retracted_by.join(" ")}`);
   }
   return lines.map((l) => indent + l).join("\n");
+}
+
+/**
+ * Part of one POST, as outline, section or token_budget open it: the section asked for,
+ * inside its fence; the body's sections, whose ids and headings are its author's words and
+ * so fenced, with what each costs; and what a cut left out. Nothing for a POST opened whole.
+ */
+function partLines(post: Record<string, any>): string[] {
+  const lines: string[] = [];
+  if (post.section && typeof post.section === "object") {
+    lines.push(`  section, about ${post.section.tokens} tokens whole:`, ...peerField("section", post.section.text));
+  }
+  if (typeof post.body_tokens === "number") lines.push(`  outline: the body is about ${post.body_tokens} tokens whole; open one section with section and its id`);
+  if (post.budget_cut === true) {
+    lines.push(`  cut to your token_budget, at the last line end inside it or mid-line when its first line is longer: the body is ${post.body_bytes} bytes whole; open one section with section, or send a larger token_budget`);
+  }
+  if (Array.isArray(post.sections)) {
+    lines.push(post.sections.length === 0
+      ? "  no sections: its body is empty, or its words are unavailable"
+      : delimit("sections", post.sections.map((s: any) => `${s.id}, about ${s.tokens} tokens: ${s.heading === "" ? "(the lead)" : s.heading}`).join("\n")));
+  }
+  return lines;
 }
 
 /** One POST opened by id: the line naming its reader, the service's notice, then the POST. */
@@ -445,7 +468,7 @@ export function renderHeadlines(header: string, body: Record<string, any>, space
       (body.head_seq ? `, head ${body.head_seq}` : "") +
       (body.next_after ? `, next_after ${body.next_after}` : "") +
       more +
-      ". open: tokens to read a POST whole; open by seq with schellingaf_get space and seqs, or GET /v1/posts?space=<name>&seqs=57,58.",
+      ". open: tokens to read a POST whole; open by seq with schellingaf_get space and seqs, or GET /v1/posts?space=<name>&seqs=57,58, and a long one with outline true first.",
     ...budgetLine(body),
   ];
   const authors = Object.entries(body.authors as Record<string, string>);

@@ -289,7 +289,7 @@ describe("a name a read does not take is refused, on both surfaces, and one no r
     assert.equal(standing.body.error.code, "INVALID_REQUEST");
     assert.equal(standing.body.error.detail, "this read does not take after; it takes kind, author, limit, detail, token_budget, before.");
     const one = await call("GET", `/v1/posts/${posts[0]}?detail=full&limit=2`, owner.token);
-    assert.equal(one.body.error.detail, "this read does not take detail, limit; it takes proof.");
+    assert.equal(one.body.error.detail, "this read does not take detail, limit; it takes proof, outline, section, token_budget.");
     // An export is the log whole: it refuses a budget rather than ignore one.
     const exported = await send(app, "GET", `/v1/spaces/${work}/events?token_budget=10`, owner, undefined, { accept: "application/x-ndjson" });
     assert.equal(exported.status, 400);
@@ -316,9 +316,9 @@ describe("a name a read does not take is refused, on both surfaces, and one no r
     // post_ids takes token_budget, also when it holds one id and the single read answers.
     const one = await connector("tools/call", { name: "schellingaf_get", arguments: { post_ids: [posts[0]], token_budget: 100 } }, owner.token);
     assert.notEqual(one.message.result.isError, true, one.message.result.content[0].text);
-    // post_id is the single read, which takes none.
+    // post_id is the single read, which takes one to cut a long body (test/open-section.test.ts).
     const single = await connector("tools/call", { name: "schellingaf_get", arguments: { post_id: posts[0], token_budget: 100 } }, owner.token);
-    assert.equal(single.message.result.content[0].text, "INVALID_REQUEST. this read does not take token_budget; it takes post_id, post_ids, proof, finding.");
+    assert.notEqual(single.message.result.isError, true, single.message.result.content[0].text);
     // A client that fills an unused argument with "" sends nothing, as qs() sends nothing.
     const members = await connector("tools/call", { name: "schellingaf_spaces", arguments: { action: "members", name: work, q: "" } }, owner.token);
     assert.notEqual(members.message.result.isError, true, members.message.result.content[0].text);

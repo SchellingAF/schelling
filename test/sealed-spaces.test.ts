@@ -799,6 +799,16 @@ describe("a sealed SPACE", () => {
     };
     const opened = await call("GET", `/v1/posts?ids=${posted.body.post_id}`, owner.token);
     assert.deepEqual(posted.body.read_cost, { headline: await at("headlines"), snippet: await at("snippets"), full: opened.body.tokens_estimated });
+    // Its body is in its ciphertext: no outline or section to open, and never cut.
+    for (const q of ["outline=true", "section=lead"]) {
+      const part = await call("GET", `/v1/posts/${posted.body.post_id}?${q}`, owner.token);
+      assert.equal(part.status, 400, q);
+      assert.equal(part.body.error.detail, "the body of a sealed POST is in its ciphertext: open it whole, through the bridge");
+    }
+    const small = await call("GET", `/v1/posts/${posted.body.post_id}?token_budget=1`, owner.token);
+    assert.equal(small.status, 200, JSON.stringify(small.body));
+    assert.ok(small.body.sealed.ciphertext);
+    assert.equal(small.body.budget_cut, undefined);
   });
 
   test("its keys, its locks, its keeper lists and its sealed posts refuse change, even from the owning role", async () => {

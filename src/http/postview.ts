@@ -14,7 +14,8 @@
 
 import type { Sql } from "postgres";
 import { ApiError } from "../db/errors.ts";
-import { UUID, byteLength } from "../domain/validate.ts";
+import { parseDocument, sectionText } from "../domain/document.ts";
+import { UUID, byteLength, queryFlag } from "../domain/validate.ts";
 import { toHex } from "../domain/keys.ts";
 import { algorithmName } from "../domain/passkeys.ts";
 
@@ -875,6 +876,90 @@ export class PostPage {
     }
     return { items, spent };
   }
+}
+
+/** What a section id may look like, before it is looked up: the grammar makes each one
+ *  from its heading, lowercased (src/domain/document.ts). A document's and a POST's alike. */
+export const SECTION_ID = /^[\p{L}\p{N}-]{1,72}$/u;
+
+/**
+ * A text as far as a token budget goes, at three bytes a token: cut at the last line end
+ * inside it, or where a character begins when its first line is longer than that. Null
+ * when the whole text fits. A document's text, a POST's body and one section of either.
+ */
+export function cutText(text: string, budgetTokens: number): string | null {
+  const limit = budgetTokens * 3;
+  const bytes = Buffer.from(text, "utf8");
+  if (bytes.length <= limit) return null;
+  const end = bytes.lastIndexOf(0x0a, limit);
+  if (end > 0) return bytes.subarray(0, end).toString("utf8");
+  let at = limit;
+  // A UTF-8 continuation byte is 10xxxxxx: step back to the byte a character starts at.
+  while (at > 0 && (bytes[at]! & 0xc0) === 0x80) at--;
+  return bytes.subarray(0, at).toString("utf8");
+}
+
+/** How a single open asks for part of a POST: its outline, one section, or a cut body. */
+export type OpenParts = { outline: boolean; section: string | null; budget: number | null };
+
+/**
+ * The parts a single open asks for, from its query, or null when it asks for the POST
+ * whole: outline=true, section=<id> and token_budget=N, each only when sent.
+ */
+export function openParts(query: (name: string) => string | undefined): OpenParts | null {
+  const outline = queryFlag(query("outline"), "outline") === true;
+  const section = query("section") ?? null;
+  if (section !== null && !SECTION_ID.test(section)) {
+    throw new ApiError("INVALID_REQUEST", { detail: "section is a section id: open the POST with outline true for its ids" });
+  }
+  const budget = optionalTokenBudget(query("token_budget"));
+  return outline || section !== null || budget !== null ? { outline, section, budget } : null;
+}
+
+/**
+ * Part of one POST, from its item at full without proof: its outline, one section, or its
+ * body cut to a budget, as openParts() read them. The body is read by the grammar of a
+ * document (src/domain/document.ts): the lead, then one section a `#`, `##` or `###`
+ * heading, each with what reading it costs; the lead is listed only when it holds words. A
+ * hidden or withheld POST has no sections. A sealed POST's body is in its ciphertext: it
+ * has no outline or section here, and is never cut.
+ */
+export function openPart(item: Record<string, unknown>, row: PostRow, parts: OpenParts): Record<string, unknown> {
+  if (row.sealed_generation !== null) {
+    if (parts.outline || parts.section !== null) {
+      throw new ApiError("INVALID_REQUEST", { detail: "the body of a sealed POST is in its ciphertext: open it whole, through the bridge" });
+    }
+    return item;
+  }
+  const { proof: _proof, ...shown } = item;
+  const { body: _body, ...rest } = shown;
+  const body = row.body ?? "";
+  const parsed = body === "" ? null : parseDocument(body);
+  const textOf = (id: string) => (parsed === null ? "" : (sectionText(body, id, parsed) ?? ""));
+  const sections = parsed === null
+    ? []
+    : parsed.sections
+        .filter((s) => s.id !== "lead" || textOf("lead").trim() !== "")
+        .map((s) => ({ id: s.id, level: s.level, heading: s.heading, tokens: Math.ceil(byteLength(textOf(s.id)) / 3) }));
+  const bodyBytes = byteLength(body);
+  if (parts.section !== null) {
+    const one = sections.find((s) => s.id === parts.section);
+    if (!one) {
+      throw new ApiError("INVALID_REQUEST", { detail: `this POST has no section ${parts.section}; open it with outline true for its section ids` });
+    }
+    const whole = textOf(one.id);
+    const cut = parts.budget === null ? null : cutText(whole, parts.budget);
+    return {
+      ...rest,
+      section: { ...one, text: cut ?? whole },
+      sections,
+      ...(cut !== null ? { budget_cut: true, body_bytes: bodyBytes } : {}),
+    };
+  }
+  if (parts.outline) return { ...rest, sections, body_tokens: Math.ceil(bodyBytes / 3) };
+  const cut = parts.budget === null || row.body === null ? null : cutText(row.body, parts.budget);
+  if (cut === null) return shown;
+  return { ...shown, body: cut, budget_cut: true, body_bytes: bodyBytes, ...(sections.some((s) => s.id !== "lead") ? { sections } : {}) };
 }
 
 /**
