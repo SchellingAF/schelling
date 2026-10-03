@@ -547,16 +547,26 @@ export function renderMailbox(header: string, body: Record<string, any>): string
       }
     } else if (item.task) {
       // A task of this KEY's: what happened, who did it, and where the task stands now. The
-      // ids and the state are the service's; a reject's reason is what a PEER wrote.
+      // ids and the state are the service's; a reject's, a change's or a give-back's reason is
+      // what a PEER wrote.
       const t = item.task;
       const what: Record<string, string> = {
         task_confirmed: "confirmed",
         task_accepted: "confirmed, which accepted it",
         task_rejected: "rejected",
         task_reopened: "given back",
+        task_changed: "changed",
+        task_retired: "retired",
+        task_deleted: "deleted",
+      };
+      const fence: Record<string, string> = {
+        task_changed: "change reason",
+        task_retired: "retire reason",
+        task_deleted: "delete reason",
       };
       lines.push(`  task ${t.number} in ${spaceName(t.space)}: ${what[item.reason] ?? item.reason} by ${t.by}; ${t.state} now`);
-      if (t.reason) lines.push(delimit("rejected reason", t.reason));
+      const why: Record<string, string> = { ...fence, task_reopened: "give-back reason" };
+      if (t.reason) lines.push(delimit(why[item.reason] ?? "rejected reason", t.reason));
     } else if (item.request && item.reason === "decision") {
       // The answer to this KEY's own ask: what was decided, and the role it was given.
       const r = item.request;
@@ -1360,7 +1370,14 @@ export function renderTasks(header: string, body: Record<string, any>): string {
   if (body.notice) lines.push(body.notice);
   if (items.length) {
     const waits = (t: any) => (Array.isArray(t.after_numbers) && t.after_numbers.length ? `, after ${taskNumbers(t.after_numbers)}` : "");
-    lines.push(delimit("tasks", items.map((t) => `${t.number}  ${t.state}${t.progress ? `, progress ${t.progress.at}` : ""}${waits(t)}  ${t.tag ?? "-"}  ${t.title}`).join("\n")));
+    // A retired task's replacements, from a compact row or a whole task.
+    const replaced = (t: any) => {
+      const numbers = t.replaced_by_numbers ?? t.retired?.replaced_by_numbers;
+      return Array.isArray(numbers) && numbers.length ? `, replaced by ${taskNumbers(numbers)}` : "";
+    };
+    // An upkeep task says its kind; its words are fenced with the rest, as the list is whole.
+    const upkeep = (t: any) => (typeof t.upkeep === "string" ? `, upkeep ${t.upkeep}` : "");
+    lines.push(delimit("tasks", items.map((t) => `${t.number}  ${t.state}${upkeep(t)}${replaced(t)}${t.progress ? `, progress ${t.progress.at}` : ""}${waits(t)}  ${t.tag ?? "-"}  ${t.title}`).join("\n")));
   }
   return lines.join("\n");
 }
@@ -1372,13 +1389,22 @@ export function renderTasks(header: string, body: Record<string, any>): string {
 export function renderTask(header: string, body: Record<string, any>): string {
   const t = body.task;
   const lines = [header];
+  // next says first which job it hands out and why, in the service's own words.
+  const job = typeof body.job === "string" ? body.job : null;
+  if (job !== null) lines.push(`job: ${job}.${typeof body.why === "string" ? ` ${body.why}` : ""}`);
   if (!t) {
-    lines.push(body.verify ? `no done task in ${spaceName(body.space)} waits for your check` : `no task in ${spaceName(body.space)} is open to you now`);
+    if (job === null) lines.push(body.verify ? `no done task in ${spaceName(body.space)} waits for your check` : `no task in ${spaceName(body.space)} is open to you now`);
     return lines.join("\n");
   }
   if (body.replayed) lines.push("this idempotency_key replayed and nothing new was added");
   if (!("title" in t)) {
     lines.push(`task ${t.number} in ${spaceName(body.space)}: ${t.state === "done" ? "done, waiting for checks" : t.state}, task_id ${t.task_id}`);
+    // A deleted task, read whole, holds no words but who deleted it, when and why.
+    if (t.deleted) {
+      lines.push(`  deleted by ${t.deleted.by} at ${t.deleted.at}: its words are erased`);
+      lines.push(...peerField("delete reason", t.deleted.reason));
+    }
+    lines.push(...retireLines(body));
     if (body.notice) lines.push(body.notice);
     return lines.join("\n");
   }
@@ -1391,11 +1417,23 @@ export function renderTask(header: string, body: Record<string, any>): string {
           ? `done by ${t.claimed_by} at ${t.done_at}, waiting for checks`
           : t.state === "accepted"
             ? `accepted at ${t.accepted_at}, done by ${t.claimed_by}`
-            : t.state;
+            : t.state === "retired" && t.retired
+              ? `retired by ${t.retired.by ?? "the service"} at ${t.retired.at}${t.claimed_by ? `, done by ${t.claimed_by}` : ""}`
+              : t.state;
   lines.push(`task ${t.number} in ${spaceName(body.space)}: ${state}`);
   if (body.verify) lines.push("for you to check: confirm or reject it, with a post showing how");
   else if (body.renewed) lines.push("you held it already: your claim is renewed");
-  lines.push(`  task_id ${t.task_id}, cycle ${t.cycle}, added by ${t.created_by} at ${t.created_at}`);
+  const moved = body.changed_since_claim;
+  if (moved) {
+    lines.push(`it changed after you took it: revision ${moved.from} then, ${moved.to} now. Send done with revision ${moved.to} only if your result still answers it.`);
+  }
+  // An upkeep task (migrations/0134_task_upkeep.sql) only when both say so: its kind is
+  // set and no KEY added it. Its title and body are then the service's fixed brief, printed
+  // outside a fence; any other task is a PEER's words, fenced, whatever its title says.
+  const service = typeof t.upkeep === "string" && t.created_by === null;
+  lines.push(`  task_id ${t.task_id}, cycle ${t.cycle}${t.revision === undefined ? "" : `, revision ${t.revision}`}, ${service ? "handed out by the service" : `added by ${t.created_by}`} at ${t.created_at}`);
+  if (t.changed) lines.push(`  last changed by ${t.changed.by} at ${t.changed.at}`);
+  if (t.retired?.replaced_by_numbers?.length) lines.push(`  replaced by tasks ${taskNumbers(t.retired.replaced_by_numbers)}`);
   if (Array.isArray(t.after) && t.after.length) {
     const ids = t.after.join(" ");
     lines.push(Array.isArray(t.after_numbers) && t.after_numbers.length
@@ -1409,12 +1447,62 @@ export function renderTask(header: string, body: Record<string, any>): string {
   lines.push(`  confirmed ${given.length} of ${c.required} needed${given.length ? `: ${given.join(" ")}` : ""}`);
   if (t.rejected) lines.push(`  last rejected by ${t.rejected.by} at ${t.rejected.at}`);
   if (t.tag) lines.push(delimit("task tag", t.tag));
-  lines.push(...peerField("task title", t.title));
-  lines.push(...peerField("task body", t.body));
+  if (service) {
+    lines.push(`upkeep task: the service's fixed brief`, t.title, t.body);
+  } else {
+    lines.push(...peerField("task title", t.title));
+    lines.push(...peerField("task body", t.body));
+  }
   if (t.rejected) lines.push(...peerField("rejected reason", t.rejected.reason));
   if (t.progress) lines.push(...peerField("progress title", t.progress.title));
+  if (t.changed) lines.push(...peerField("change reason", t.changed.reason));
+  if (t.released) {
+    lines.push(`  given back by ${t.released.by} at ${t.released.at}`);
+    lines.push(...peerField("give-back reason", t.released.reason));
+  }
+  if (t.retired) lines.push(...peerField("retire reason", t.retired.reason));
+  lines.push(...retireLines(body));
+  if (Array.isArray(body.history)) lines.push(...historyLines(body));
   if (body.notice) lines.push(body.notice);
   return lines.join("\n");
+}
+
+/**
+ * What a retire did besides the task itself: the tasks it added in its place, by number and
+ * key, and the tasks it rewrote to wait for what it waited for. No PEER text: the keys are
+ * the caller's own lowercase words, as an add's list prints them.
+ */
+function retireLines(body: Record<string, any>): string[] {
+  const lines: string[] = [];
+  const added: any[] = Array.isArray(body.tasks) ? body.tasks : [];
+  if (added.length) {
+    lines.push(`added in its place: ${added.map((k) => `task ${k.number}${k.key ? ` (${k.key})` : ""}`).join(", ")}`);
+  }
+  if (Array.isArray(body.dependents) && body.dependents.length) {
+    lines.push(`now waiting for what it waited for and its replacements: ${body.dependents.length === 1 ? "task" : "tasks"} ${taskNumbers(body.dependents)}`);
+  }
+  return lines;
+}
+
+/**
+ * A task's earlier words, newest first, as get with history answers them: each revision's
+ * number, who ended it and when, then its words and the reason it ended, all fenced, since a
+ * PEER wrote every one of them.
+ */
+function historyLines(body: Record<string, any>): string[] {
+  const items: any[] = body.history;
+  const lines = ["", `${items.length} earlier revision(s)${body.next_before ? `, more before: pass before ${body.next_before}` : ""}`, ...budgetLine(body)];
+  for (const h of items) {
+    lines.push("", `revision ${h.revision}, ended by ${h.ended.by} at ${h.ended.at}`);
+    if (Array.isArray(h.after) && h.after.length) {
+      lines.push(`  waited for ${h.after_numbers.length === 1 ? "task" : "tasks"} ${taskNumbers(h.after_numbers)}`);
+    }
+    if (h.tag) lines.push(delimit("revision tag", h.tag));
+    lines.push(...peerField("revision title", h.title));
+    lines.push(...peerField("revision body", h.body));
+    lines.push(...peerField("change reason", h.ended.reason));
+  }
+  return lines;
 }
 
 /**

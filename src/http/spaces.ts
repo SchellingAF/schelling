@@ -111,13 +111,15 @@ export function listedSpaces(sql: Sql) {
  * A SPACE's tasks not yet accepted: open or claimed, and done waiting for checks. Two
  * counts, one on each partial index of migrations/0113_tasks.sql, because a single
  * `state <> 'accepted'` matches neither and would read every task the SPACE finished.
- * Read as the caller, so row security counts only a SPACE it may read.
+ * An upkeep task, which next hands out from its counts and nobody takes, is no open work
+ * (migrations/0134_task_upkeep.sql). Read as the caller, so row security counts only a
+ * SPACE it may read.
  */
 export function openTaskCount(sql: Sql, spaceId: ReturnType<Sql>) {
   return sql`((select count(*) from schellingaf.tasks w
-                where w.space_id = ${spaceId} and w.state in ('open', 'claimed'))
+                where w.space_id = ${spaceId} and w.state in ('open', 'claimed') and w.upkeep is null)
             + (select count(*) from schellingaf.tasks d
-                where d.space_id = ${spaceId} and d.state = 'done'))::int`;
+                where d.space_id = ${spaceId} and d.state = 'done' and d.upkeep is null))::int`;
 }
 
 /**
@@ -206,8 +208,10 @@ type CountsRow = {
  * A list item's counts, or null where you may not read the SPACE. Its tasks are open_tasks
  * from openTaskCount(), split: claimed with the claim not yet passed, done waiting for
  * checks, and open, the rest, so a passed claim reads open as the task list shows it.
- * accepted is every task it has had less open_tasks. Both from one statement, so
- * open + claimed + done is always open_tasks.
+ * accepted is every task it has had, less those retired or deleted and every upkeep task
+ * (space_counts() leaves them out of tasks_all, migrations/0132_task_retire_delete.sql and
+ * 0134_task_upkeep.sql), less open_tasks. Both from
+ * one statement, so open + claimed + done is always open_tasks.
  */
 function countsOf(row: CountsRow) {
   if (row.head_seq === null || row.tasks_all === null || row.tasks_all === undefined) return null;
@@ -232,12 +236,12 @@ function countsOf(row: CountsRow) {
   };
 }
 
-/** Whether a SPACE has a task not yet accepted, on the same two partial indexes. */
+/** Whether a SPACE has a task not yet accepted, upkeep aside, on the same two partial indexes. */
 export function hasOpenTasks(sql: Sql, spaceId: ReturnType<Sql>) {
   return sql`(exists (select 1 from schellingaf.tasks w
-                       where w.space_id = ${spaceId} and w.state in ('open', 'claimed'))
+                       where w.space_id = ${spaceId} and w.state in ('open', 'claimed') and w.upkeep is null)
            or exists (select 1 from schellingaf.tasks d
-                       where d.space_id = ${spaceId} and d.state = 'done'))`;
+                       where d.space_id = ${spaceId} and d.state = 'done' and d.upkeep is null))`;
 }
 
 /**
@@ -1162,11 +1166,13 @@ export function mountSpaces(app: Hono<Env>, config: Config, db: Db, service: Ser
     // Absent leaves them alone; a new order is a change, because the first is the main one.
     const categories = optionalCategories(input.categories);
     const filing = categories === null ? null : underOf(categories);
-    // A work space's three task settings, which an admin changes as well as the owner,
-    // where everything above is the owner's alone: set by their own function, in the same
-    // transaction, so a request that one of the two refuses changes nothing.
+    // A work space's three task settings and two upkeep settings, which an admin changes as
+    // well as the owner, where everything above is the owner's alone: set by their own
+    // function, in the same transaction, so a request that one of the two refuses changes
+    // nothing.
     const tasks = optionalTaskSettings(input);
-    const taskSettings = tasks.confirmations !== null || tasks.confirmers !== null || tasks.claimHours !== null;
+    const taskSettings = tasks.confirmations !== null || tasks.confirmers !== null || tasks.claimHours !== null ||
+      tasks.documentAfter !== null || tasks.tasksHours !== null;
     // Whether a work space keeps a document, which an admin sets as well as the owner, in
     // the same transaction too; off is refused once a version is posted.
     const document = optionalBoolean(input.document, "document");
@@ -1188,7 +1194,8 @@ export function mountSpaces(app: Hono<Env>, config: Config, db: Db, service: Ser
       const [updated] = others ? await updateSpace(sql as unknown as Sql) : [];
       const [set] = taskSettings ? await sql<{ set: Record<string, unknown> }[]>`
         select schellingaf.set_task_settings(${c.req.param("name")}, ${me.peerId}, ${tasks.confirmations}::int,
-                                             ${tasks.confirmers}, ${tasks.claimHours}::int) as set` : [];
+                                             ${tasks.confirmers}, ${tasks.claimHours}::int,
+                                             ${tasks.documentAfter}::int, ${tasks.tasksHours}::int) as set` : [];
       const [kept] = document !== null ? await sql<{ kept: Record<string, unknown> }[]>`
         select schellingaf.set_space_document(${c.req.param("name")}, ${me.peerId}, ${document}) as kept` : [];
       return { updated: updated?.updated ?? null, set: set?.set ?? null, kept: kept?.kept ?? null };

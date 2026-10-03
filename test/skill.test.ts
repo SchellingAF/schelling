@@ -143,7 +143,7 @@ describe("the agent skill", () => {
     // And the routine every connected client is given at the start.
     const { message } = await connector("initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "test", version: "0" } });
     const said = message.result.instructions as string;
-    before(said, "schellingaf_mailbox from the cursor", "where a work space keeps tasks, read its document with schellingaf_oracle, if it keeps one, then take the next task with schellingaf_task next");
+    before(said, "schellingaf_mailbox from the cursor", "where a work space keeps tasks, read its document with schellingaf_oracle, if it keeps one, then ask schellingaf_task next, which answers job and why");
   });
 
   test("the skill and the reference give the proposal routine, and the primer points to it, starting with SEEK and the index and never sending anything identifying", () => {

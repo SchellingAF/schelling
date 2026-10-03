@@ -32,6 +32,7 @@ import {
   TAG,
   TASK_CONFIRMERS,
   TASK_KEY,
+  TASK_JOBS,
   TASK_LIMITS,
   TASK_TAG,
   TAUGHT_DATA_KEYS,
@@ -1009,6 +1010,63 @@ export function taskReason(value: unknown, required: boolean): string | null {
   return value;
 }
 
+/**
+ * A task's revision as a body names it: a whole number from 1, read strictly, never "3" or
+ * 2.5; null when it is not sent and not required.
+ */
+export function taskRevision(value: unknown, required: boolean): number | null {
+  if (value === undefined || value === null) {
+    if (required) throw new ApiError("INVALID_REQUEST", { detail: "revision: send the revision you read, which a read of the task answers" });
+    return null;
+  }
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 1 || value > 2147483647) {
+    throw new ApiError("INVALID_REQUEST", { detail: "revision is a whole number from 1" });
+  }
+  return value;
+}
+
+/** A change of a task's words, as change_task() takes it: only the fields sent. */
+export type TaskChange = {
+  revision: number;
+  reason: string;
+  change: { title?: string; body?: string; tag?: string | null; after?: AfterEntry[] };
+};
+
+/**
+ * A change: revision and reason, and at least one of title, body, tag and after, each read
+ * as an add reads it. tag null clears the tag, and after [] clears what the task waits for.
+ */
+export function readTaskChange(input: Record<string, unknown>): TaskChange {
+  const revision = taskRevision(input.revision, true)!;
+  if (input.reason === undefined || input.reason === null) {
+    throw new ApiError("INVALID_REQUEST", { detail: "reason: say why you change the task" });
+  }
+  const reason = taskReason(input.reason, true)!;
+  const change: TaskChange["change"] = {};
+  if (input.title !== undefined) change.title = requireTaskTitle(input.title);
+  if (input.body !== undefined) change.body = optionalTaskBody(input.body);
+  if (input.tag !== undefined) change.tag = optionalTaskTag(input.tag);
+  if (input.after !== undefined) {
+    if (input.after === null) throw new ApiError("INVALID_REQUEST", { detail: "after is a list: send [] to wait for no task" });
+    change.after = taskAfter(input.after, "", null, "one");
+  }
+  if (Object.keys(change).length === 0) {
+    throw new ApiError("INVALID_REQUEST", { detail: "send at least one of title, body, tag and after" });
+  }
+  return { revision, reason, change };
+}
+
+/**
+ * Why a task is retired or deleted: 1 to 500 characters, always sent
+ * (migrations/0132_task_retire_delete.sql).
+ */
+export function taskCloseReason(value: unknown, verb: "retire" | "delete"): string {
+  if (value === undefined || value === null) {
+    throw new ApiError("INVALID_REQUEST", { detail: `reason: say why you ${verb} the task` });
+  }
+  return taskReason(value, true)!;
+}
+
 /** A task's number, as an address names it. Anything else names no task. */
 export function taskNumber(raw: string | undefined): number {
   const n = raw !== undefined && /^[1-9][0-9]{0,9}$/.test(raw) ? Number(raw) : 0;
@@ -1021,6 +1079,15 @@ export function taskNumber(raw: string | undefined): number {
  * number from 1, read strictly: never "3" or 2.5. One past the largest a task can have
  * names no task.
  */
+/** The job next is asked for, or null for the service's choice, any. */
+export function optionalTaskJob(value: unknown): (typeof TASK_JOBS)[number] | null {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== "string" || !TASK_JOBS.includes(value as never)) {
+    throw new ApiError("INVALID_REQUEST", { detail: `job is one of ${TASK_JOBS.join(", ")}` });
+  }
+  return value as (typeof TASK_JOBS)[number];
+}
+
 export function optionalTaskNumber(value: unknown): number | null {
   if (value === undefined || value === null) return null;
   if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 1) {
@@ -1031,15 +1098,19 @@ export function optionalTaskNumber(value: unknown): number | null {
 }
 
 /**
- * The three task settings a SPACE's settings route takes, each null when it is not sent:
- * how many confirmations accept a done task, who may confirm, and how many hours a claim
- * lasts. A whole number read strictly, never "2" or 2.5: a setting read leniently is one
+ * The task settings a SPACE's settings route takes, each null when it is not sent: how many
+ * confirmations accept a done task, who may confirm, how many hours a claim lasts, and the
+ * two upkeep settings (migrations/0134_task_upkeep.sql): the findings and results that make
+ * document upkeep due, and the hours a done task waits unchecked before it calls a task
+ * review, each 0 for off. A whole number read strictly, never "2" or 2.5: a setting read leniently is one
  * nobody can say they chose.
  */
 export function optionalTaskSettings(input: Record<string, unknown>): {
   confirmations: number | null;
   confirmers: string | null;
   claimHours: number | null;
+  documentAfter: number | null;
+  tasksHours: number | null;
 } {
   const whole = (value: unknown, name: string, low: number, high: number): number | null => {
     if (value === undefined || value === null) return null;
@@ -1056,5 +1127,9 @@ export function optionalTaskSettings(input: Record<string, unknown>): {
     confirmations: whole(input.task_confirmations, "task_confirmations", TASK_LIMITS.confirmations.min, TASK_LIMITS.confirmations.max),
     confirmers: (confirmers as string | undefined) ?? null,
     claimHours: whole(input.task_claim_hours, "task_claim_hours", TASK_LIMITS.claimHours.min, TASK_LIMITS.claimHours.max),
+    documentAfter: whole(input.upkeep_document_after, "upkeep_document_after",
+                         TASK_LIMITS.upkeep.documentAfter.min, TASK_LIMITS.upkeep.documentAfter.max),
+    tasksHours: whole(input.upkeep_tasks_hours, "upkeep_tasks_hours",
+                      TASK_LIMITS.upkeep.tasksHours.min, TASK_LIMITS.upkeep.tasksHours.max),
   };
 }

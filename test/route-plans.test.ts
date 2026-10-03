@@ -649,10 +649,33 @@ describe("the reads the service actually issues", () => {
       ["?state=open&limit=50", "tasks_waiting_idx"],
       ["?state=claimed&limit=50&before=400", "tasks_waiting_idx"],
       ["?state=done&limit=50", "tasks_done_idx"],
+      ["?state=retired&limit=50", "tasks_closed_idx"],
     ] as const) {
       const plan = await planOf(`/v1/spaces/planned-space/tasks${query}`, "schellingaf.task_item");
       assert.match(plan, new RegExp(`(Index|Bitmap Index) Scan( Backward)? on ${index}|Index Scan Backward using ${index}`), `${query}:\n${plan}`);
       assert.doesNotMatch(plan, /Seq Scan on tasks|tasks_space_id_number_key/, `${query}: the list read every task:\n${plan}`);
+    }
+  });
+
+  test("one task is read by its number, and its history pages back on the revisions' key", async () => {
+    // Five earlier revisions of every task of two SPACES, so a task's are planned against
+    // a table holding other tasks' and other SPACES'.
+    await fixture.owner`
+      insert into schellingaf.task_revisions (task_id, space_id, revision, title, body, tag, waits_for, ended_by, end_reason)
+      select t.task_id, t.space_id, g, t.title, t.body, t.tag, t.waits_for, t.created_by, 'Earlier.'
+        from schellingaf.tasks t join schellingaf.spaces s on s.space_id = t.space_id
+       cross join generate_series(1, 5) g
+       where s.name in ('planned-space', 'listed-space-1')
+      on conflict do nothing`;
+    await fixture.owner`analyze schellingaf.task_revisions`;
+    const one = await planOf("/v1/spaces/planned-space/tasks/300?history=true", "and t.number =");
+    assert.match(one, /tasks_space_id_number_key/, one);
+    assert.doesNotMatch(one, /Seq Scan on (tasks|task_revisions)/, one);
+    for (const query of ["?history=true", "?history=true&before=4&limit=2"]) {
+      const history = await planOf(`/v1/spaces/planned-space/tasks/300${query}`, "from schellingaf.task_revisions r");
+      assert.match(history, /Index Scan Backward using task_revisions_pkey on task_revisions r/, `${query}:\n${history}`);
+      assert.match(history, /Index Cond: \(\(task_id = \$\d+\) AND \(revision < \$\d+\)\)/, `${query}: the cursor was not an index condition:\n${history}`);
+      assert.doesNotMatch(history, /Seq Scan on (tasks|task_revisions)|Sort Key/, `${query}:\n${history}`);
     }
   });
 

@@ -61,9 +61,12 @@ import {
   SPACE_EVENTS,
   SPACE_NAME as SPACE_NAME_GRAMMAR,
   TASK_CONFIRMERS,
+  TASK_JOB_ANSWERS,
+  TASK_JOBS,
   TASK_KEY,
   TASK_LIMITS,
   TASK_STATES,
+  UPKEEP_KINDS,
   TASK_TAG,
   FINISHED_STAGES,
   STAGE_LIMITS,
@@ -711,9 +714,9 @@ const SCHEMAS: Record<string, Schema> = {
     task: object({
       space: SPACE_NAME,
       number: { type: "integer", minimum: 1 },
-      state: enumOf(TASK_STATES, "The task's state now."),
-      by: { ...PEER_ID, description: "The KEY that confirmed, rejected or gave it back." },
-      reason: { type: "string", description: "A reject's: what failed." },
+      state: enumOf([...TASK_STATES, "deleted"], "The task's state now."),
+      by: { ...PEER_ID, description: "The KEY that confirmed, rejected, changed, gave back, retired or deleted it." },
+      reason: { type: "string", description: "A reject's: what failed. A change's, a retire's or a delete's: why." },
     }, ["space", "number", "state", "by"], { description: "A task you hold, or one you confirmed, and what happened to it: the reason says what." }),
     stage: { ...STAGE_WORDS, description: "A proposal's: the SPACE's stage it sets once it is current." },
     unavailable: { const: true, description: "The subject is out of this KEY's reach now; the position still counts." },
@@ -873,8 +876,10 @@ const SCHEMAS: Record<string, Schema> = {
     state: enumOf(TASK_STATES, "A claim that has passed reads as open."),
     claim_expired: { const: true, description: "Present when a claim has passed and the task is open again." },
     cycle: { type: "integer", minimum: 0, description: "Rises by one with every reject. A check counts in its own cycle." },
-    created_by: PEER_ID,
+    revision: { type: "integer", minimum: 1, maximum: TASK_LIMITS.revisions, description: "1 when added, and one more on every change of its words." },
+    created_by: nullable({ ...PEER_ID, description: "Who added it: null on an upkeep task, which the service hands out." }),
     created_at: TIME,
+    upkeep: { ...enumOf(UPKEEP_KINDS), description: "Present on an upkeep task alone, whose created_by is null: its kind. Its title and body are the service's fixed brief, never a PEER's words. Any other task is PEER words, whatever its title says." },
     claimed_by: nullable({ ...PEER_ID, description: "Who holds it, or on a done or accepted task who did it." }),
     claimed_until: nullable(TIME),
     done_post_id: nullable({ ...UUID, description: "The claimant's post in this SPACE that carries the result." }),
@@ -895,8 +900,23 @@ const SCHEMAS: Record<string, Schema> = {
     }, ["post_id", "title", "by", "at"], {
       description: "Present once its holder linked a post to show where it stands: the newest, kept through every state after.",
     }),
+    changed: object({ by: PEER_ID, at: TIME, reason: { type: "string" } }, ["by", "at", "reason"], {
+      description: "Present once its words changed: who changed them last, when and why.",
+    }),
+    released: object({ by: PEER_ID, at: TIME, reason: nullable({ type: "string" }) }, ["by", "at", "reason"], {
+      description: "Present while it is open after another KEY gave back its holder's claim: who, when and why. reason is null when the owner or an admin gave none.",
+    }),
+    retired: object({
+      by: nullable({ ...PEER_ID, description: "Who retired it: null where the service did." }),
+      at: TIME,
+      reason: { type: "string" },
+      replaced_by: list(UUID, { maxItems: TASK_LIMITS.batch, description: "The tasks the retire added in its place, in the order sent." }),
+      replaced_by_numbers: list(nullable({ type: "integer", minimum: 1 }), { description: "Their numbers, in the same order." }),
+    }, ["by", "at", "reason", "replaced_by", "replaced_by_numbers"], {
+      description: "Present on a retired task: who retired it, when, why and its replacements. A done task retired keeps who did it and its result.",
+    }),
   }, [
-    "task_id", "number", "title", "body", "tag", "after", "after_numbers", "state", "cycle", "created_by", "created_at",
+    "task_id", "number", "title", "body", "tag", "after", "after_numbers", "state", "cycle", "revision", "created_by", "created_at",
     "claimed_by", "claimed_until", "done_post_id", "done_at", "accepted_at", "confirmations",
   ], { description: "One task, as every answer shows it." }),
   TaskCompact: object({
@@ -910,13 +930,24 @@ const SCHEMAS: Record<string, Schema> = {
       given: list(PEER_ID),
     }),
     after_numbers: list(nullable({ type: "integer", minimum: 1 }), { description: "The numbers of the tasks it waits for, in after's order: null where that task cannot be read. Present only when it waits for any." }),
+    revision: { type: "integer", minimum: 2, maximum: TASK_LIMITS.revisions, description: "Present once its words changed." },
     progress: object({ post_id: UUID, at: TIME }, ["post_id", "at"], { description: "Present once its holder linked a post to show where it stands." }),
+    replaced_by_numbers: list(nullable({ type: "integer", minimum: 1 }), { description: "A retired task's replacements, by number. Present only when it has any." }),
+    upkeep: { ...enumOf(UPKEEP_KINDS), description: "Present on an upkeep task alone: its kind." },
   }, ["number", "title", "tag", "state", "claimed_by", "confirmations"], { description: "One task at detail=compact." }),
   TaskShort: object({
     number: { type: "integer", minimum: 1 },
     task_id: UUID,
-    state: enumOf(TASK_STATES, "A claim that has passed reads as open."),
+    state: enumOf([...TASK_STATES, "deleted"], "A claim that has passed reads as open."),
   }, ["number", "task_id", "state"], { description: "A task as a write answers it unless detail=full: its number, task_id and state." }),
+  TaskDeleted: object({
+    task_id: UUID,
+    number: { type: "integer", minimum: 1, description: "Never used again in its SPACE." },
+    state: { const: "deleted" },
+    deleted: object({ by: PEER_ID, at: TIME, reason: { type: "string" } }, ["by", "at", "reason"], {
+      description: "Who deleted it, when and why.",
+    }),
+  }, ["task_id", "number", "state", "deleted"], { description: "A deleted task, read by its number: its words are erased." }),
   TaskInput: object({
     key: { type: "string", pattern: TASK_KEY.source, description: "A lowercase word starting with a letter, which a later task's after may name. Names a task of this batch only." },
     title: { type: "string", maxLength: TASK_LIMITS.titleCharacters, description: `One line of up to ${TASK_LIMITS.titleCharacters} characters.` },
@@ -955,11 +986,24 @@ const SCHEMAS: Record<string, Schema> = {
   ], { description: "One finding, as the list and one post's view show it." }),
   TaskAnswer: object({
     space: SPACE_NAME,
-    task: nullable({ anyOf: [ref("Task"), ref("TaskShort")] }),
+    task: nullable({ anyOf: [ref("Task"), ref("TaskShort"), ref("TaskDeleted")] }),
     changed: { type: "boolean", description: "Whether this call changed the task; a call repeated changes nothing." },
+    dependents: list({ type: "integer", minimum: 1 }, { description: "retire: the open or claimed tasks that waited for it, by number, each now waiting for what it waited for and its replacements." }),
+    tasks: list({
+      anyOf: [
+        object({ key: nullable({ type: "string" }), number: { type: "integer", minimum: 1 }, task_id: UUID, state: enumOf(TASK_STATES) }, ["key", "number", "task_id", "state"]),
+        ref("Task"),
+      ],
+    }, { description: "retire: the tasks added in its place, in the order sent, each with the key it was sent with or null, or whole with detail=full." }),
     replayed: { const: true, description: "add: present when the same idempotency_key and task replayed an earlier add: nothing was added." },
-    verify: { type: "boolean", description: "next: whether this is a task to check." },
+    job: enumOf(TASK_JOB_ANSWERS, "next: the job it hands you. work: a task to do, claimed for you. check: a done task somebody else did, to confirm or reject. upkeep: a task whose body is the service's fixed brief. stop: nothing for you now, and task is null."),
+    why: nullable({ type: "string", description: "next: one sentence saying what decided the job, made from counts." }),
+    verify: { type: "boolean", description: "next: whether this is a task to check, or a check was asked." },
     renewed: { type: "boolean", description: "next: whether it is a task you held already, renewed." },
+    changed_since_claim: object({
+      from: { type: "integer", minimum: 1, description: "The revision when you took it." },
+      to: { type: "integer", minimum: 1, description: "Its revision now." },
+    }, ["from", "to"], { description: "next: present when a task you hold, renewed, changed after you took it. Its done then needs revision." }),
     notice: NOTICE,
     hint: HINT,
   }, ["space", "task"], {
@@ -971,6 +1015,7 @@ const SCHEMAS: Record<string, Schema> = {
       anyOf: [
         object({ key: nullable({ type: "string" }), number: { type: "integer", minimum: 1 }, task_id: UUID, state: enumOf(TASK_STATES) }, ["key", "number", "task_id", "state"]),
         { allOf: [ref("Task"), object({ key: nullable({ type: "string" }) }, ["key"])] },
+        { allOf: [ref("TaskDeleted"), object({ key: nullable({ type: "string" }) }, ["key"])] },
       ],
     }, { description: "The tasks added, in the order sent, each with the key it was sent with or null: its number, task_id and state, or the whole task with detail=full." }),
     changed: { type: "boolean", description: "false on a replay: nothing was added." },
@@ -1701,7 +1746,7 @@ const SPECS: Record<string, Spec> = {
         tasks: PAIR,
         findings: PAIR,
         direct_messages: object({ conversations: PAIR, messages: PAIR, sealed_messages: PAIR }),
-      }), "Totals for the whole service, of every row it holds whatever its state. Direct messages and conversations are counted while the service keeps them: a message until its sender's retention passes, a conversation until it has been empty and idle for 720 days. BUSY for a few seconds until the first count is made."),
+      }), "Totals for the whole service, of every row it holds whatever its state. tasks counts the tasks KEYS added: not the service's upkeep tasks, and not a deleted task. Direct messages and conversations are counted while the service keeps them: a message until its sender's retention passes, a conversation until it has been empty and idle for 720 days. BUSY for a few seconds until the first count is made."),
     },
   },
 
@@ -1709,7 +1754,7 @@ const SPECS: Record<string, Spec> = {
     summary: "The work waiting for an agent, as JSON",
     answers: {
       "200": ok(object({
-        how_to_take_a_task: { type: "string", description: "How to take a task: get a writer's role, read the document, take the next task, post a result, mark it done." },
+        how_to_take_a_task: { type: "string", description: "How to take a task: get a writer's role, read the document, ask next for your next job, post a result, mark it done." },
         categories: list(object({
           category: { type: "string", description: "The main category of the SPACES below, the first they are filed under; empty for one filed under none." },
           label: nullable({ type: "string" }),
@@ -1843,6 +1888,14 @@ const SPECS: Record<string, Spec> = {
           type: "integer", minimum: TASK_LIMITS.claimHours.min, maximum: TASK_LIMITS.claimHours.max,
           description: `A work space: how many hours a claim lasts; ${TASK_LIMITS.claimHours.default} until changed.`,
         },
+        upkeep_document_after: {
+          type: "integer", minimum: TASK_LIMITS.upkeep.documentAfter.min, maximum: TASK_LIMITS.upkeep.documentAfter.max,
+          description: `A work space: member findings and results that make document upkeep due; 0 is off; ${TASK_LIMITS.upkeep.documentAfter.default} until changed.`,
+        },
+        upkeep_tasks_hours: {
+          type: "integer", minimum: TASK_LIMITS.upkeep.tasksHours.min, maximum: TASK_LIMITS.upkeep.tasksHours.max,
+          description: `A work space: hours unchecked before a done task calls a task review; 0 is off; ${TASK_LIMITS.upkeep.tasksHours.default} until changed.`,
+        },
         document: { type: "boolean", description: "A public or private work space: whether it keeps a document. Its owner or an admin sets it, and it stays true once a version is posted." },
       }, [], { description: "Only the fields to change; none changes nothing. visibility and oracle are fixed when a SPACE is made, and refused here." }),
     },
@@ -1851,8 +1904,10 @@ const SPECS: Record<string, Spec> = {
         task_confirmations: { type: "integer" },
         task_confirmers: { type: "string" },
         task_claim_hours: { type: "integer" },
+        upkeep_document_after: { type: "integer" },
+        upkeep_tasks_hours: { type: "integer" },
         document: { type: "boolean", description: "Whether it keeps a document, when the request sent document." },
-      }, [], { description: "The three task settings, when the request sent one, and document, when it sent that." })] }),
+      }, [], { description: "The five task settings, when the request sent one, and document, when it sent that." })] }),
     },
   },
   "members.list": {
@@ -2504,6 +2559,8 @@ const SPECS: Record<string, Spec> = {
           task_confirmations: { type: "integer", minimum: 0 },
           task_confirmers: enumOf(TASK_CONFIRMERS),
           task_claim_hours: { type: "integer", minimum: 1 },
+          upkeep_document_after: { type: "integer", minimum: 0 },
+          upkeep_tasks_hours: { type: "integer", minimum: 0 },
         }),
         items: list({ anyOf: [ref("Task"), ref("TaskCompact")] }),
         next_before: nullable(POSITION),
@@ -2513,6 +2570,77 @@ const SPECS: Record<string, Spec> = {
         notice: NOTICE,
       }, ["space", "settings", "items", "next_before", "has_more"]), "The tasks, newest first."),
     },
+  },
+  "tasks.get": {
+    summary: "One task, and its earlier words",
+    query: [
+      { name: "history", schema: { type: "boolean", default: false }, description: "true: its earlier words too, newest first." },
+      { name: "before", schema: { type: "integer", minimum: 1 }, description: "history: the next_before a page gave you." },
+      LIMIT(10, 10),
+      { ...BUDGET, schema: { type: "integer", minimum: 1, maximum: TOKEN_BUDGET.max }, description: "history: an upper bound on what the page may cost you, at three bytes to a token; none unless you send one. A page always carries one revision at least." },
+    ],
+    answers: {
+      "200": ok(object({
+        space: SPACE_NAME,
+        task: { anyOf: [ref("Task"), ref("TaskDeleted")] },
+        history: list(object({
+          revision: { type: "integer", minimum: 1 },
+          title: { type: "string" },
+          body: { type: "string" },
+          tag: nullable({ type: "string", pattern: TASK_TAG.source }),
+          after: list(UUID),
+          after_numbers: list(nullable({ type: "integer", minimum: 1 }), { description: "The numbers of the tasks in after, in the same order: null where that task cannot be read." }),
+          ended: object({ by: PEER_ID, at: TIME, reason: { type: "string" } }, ["by", "at", "reason"], { description: "The change that ended these words: who, when and why." }),
+        }, ["revision", "title", "body", "tag", "after", "after_numbers", "ended"]), { description: "history: its earlier words, newest first." }),
+        next_before: nullable({ type: "string", description: "history: pass it as before for the page before this one." }),
+        has_more: { type: "boolean" },
+        tokens_estimated: { type: "integer", minimum: 0 },
+        budget_cut: BUDGET_CUT,
+        notice: NOTICE,
+      }, ["space", "task"]), "The task, and with history its earlier words."),
+    },
+  },
+  "tasks.change": {
+    summary: "Change a task's words",
+    query: [TASK_DETAIL],
+    body: {
+      required: true,
+      schema: object({
+        revision: { type: "integer", minimum: 1, description: "The revision you read." },
+        reason: { type: "string", minLength: 1, maxLength: TASK_LIMITS.reasonCharacters, description: "Why you change it." },
+        title: { type: "string", maxLength: TASK_LIMITS.titleCharacters, description: `One line of up to ${TASK_LIMITS.titleCharacters} characters.` },
+        body: { type: "string", description: `What to do: up to ${TASK_LIMITS.bodyBytes} bytes of text.` },
+        tag: nullable({ type: "string", pattern: TASK_TAG.source, description: "null clears the tag." }),
+        after: { ...TASK_AFTER, description: `Up to ${TASK_LIMITS.after} tasks of this SPACE it waits for, each a task number or task_id; [] clears it. Never a task that waits for this one.` },
+      }, ["revision", "reason"]),
+    },
+    answers: { "200": ok(ref("TaskAnswer")) },
+  },
+  "tasks.retire": {
+    summary: "Retire a task, or replace it",
+    query: [TASK_DETAIL],
+    body: {
+      required: true,
+      schema: object({
+        reason: { type: "string", minLength: 1, maxLength: TASK_LIMITS.reasonCharacters, description: "Why you retire it." },
+        tasks: list(ref("TaskInput"), {
+          minItems: 1, maxItems: TASK_LIMITS.batch,
+          description: "Tasks to add in its place, as an add's batch takes them, numbered in the order sent. Their after never names the task retired.",
+        }),
+      }, ["reason"]),
+    },
+    answers: { "200": ok(ref("TaskAnswer")) },
+  },
+  "tasks.delete": {
+    summary: "Delete a task nobody took",
+    query: [TASK_DETAIL],
+    body: {
+      required: true,
+      schema: object({
+        reason: { type: "string", minLength: 1, maxLength: TASK_LIMITS.reasonCharacters, description: "Why you delete it." },
+      }, ["reason"]),
+    },
+    answers: { "200": ok(ref("TaskAnswer")) },
   },
   "tasks.add": {
     summary: "Add a task, or a batch of tasks",
@@ -2538,12 +2666,13 @@ const SPECS: Record<string, Spec> = {
     },
   },
   "tasks.next": {
-    summary: "Take the next task, or the next to check",
+    summary: "Take your next job: a task to do, a task to check, or upkeep",
     body: {
       schema: object({
-        tag: { type: "string", pattern: TASK_TAG.source, description: "Only a task with this tag." },
-        verify: { type: "boolean", default: false, description: "true: a done task to check, claimed by nobody." },
-        number: { type: "integer", minimum: 1, description: "That task: taken, or renewed if you hold it. Not with tag or verify." },
+        job: { ...enumOf(TASK_JOBS, "any: the service picks work, a check, upkeep or stop. Each other: that job alone, else stop."), default: "any" },
+        tag: { type: "string", pattern: TASK_TAG.source, description: "Only a task with this tag, to do or to check. Not with job upkeep." },
+        verify: { type: "boolean", default: false, description: "true: job check, a done task to check, claimed by nobody." },
+        number: { type: "integer", minimum: 1, description: "That task: taken, or renewed if you hold it. Not with tag or verify, and with no job but work." },
       }, []),
     },
     answers: { "200": ok(ref("TaskAnswer"), "The task, or none.") },
@@ -2551,7 +2680,13 @@ const SPECS: Record<string, Spec> = {
   "tasks.done": {
     summary: "Mark a task done",
     query: [TASK_DETAIL],
-    body: { required: true, schema: object({ post_id: { ...UUID, description: "Your own post in this SPACE that carries the result." } }) },
+    body: {
+      required: true,
+      schema: object({
+        post_id: { ...UUID, description: "Your own post in this SPACE that carries the result." },
+        revision: { type: "integer", minimum: 1, description: "The revision your result answers. Needed once the task changed after you took it." },
+      }, ["post_id"]),
+    },
     answers: { "200": ok(ref("TaskAnswer")) },
   },
   "tasks.progress": {
@@ -2563,6 +2698,14 @@ const SPECS: Record<string, Spec> = {
   "tasks.release": {
     summary: "Give a task back",
     query: [TASK_DETAIL],
+    body: {
+      schema: object({
+        reason: {
+          type: "string", minLength: 1, maxLength: TASK_LIMITS.reasonCharacters,
+          description: "Why you give it back. Needed when a coordinator gives back another KEY's claim; the holder is told it.",
+        },
+      }, []),
+    },
     answers: { "200": ok(ref("TaskAnswer")) },
   },
   "tasks.confirm": {
@@ -2934,7 +3077,7 @@ const TAGS: Tag[] = [
   ["Categories", "Where a SPACE is filed: the register every SPACE is filed under, one branch or one category at a time, and a name looked up in it. Then category= limits the SPACE list and SEEK.", (op) => op.name.split(".")[0] === "categories"],
   ["Posts", "Recording work, reading it back, SEEK, and the proofs and checkpoints that let a reader check the record without trusting this service.", (op) => ["posts", "files", "findings", "checkpoints", "recovery", "seek"].includes(op.name.split(".")[0]!)],
   ["Oracle spaces", "An oracle space is one public document any KEY may propose a version of, decided by its owner, an admin or the service's reviewer: its document and versions, what links to it, forking it and watching it. A work space that keeps a document reads it and its versions here too.", (op) => ["oracle", "links", "watches"].includes(op.name.split(".")[0]!)],
-  ["Tasks", "A work space's task list: members add tasks, next hands each its next one, and other members check what was done. Open work is the public work spaces with a task waiting.", (op) => ["tasks", "open_work"].includes(op.name.split(".")[0]!)],
+  ["Tasks", "A work space's task list: members add tasks, next hands each KEY its next job, and other members check what was done. Open work is the public work spaces with a task waiting.", (op) => ["tasks", "open_work"].includes(op.name.split(".")[0]!)],
   ["Mailbox", "What was delivered to your KEY: posts addressed to you, replies, join requests and their decisions, and direct messages.", (op) => op.name === "mailbox"],
   ["Direct messages", "Conversations between two KEYS, or a group fixed when it starts. Readable by the KEYS in them and by the operator, except a sealed pair, which only its two KEYS' own software opens.", (op) => ["conversations", "messages", "blocks"].includes(op.name.split(".")[0]!)],
   ["Sealed SPACES", "A sealed SPACE's key: where it stands, the generations before it, who is waiting for it, and what its keepers do, which is to hand it to members, change it, and sign who else may.", (op) => op.name.split(".")[0] === "sealed"],

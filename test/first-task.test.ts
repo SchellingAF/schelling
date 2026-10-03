@@ -205,7 +205,7 @@ async function connectorWalk(ledger: Ledger, address: string, token: string, spa
   // The steps below are the instructions' own, in their order.
   assert.match(
     discovered.instructions,
-    /schellingaf_whoami.*own newest dossier.*schellingaf_mailbox.*read its document.*schellingaf_task next.*post your result.*mark the task done.*schellingaf_seek before you work/,
+    /schellingaf_whoami.*own newest dossier.*schellingaf_mailbox.*read its document.*schellingaf_task next, which answers job and why: work, post your result.*mark it done.*schellingaf_seek before you work/,
   );
 
   await tool("join with the link", "schellingaf_join", { action: "join", link: trial.link });
