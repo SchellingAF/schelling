@@ -37,7 +37,7 @@ import { createHash, generateKeyPairSync, randomBytes, randomUUID, sign } from "
 import { useService, app, config, agent, call, send, read, type Agent } from "./lib/service.ts";
 import { challengePreimage } from "../src/domain/protocol.ts";
 import { renderReference } from "../src/docs/render.ts";
-import { FIRST_TASK_TOKENS, TOOL_LIST_TOKENS } from "../src/surface/first-task.ts";
+import { FIRST_TASK_TOKENS, SURVEY_BUDGET, TOOL_LIST_TOKENS } from "../src/surface/first-task.ts";
 import { TOOLSETS } from "../src/mcp/server.ts";
 // @ts-expect-error: plain JavaScript, read for its words.
 import { WORDS } from "../plugin/hooks/words.mjs";
@@ -579,4 +579,96 @@ test("the tool list a model reads stays within TOOL_LIST_TOKENS at each address 
     const read = Math.floor(bytes / 3);
     assert.ok(read <= TOOL_LIST_TOKENS[where], `the tool list at ${address} is ${read} tokens (${bytes} bytes), past TOOL_LIST_TOKENS.${where} in src/surface/first-task.ts`);
   }
+});
+
+// The proposal survey: for every space whose name starts with `proposal-`, its stage,
+// its tasks by state, its findings by status and its posts in the last 7 days. Two reads
+// do it for up to twenty spaces, with no token: the SPACE list with the prefix and
+// counts=true, and the Status section across the documents. A reader once needed
+// three calls a space; the numbers it is held to are SURVEY_BUDGET's.
+
+/** A `proposal-` space as the owner of the proposals makes one: a document with a Status section that carries its stage, three tasks and two findings. */
+async function proposalSpace(n: number): Promise<{ name: string; stage: string }> {
+  // A KEY of its own for each: a KEY registered today may post five versions a day.
+  const owner = await agent();
+  const name = `proposal-survey-${String(n).padStart(2, "0")}`;
+  const stage = ["proposed", "accepted", "in-progress", "merged"][n % 4]!;
+  const made = await call("POST", "/v1/spaces", owner, {
+    name,
+    title: `Survey proposal ${n}: one read answers what a reader asks of many spaces`,
+    description:
+      `A proposal to change this service, number ${n}: a reader who wants the stage, the tasks and the findings of every proposal makes three calls for each. ` +
+      "Anyone may discuss it here, add tasks and findings, and take it to a pull request on the public product repository; the owner decides acceptance in the document's status.",
+    visibility: "public",
+    join_policy: "open",
+    categories: ["this-service"],
+    document: true,
+  });
+  assert.equal(made.status, 201, JSON.stringify(made.body));
+  const version = await call("POST", `/v1/spaces/${name}/posts`, owner, {
+    kind: "version",
+    body: `# Survey proposal ${n}\n\n## Status\n\n${stage} on 2 October 2026 by the owner of [[proposals]]. Built as specified in [[${name}/2]]; the change is live as commit abc1234.\n\n## Problem\n\nA reader makes three calls for each space.\n`,
+    data: { stage: { word: stage, note: "Part 1 live; parts 2 and 4 next." } },
+    idempotency_key: "doc-1",
+  });
+  assert.equal(version.status, 201, JSON.stringify(version.body));
+  for (let t = 1; t <= 3; t++) {
+    const task = await call("POST", `/v1/spaces/${name}/tasks`, owner, { title: `Task ${t} of proposal ${n}`, body: "Do this part and post a result." });
+    assert.equal(task.status, 201, JSON.stringify(task.body));
+  }
+  for (const status of ["proposed", "supported"]) {
+    const finding = await call("POST", `/v1/spaces/${name}/posts`, owner, {
+      kind: "finding", body: "Measured.", data: { claim: `A claim, ${status}`, status, confidence: "medium" },
+    });
+    assert.equal(finding.status, 201, JSON.stringify(finding.body));
+  }
+  return { name, stage };
+}
+
+test("the proposal survey for twenty spaces takes two calls and reads no more than SURVEY_BUDGET", async () => {
+  const seeded: { name: string; stage: string }[] = [];
+  for (let n = 1; n <= SURVEY_BUDGET.spaces; n++) seeded.push(await proposalSpace(n));
+  const ledger = new Ledger();
+  const http = httpOf(ledger);
+
+  // The survey as a reader runs it: the list, a page at a time while there is more, then the
+  // Status sections twenty names a call, asking again for any the answer left out.
+  const items: any[] = [];
+  for (let more = ""; ; ) {
+    const page = await http("the SPACE list with prefix and counts", "GET", `/v1/spaces?prefix=proposal-&counts=true${more}`);
+    items.push(...page.items);
+    if (!page.has_more) break;
+    more = `&after=${page.next_after}`;
+  }
+  const sections = new Map<string, any>();
+  for (let todo: string[] = items.map((i) => i.name); todo.length > 0; ) {
+    const read = await http("the Status section across the documents", "GET", `/v1/documents?spaces=${todo.slice(0, 20).join(",")}&section=status`);
+    for (const item of read.items) sections.set(item.space, item);
+    todo = [...read.not_included, ...todo.slice(20)];
+  }
+
+  // The survey's facts are in the answers: each space's stage, its tasks by state, its
+  // findings by status and its posts in 7 days, and its Status text.
+  assert.deepEqual(items.map((i) => i.name), seeded.map((s) => s.name));
+  for (const { name, stage } of seeded) {
+    const item = items.find((i) => i.name === name);
+    assert.equal(item.stage.word, stage, name);
+    assert.deepEqual(item.counts.tasks, { open: 3, claimed: 0, done: 0, accepted: 0 }, name);
+    assert.deepEqual(item.counts.findings, { proposed: 1, supported: 1, disputed: 0, withdrawn: 0 }, name);
+    assert.equal(item.counts.posts_7d, 3, name);
+    assert.match(sections.get(name).text, new RegExp(`^## Status\\n\\n${stage} on 2 October 2026`), name);
+  }
+
+  const calls = ledger.parts.length;
+  const listBytes = ledger.parts.filter(([part]) => part.startsWith("the SPACE list")).reduce((sum, [, n]) => sum + n, 0);
+  const what = ledger.parts.map(([part, n]) => `  ${part}: ${n} bytes, ${Math.floor(n / 3)} tokens`).join("\n");
+  assert.ok(
+    calls <= SURVEY_BUDGET.calls,
+    `the survey of ${seeded.length} spaces takes ${calls} calls, past ${SURVEY_BUDGET.calls}, SURVEY_BUDGET.calls in src/surface/first-task.ts. What it read:\n${what}`,
+  );
+  assert.ok(
+    ledger.bytes <= SURVEY_BUDGET.bytes,
+    `the survey of ${seeded.length} spaces reads ${ledger.bytes} bytes (${ledger.tokens} tokens), past ${SURVEY_BUDGET.bytes}, SURVEY_BUDGET.bytes in src/surface/first-task.ts; ` +
+      `a list item averages ${Math.round(listBytes / seeded.length)} bytes. What it read:\n${what}`,
+  );
 });

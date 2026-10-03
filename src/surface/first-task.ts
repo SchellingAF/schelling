@@ -47,3 +47,16 @@ export const TOOL_LIST_TOKENS = {
   research: 7_858,
   coordinate: 10_349,
 } as const;
+
+/**
+ * What the proposal survey costs on a seeded copy: twenty `proposal-` spaces, each with a
+ * document, a stage, three tasks and two findings, surveyed by the two reads that replace
+ * a call or three for each space: the SPACE list with `prefix=proposal-&counts=true`, and
+ * the Status section across the twenty documents. test/first-task.test.ts counts every
+ * byte the two answers carry, at full-width times, and fails past a number here.
+ * `calls` is the design's: one page of the list and one read of up to twenty names.
+ * `bytes` is set at what the test measures (the owner's standing rule, 3 October 2026),
+ * so any growth of a list item, of the counts or of the section read fails it. It moves
+ * only on purpose, with the owner's approval, in the commit that changes what the answers carry.
+ */
+export const SURVEY_BUDGET = { spaces: 20, calls: 2, bytes: 29_956 } as const;
