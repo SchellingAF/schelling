@@ -2,19 +2,22 @@
 // not sealed as it would be posted, and writes nothing. It is refused where and as the POST
 // would be, an outsider of a private SPACE included, so it tells nobody more than posting
 // would; it answers the hint and read_cost a POST's answer carries; it spends no write
-// allowance and is counted as a read; and it is no part of a signed or sealed POST. The
-// connector's schellingaf_post takes none: a bridge older than it signs every post and
-// drops the field, so it is offered over HTTPS alone, and refused at /mcp.
+// allowance and is counted as a read; and it is no part of a signed or sealed POST. No
+// connector tool takes one: a bridge older than it signs every post and drops the field,
+// so it is offered over HTTPS alone, and refused at /mcp. Anything else that reads as a
+// dry run, in a query, spelt otherwise, named twice or sent to another write, is refused
+// before anything is written, so nothing meant as a try is ever done for real.
 
 import { test, before, beforeEach, describe } from "node:test";
 import assert from "node:assert/strict";
 import { createHash, randomBytes, randomUUID, sign } from "node:crypto";
-import { useService, fixture, call, agent, connector, type Agent, type Reply } from "./lib/service.ts";
+import { useService, fixture, call, read, app, agent, connector, type Agent, type Reply } from "./lib/service.ts";
 import { buildPostObject, objectIdOf, signaturePreimageOf } from "../src/domain/objects.ts";
 import { canonicalBytes } from "../src/domain/jcs.ts";
 import { readsCounted } from "../src/http/ratelimit.ts";
 import { NO_DRY_RUN_HERE } from "../src/mcp/server.ts";
-import { NOTHING_POSTED, POSTED_AS_WRITTEN, TITLE_HINT_LINE } from "../src/domain/voice.ts";
+import { DRY_RUN_HINT_SECOND_LINE, DRY_RUN_STAGE_HINT, DRY_RUN_TITLE_HINT_LINE, DRY_RUN_VERSION_TITLE_HINT_LINE, NOTHING_POSTED, POSTED_AS_WRITTEN, STAGE_HINT, TITLE_HINT_LINE } from "../src/domain/voice.ts";
+import { ERRORS } from "../src/db/errors.ts";
 import * as sealed from "../content/sealed.mjs";
 
 before(() => {
@@ -40,6 +43,8 @@ let currentVersion: string;
 
 const sha = (text: string) => createHash("sha256").update(text).digest("hex");
 const posts = (name: string) => `/v1/spaces/${name}/posts`;
+/** The detail a dry run meets where none is taken. */
+const DRY_RUN_ONLY_THERE = "dry_run is taken only by POST /v1/spaces/(name)/posts, spelt so, in its JSON body: nothing was done";
 
 /** Everything a POST writes, counted, and the SPACE's head and revision. */
 async function written(name: string) {
@@ -54,6 +59,7 @@ async function written(name: string) {
            (select count(*)::int from schellingaf.post_attachments) as attachments,
            (select count(*)::int from schellingaf.file_uploads) as uploads,
            (select count(*)::int from schellingaf.post_fingerprints) as fingerprints,
+           (select count(*)::int from schellingaf.tasks) as tasks,
            (select last_seq::text from schellingaf.spaces where name = ${name}) as head,
            (select revision::text from schellingaf.spaces where name = ${name}) as revision`;
   return row!;
@@ -122,7 +128,7 @@ describe("a dry run of a POST that would be written", () => {
     assert.deepEqual(Object.keys(dry.body), ["dry_run", "space", "read_cost", "hint"]);
     assert.equal(dry.body.dry_run, true);
     assert.equal(dry.body.space, PRIVATE);
-    assert.equal(dry.body.hint, `Title ran ${Buffer.byteLength(LONG_TITLE)} bytes.\n${TITLE_HINT_LINE}\n${NOTHING_POSTED}`);
+    assert.equal(dry.body.hint, `Title ran ${Buffer.byteLength(LONG_TITLE)} bytes.\n${DRY_RUN_TITLE_HINT_LINE}\n${NOTHING_POSTED}`);
     // Counted as one read, and no write allowance reported.
     assert.equal(readsCounted(`peer:${writer.peerId}`), reads + 1);
     assert.equal(dry.headers.get("RateLimit-Remaining"), null);
@@ -288,19 +294,141 @@ describe("a dry run is no part of a signed or sealed POST", () => {
   });
 });
 
-describe("the connector", () => {
-  test("schellingaf_post lists no dry_run, and refuses one rather than posting", async () => {
-    const listed = await connector("tools/list", {}, writer);
-    const tool = listed.message.result.tools.find((t: any) => t.name === "schellingaf_post");
-    assert.ok(tool, JSON.stringify(listed.message));
-    assert.equal("dry_run" in tool.inputSchema.properties, false);
+describe("a dry run's hint says what would happen, before it does", () => {
+  const LONG = "This sentence keeps going well past the twenty words a sentence may run here before the hint names it as long.";
+  const cases: [string, Record<string, unknown>, string, string][] = [
+    ["data.stage alone", { kind: "obs", title: "Staged", body: "Short.", data: { stage: "draft" } },
+      `${DRY_RUN_STAGE_HINT}\n${NOTHING_POSTED}`, STAGE_HINT],
+    ["a long sentence", { kind: "obs", title: "Long", body: LONG },
+      `1 of 1 sentences ran over 20 words: 21 ("This sentence keeps going well ...").\n${DRY_RUN_HINT_SECOND_LINE}`, ""],
+    ["data.stage and a long title", { kind: "obs", title: "x".repeat(130), body: "Short.", data: { stage: "draft" } },
+      `${DRY_RUN_STAGE_HINT}\nTitle ran 130 bytes.\n${DRY_RUN_TITLE_HINT_LINE}\n${NOTHING_POSTED}`,
+      `${STAGE_HINT}\nTitle ran 130 bytes.\n${TITLE_HINT_LINE}\n${POSTED_AS_WRITTEN}`],
+  ];
+  for (const [what, body, dryHint, realHint] of cases) {
+    test(what, async () => {
+      const dry = await call("POST", posts(PRIVATE), writer.token, { ...body, dry_run: true });
+      assert.equal(dry.status, 200, JSON.stringify(dry.body));
+      assert.equal(dry.body.hint, dryHint);
+      assert.doesNotMatch(dry.body.hint, /Next time|Posted as written|post set none/);
+      if (realHint === "") return;
+      const real = await call("POST", posts(PRIVATE), writer.token, body);
+      assert.equal(real.status, 201, JSON.stringify(real.body));
+      assert.equal(real.body.hint, realHint);
+    });
+  }
+
+  test("a version's long title", async () => {
+    const dry = await call("POST", posts(ORACLE), outsider.token, { kind: "version", title: "v".repeat(130), body: "## A\n\nB.", supersedes: currentVersion, dry_run: true });
+    assert.equal(dry.status, 200, JSON.stringify(dry.body));
+    assert.equal(dry.body.hint, `Title ran 130 bytes.\n${DRY_RUN_VERSION_TITLE_HINT_LINE}\n${NOTHING_POSTED}`);
+  });
+});
+
+describe("whatever reads as a dry run is a dry run or refused, and nothing is written", () => {
+  /** A request's body sent as written, so it can name one member twice. */
+  const raw = async (method: string, path: string, who: Agent, body: string) => read(await app.request(path, {
+    method, headers: { "content-type": "application/json", authorization: `Bearer ${who.token}` }, body,
+  }));
+  const refusedAsDryRun = (out: Reply) => {
+    assert.equal(out.status, 400, JSON.stringify(out.body));
+    assert.equal(out.body.error.code, "INVALID_REQUEST");
+    assert.equal(out.body.error.detail, DRY_RUN_ONLY_THERE);
+  };
+  const body = { kind: "obs", title: "Meant as a try", body: "Not to be posted." };
+
+  test("in the query of a POST, however it is spelt", async () => {
     const before = await written(PRIVATE);
-    for (const dryRun of [true, false]) {
-      const out = await connector("tools/call", { name: "schellingaf_post", arguments: { space: PRIVATE, kind: "obs", title: "Through the connector", body: "x", dry_run: dryRun } }, writer);
-      assert.equal(out.message.result.isError, true, JSON.stringify(out.message));
-      assert.match(out.message.result.content[0].text, /^INVALID_REQUEST\b/);
-      assert.ok(out.message.result.content[0].text.includes(`(${NO_DRY_RUN_HERE})`), out.message.result.content[0].text);
+    for (const query of ["dry_run=true", "dry_run=false", "dryRun=1", "DRY-RUN", "dry_run=true&receipt=full"]) {
+      refusedAsDryRun(await call("POST", `${posts(PRIVATE)}?${query}`, writer.token, body));
     }
     assert.deepEqual(await written(PRIVATE), before);
   });
+
+  test("a POST's query takes receipt alone", async () => {
+    const before = await written(PRIVATE);
+    for (const query of ["kind=obs", "idempotency_key=q-1", "receipt=full&title=x"]) {
+      const out = await call("POST", `${posts(PRIVATE)}?${query}`, writer.token, body);
+      assert.equal(out.status, 400, JSON.stringify(out.body));
+      assert.equal(out.body.error.detail, "the query of POST /v1/spaces/(name)/posts takes receipt alone: send every field in the JSON body");
+    }
+    assert.deepEqual(await written(PRIVATE), before);
+    const full = await call("POST", `${posts(PRIVATE)}?receipt=full`, writer.token, body);
+    assert.equal(full.status, 201, JSON.stringify(full.body));
+  });
+
+  for (const field of ["dryRun", "DRY_RUN", "Dry_Run", "dry-run", "dryrun", "dry run", "DryRun"]) {
+    test(`spelt ${field} in a POST's body, true or false`, async () => {
+      const before = await written(PRIVATE);
+      for (const value of [true, false]) refusedAsDryRun(await call("POST", posts(PRIVATE), writer.token, { ...body, [field]: value }));
+      assert.deepEqual(await written(PRIVATE), before);
+    });
+  }
+
+  test("named twice in a POST's body, in either order, and any other member named twice", async () => {
+    const before = await written(PRIVATE);
+    for (const text of [
+      `{"kind":"obs","title":"Twice","body":"x","dry_run":true,"dry_run":false}`,
+      `{"kind":"obs","title":"Twice","body":"x","dry_run":false,"dry_run":true}`,
+      `{"kind":"obs","title":"Twice","title":"Again","body":"x"}`,
+      `{"kind":"obs","title":"Twice","body":"x","data":{"a":1,"a":2}}`,
+    ]) {
+      const out = await raw("POST", posts(PRIVATE), writer, text);
+      assert.equal(out.status, 400, JSON.stringify(out.body));
+      assert.equal(out.body.error.detail, "a JSON object names one member twice");
+    }
+    assert.deepEqual(await written(PRIVATE), before);
+    // The same name in two objects is no duplicate.
+    const apart = await raw("POST", posts(PRIVATE), writer, `{"kind":"obs","title":"Apart","body":"x","data":{"title":"inner"}}`);
+    assert.equal(apart.status, 201, JSON.stringify(apart.body));
+  });
+
+  test("sent to another write, in its body or its query, or named twice there", async () => {
+    const name = `dry-made-${tag}`;
+    const spaces = async () => (await fixture.owner<{ n: number }[]>`select count(*)::int as n from schellingaf.spaces where name = ${name}`)[0]!.n;
+    const blocks = async () => (await fixture.owner<{ n: number }[]>`
+      select count(*)::int as n from schellingaf.space_blocks b join schellingaf.spaces s using (space_id) where s.name = ${PRIVATE}`)[0]!.n;
+    const blocked = await blocks();
+    refusedAsDryRun(await call("POST", "/v1/spaces", owner.token, { name, title: "Tried", dry_run: true }));
+    refusedAsDryRun(await call("POST", "/v1/spaces", owner.token, { name, title: "Tried", dryRun: true }));
+    refusedAsDryRun(await call("POST", "/v1/spaces?dry_run=true", owner.token, { name, title: "Tried" }));
+    const twice = await raw("POST", "/v1/spaces", owner, `{"name":"${name}","title":"Tried","title":"Again"}`);
+    assert.equal(twice.status, 400, JSON.stringify(twice.body));
+    assert.equal(twice.body.error.detail, "a JSON object names one member twice");
+    // A route that reads no body still meets the rule before it acts.
+    refusedAsDryRun(await call("PUT", `/v1/spaces/${PRIVATE}/blocks/${reader.peerId}`, owner.token, { dry_run: true }));
+    refusedAsDryRun(await call("PUT", `/v1/spaces/${PRIVATE}/blocks/${reader.peerId}?dry-run=1`, owner.token));
+    assert.equal(await spaces(), 0);
+    assert.equal(await blocks(), blocked);
+  });
+});
+
+describe("the connector", () => {
+  const spec = ERRORS.INVALID_REQUEST!;
+  const words = `${spec.message} (${NO_DRY_RUN_HERE}) ${spec.fix}`;
+
+  test("no tool lists a dry run", async () => {
+    const listed = await connector("tools/list", {}, writer);
+    for (const tool of listed.message.result.tools) {
+      const names = Object.keys(tool.inputSchema?.properties ?? {});
+      assert.ok(!names.some((n) => n.toLowerCase().replace(/[^a-z0-9]/g, "") === "dryrun"), tool.name);
+    }
+  });
+
+  const calls: [string, () => Record<string, unknown>, () => string][] = [
+    ["schellingaf_post with dry_run true", () => ({ name: "schellingaf_post", arguments: { space: PRIVATE, kind: "obs", title: "Through the connector", body: "x", dry_run: true } }), () => PRIVATE],
+    ["schellingaf_post with dry_run false", () => ({ name: "schellingaf_post", arguments: { space: PRIVATE, kind: "obs", title: "Through the connector", body: "x", dry_run: false } }), () => PRIVATE],
+    ["schellingaf_post with dryRun", () => ({ name: "schellingaf_post", arguments: { space: PRIVATE, kind: "obs", title: "Through the connector", body: "x", dryRun: true } }), () => PRIVATE],
+    ["schellingaf_oracle propose with dry_run", () => ({ name: "schellingaf_oracle", arguments: { action: "propose", space: ORACLE, text: "## Status\n\nChanged.", summary: "Status changed", wait: 0, dry_run: true } }), () => ORACLE],
+    ["schellingaf_task with DRY-RUN", () => ({ name: "schellingaf_task", arguments: { action: "add", space: PRIVATE, title: "A task", "DRY-RUN": true } }), () => PRIVATE],
+  ];
+  for (const [what, params, space] of calls) {
+    test(`refuses ${what}, in the service's words, and writes nothing`, async () => {
+      const before = await written(space());
+      const out = await connector("tools/call", params(), writer);
+      assert.equal(out.message.result.isError, true, JSON.stringify(out.message));
+      assert.equal(out.message.result.content[0].text, words);
+      assert.deepEqual(await written(space()), before);
+    });
+  }
 });

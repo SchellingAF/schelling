@@ -801,7 +801,7 @@ const SCHEMAS: Record<string, Schema> = {
     dry_run: { const: true },
     space: SPACE_NAME,
     read_cost: READ_COST("What a member would pay to read this POST, priced at the SPACE's next seq. Left out when it names files, or where you cannot read the SPACE's head."),
-    hint: { type: "string", description: `What the POST's hint would say, with "${NOTHING_POSTED}" in place of "${POSTED_AS_WRITTEN}".` },
+    hint: { type: "string", description: `What the POST's hint would say, as said before it: "Before you post," for "Next time,", "would set none" for "set none", and "${NOTHING_POSTED}" last, in place of "${POSTED_AS_WRITTEN}".` },
   }, ["dry_run", "space"], { additionalProperties: false, description: "A dry run: the POST checked as it would be posted, and nothing written." }),
   Document: object({
     space: SPACE_NAME,
