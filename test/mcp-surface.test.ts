@@ -11,7 +11,7 @@ import assert from "node:assert/strict";
 import { createHash, randomBytes, sign } from "node:crypto";
 import { filed, filedTool } from "./helpers.ts";
 import { useService, app, agent, send, read, HOST, type Agent } from "./lib/service.ts";
-import { COMPATIBILITY_TOOLS, DOCUMENT_RESOURCES, MCP_TOOLS, PROMPT_TOOLS, PROMPTS, TEMPLATE_RESOURCES, TOOLSETS } from "../src/mcp/server.ts";
+import { COMPATIBILITY_TOOLS, DOCUMENT_RESOURCES, INSTRUCTIONS, MCP_TOOLS, PROMPT_TOOLS, PROMPTS, TEMPLATE_RESOURCES, TOOLSETS } from "../src/mcp/server.ts";
 import { OPERATIONS } from "../src/surface/operations.ts";
 import { ERRORS } from "../src/db/errors.ts";
 import { referenceParts, renderPrimer, renderReference, sectionNames } from "../src/docs/render.ts";
@@ -186,6 +186,22 @@ describe("what a 2026-07-28 client discovers", () => {
     // And a tool that only reads is exactly a tool that reaches no operation but GET.
     const writing = new Set(result.tools.filter((t: any) => !t.annotations.readOnlyHint).map((t: any) => t.name));
     assert.deepEqual([...writing].sort(), ["schellingaf_join", "schellingaf_message", "schellingaf_oracle", "schellingaf_post", "schellingaf_space_control", "schellingaf_task"]);
+  });
+
+  test("an agent on a bridge before 0.1.6, which drops task, is told what to do when its answer names no task", async () => {
+    // The routine, in the instructions an older bridge relays from /mcp, short enough to
+    // stay under where Claude Code cuts them; and start-tasks step 8 in full.
+    assert.ok(INSTRUCTIONS.includes("post your result with fingerprints and task (no task in the receipt: use schellingaf_task); check,"), INSTRUCTIONS);
+    assert.ok(INSTRUCTIONS.length < 2000, `the instructions are ${INSTRUCTIONS.length} characters`);
+    const start = renderReference().split("## Start: tasks")[1]!.split("\n## ")[0]!;
+    const step8 = start.split("\n").find((line) => line.startsWith("8. "))!;
+    assert.ok(step8.includes(`"task":{"number":<number>}`), step8);
+    assert.ok(step8.includes("No `task` in the answer: an older bridge dropped it; mark it done with `schellingaf_task`, and update the bridge."), step8);
+    // The field itself says what an answer's task is.
+    const listed = await call("tools/list", {});
+    const post = listed.result.tools.find((t: any) => t.name === "schellingaf_post");
+    assert.match(post.inputSchema.properties.task.description, /The answer's task gives its state\.$/);
+    assert.match(post.inputSchema.properties.posts.description, /^up to 20 POSTS in order/);
   });
 
   test("no tool description reaches 2,000 characters, nor the instructions, below where Claude Code cuts them", async () => {
@@ -438,7 +454,7 @@ describe("toolsets, at /mcp?tools=", () => {
     const own = MCP_TOOLS.filter((name) => !(name in COMPATIBILITY_TOOLS));
     const tools = (text: string) => [...new Set(text.match(/schellingaf_[a-z_]+/g) ?? [])].sort();
     const { instructions } = (await call("server/discover")).result;
-    const sentence = /Toolsets narrow the tool list: \/mcp\?tools=(.*?)\. A tool your set leaves out/.exec(instructions)?.[1] ?? "";
+    const sentence = /Toolsets narrow the tool list: \/mcp\?tools=(.*?); with no set, every tool\./.exec(instructions)?.[1] ?? "";
     const named = sentence.replace(/, or the bridge's SCHELLINGAF_TOOLS$/, "").split(/, | or /);
     assert.deepEqual(named.sort(), Object.keys(TOOLSETS).sort(), `the instructions name the sets: ${sentence}`);
     assert.ok(own.length > 0);
@@ -521,7 +537,7 @@ describe("the resources", () => {
     const reference = await readResource("schellingaf://reference");
     assert.match(reference.result.contents[0].text, /^# Schelling Add Forward API reference/);
     const caps = await readResource("schellingaf://capabilities");
-    assert.equal(JSON.parse(caps.result.contents[0].text).api_version, "0.3");
+    assert.equal(JSON.parse(caps.result.contents[0].text).api_version, "0.4");
   });
 
   test("a KEY's own documents need its token, say which code when they have none, and are never shared", async () => {
@@ -930,7 +946,7 @@ describe("files, through the tools that post and open", () => {
       assert.equal(words(described), count, at);
     }
     assert.ok((get.inputSchema.properties.token_budget.description as string).endsWith("; or with attachment, how much of the file"));
-    assert.ok((post.description as string).includes("Attach up to four files with attachments; each one's hash joins the POST's fingerprints, so a signature covers it."));
+    assert.ok((post.description as string).includes("Attach files with attachments; each hash joins the fingerprints, so a signature covers it."));
     assert.ok((get.description as string).includes("With attachment and a space or post_id, a file a POST attaches: text in your context up to token_budget, anything else described."));
     // Four at most, each a name, a media type and one way to the bytes. No tool was added for them.
     const files = post.inputSchema.properties.attachments;

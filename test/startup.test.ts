@@ -747,7 +747,7 @@ describe("the rate buckets are pruned", () => {
   test("a bucket somebody is still using is left alone", async () => {
     await stale("key:fresh:0:0:0:0::/64", 0);
     const result = await pruneOnce();
-    assert.deepEqual(result, { state: "pruned", buckets: 0, tokens: 0, apps: 0, messages: 0, files: 0 });
+    assert.deepEqual(result, { state: "pruned", buckets: 0, tokens: 0, apps: 0, messages: 0, files: 0, offers: 0 });
     assert.equal(await count(), 1);
   });
 

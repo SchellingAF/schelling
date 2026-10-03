@@ -22,13 +22,23 @@ import { appendFile, readdir, unlink } from "node:fs/promises";
 import { mkdirSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import path from "node:path";
-import type { MiddlewareHandler } from "hono";
+import type { Context, MiddlewareHandler } from "hono";
 import type { Env } from "./app.ts";
 import { envNumber } from "../config.ts";
 import { clientAddress } from "./ratelimit.ts";
 import { wakeHeads } from "./wait.ts";
 import { publishChange } from "../mcp/listen.ts";
 import { normalise } from "../surface/categories.ts";
+
+/**
+ * A deadlock written down: one line beside the exception log's INTERNAL lines and in their
+ * form, the request id an agent reports, the call, SQLSTATE 40P01, and what became of it.
+ * Each one is a lock order to look at, though none is a fault. Never the statement or the
+ * driver's detail, which names the processes and the rows that waited.
+ */
+export function logDeadlock(c: Context<Env>, outcome: string): void {
+  console.error(`[${c.get("requestId")}] ${c.req.method} ${c.req.path} 40P01 deadlock_detected: ${outcome}`);
+}
 
 /**
  * Which POSTS a read actually returned. Ids only, never a title or a body.

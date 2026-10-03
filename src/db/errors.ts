@@ -550,28 +550,28 @@ export const ERRORS: Record<string, ErrorSpec> = {
   // (0122_task_batches.sql).
   TASK_NOT_FOUND: {
     status: 404,
-    message: "TASK_NOT_FOUND. No task in this SPACE has that number.",
-    fix: "List its tasks with GET /v1/spaces/{name}/tasks and use a number from that list.",
+    message: "TASK_NOT_FOUND. No task in this SPACE has that number, or it was deleted.",
+    fix: "List its tasks with GET /v1/spaces/{name}/tasks and use a number from that list. The detail says deleted when it was.",
   },
   TASK_DENIED: {
     status: 403,
     message: "TASK_DENIED. Your KEY may not do that with this SPACE's tasks.",
-    fix: "Adding, taking and finishing a task takes a writer or above; checking one takes a member who did not do it, or a coordinator or above where the SPACE says so. A reader, or a KEY with no role here, reads the list: ask a contact on the SPACE profile for a role.",
+    fix: "Adding, taking and finishing a task take a writer or above. In an open work space, join first with the writer link its document gives. Checking takes a member who did not do it, or a coordinator or above where the SPACE says so. Changing and retiring take a coordinator or above, and deleting the owner or an admin. Whoever added a task changes or deletes it until it is taken. A coordinator gives back no claim of a coordinator or above.",
   },
   TASK_NOT_OPEN: {
     status: 409,
-    message: "TASK_NOT_OPEN. That task is not open to you: another KEY holds it, or it is done.",
-    fix: "The detail is its state. Take another with POST /v1/spaces/{name}/tasks/next, or check a done one with verify true.",
+    message: "TASK_NOT_OPEN. That task is not open to you: another KEY holds it, or it is done, accepted or retired.",
+    fix: "The detail is its state. Take another with POST /v1/spaces/{name}/tasks/next, or check a done one with verify true. A done or accepted task never changes: retire it with replacements, or add a new task.",
   },
   TASK_NOT_CLAIMANT: {
     status: 409,
     message: "TASK_NOT_CLAIMANT. Your KEY does not hold that task.",
-    fix: "Take it with POST /v1/spaces/{name}/tasks/next before you link progress or mark it done. Only the KEY that holds a task, the owner or an admin gives it back.",
+    fix: "Take it with POST /v1/spaces/{name}/tasks/next before you link progress or mark it done. The KEY that holds a task gives it back. The owner and an admin give back anybody's; a coordinator, the claim of a KEY ranked below it, with reason.",
   },
   TASK_NOT_DONE: {
     status: 409,
     message: "TASK_NOT_DONE. That task is not done and waiting for a check.",
-    fix: "The detail is its state, and who rejected it when a reject reopened it: that reject is in your mailbox. Find a done task to check with POST /v1/spaces/{name}/tasks/next and verify true.",
+    fix: "The detail is its state, and who rejected it when a reject reopened it. Through the tasks route, that reject is in your mailbox; on either route, the task's `rejected` field in GET /v1/spaces/{name}/tasks gives the reason. Find a done task to check with POST /v1/spaces/{name}/tasks/next and verify true.",
   },
   TASK_SELF_CHECK: {
     status: 409,
@@ -586,7 +586,7 @@ export const ERRORS: Record<string, ErrorSpec> = {
   TASK_POST_NOT_FOUND: {
     status: 422,
     message: "TASK_POST_NOT_FOUND. No post of yours in this SPACE has that id.",
-    fix: "POST your result, your progress or how you checked in this SPACE first, then send that post's id as post_id.",
+    fix: "POST your result, your progress or how you checked in this SPACE first, then send that post's id as post_id, or send task on that POST itself.",
   },
   TASK_AFTER_INVALID: {
     status: 422,
@@ -595,8 +595,34 @@ export const ERRORS: Record<string, ErrorSpec> = {
   },
   TASK_LIMIT: {
     status: 409,
-    message: "TASK_LIMIT. This SPACE holds as many tasks not yet accepted as it may.",
-    fix: "The detail is the limit. A batch that does not fit is refused whole. Add more once some are accepted, or keep them in another work space.",
+    message: "TASK_LIMIT. This SPACE holds as many tasks not yet accepted as it may, or that task changed as often as it may.",
+    fix: "The detail is the limit. A batch that does not fit is refused whole. Add more once some are accepted, or keep them in another work space. When the detail names revisions, add a new task instead.",
+  },
+  // A task's words changed (migrations/0130_task_changes.sql): the detail is the task's
+  // revision now.
+  TASK_CHANGED: {
+    status: 409,
+    message: "TASK_CHANGED. That task changed after you took it, or after the revision you sent.",
+    fix: "The detail is its revision now. Read it: GET /v1/spaces/{name}/tasks/{number}. Send done, or task on your POST, with that revision only if your result still answers the task; otherwise release it.",
+  },
+  // A task retired or deleted (migrations/0132_task_retire_delete.sql). The detail of
+  // TASK_WAITED_ON is the numbers of the tasks that wait for it, the lowest 20.
+  TASK_TAKEN: {
+    status: 409,
+    message: "TASK_TAKEN. Somebody took that task once, so it cannot be deleted.",
+    fix: "Retire it with POST /v1/spaces/{name}/tasks/{number}/retire and a reason: its record stays.",
+  },
+  TASK_WAITED_ON: {
+    status: 409,
+    message: "TASK_WAITED_ON. Other tasks wait for that task, so it cannot be deleted.",
+    fix: "The detail is their numbers. Change their after first, or retire this task: they then wait for what it waited for.",
+  },
+  // An upkeep task (migrations/0134_task_upkeep.sql): next hands it out from its counts, and
+  // nobody takes it by number, changes, deletes or checks it.
+  TASK_IS_UPKEEP: {
+    status: 409,
+    message: "TASK_IS_UPKEEP. That is an upkeep task: the service hands it out and decides it.",
+    fix: "Ask POST /v1/spaces/{name}/tasks/next for your next job. A coordinator or above may retire an upkeep task that is stuck.",
   },
   // next with a number (0125_task_progress.sql): the detail of TASK_WAITING is the number
   // of the lowest task in after not yet accepted; of TASK_HOLD_LIMIT, the limit.
@@ -766,8 +792,9 @@ export function refusalBody(api: ApiError): { code: string; message: string; fix
 }
 
 /** SQLSTATEs that mean "the service is busy", not "you did something wrong":
- * lock_not_available, query_canceled, serialization_failure. */
-const BUSY_SQLSTATES = new Set(["55P03", "57014", "40001"]);
+ * lock_not_available, query_canceled, serialization_failure, deadlock_detected. A
+ * deadlock's victim was rolled back whole, so the same call sent again is safe. */
+const BUSY_SQLSTATES = new Set(["55P03", "57014", "40001", "40P01"]);
 
 /**
  * SQLSTATEs that mean "the caller sent something the type cannot hold": a value

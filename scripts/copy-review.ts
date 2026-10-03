@@ -42,6 +42,7 @@ import { MORE_OPEN_WORK, NOTHING_OPEN } from "../src/mcp/render.ts";
 import { createApp } from "../src/http/app.ts";
 import { CATEGORY_MAX_DEPTH } from "../src/surface/categories.ts";
 import { pluginFiles } from "../src/surface/plugin.ts";
+import { NEXT_WORDS } from "../src/surface/next-words.ts";
 import { BARE_CONFIG, EXAMPLE_CONFIG, STUB_DB, excluded, noise } from "./copy-places.ts";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -903,7 +904,7 @@ export const MORE_TITLES: Record<number, string> = {
 /** The source files whose sentences the pattern sections read, by section. */
 export const SWEPT: Record<number, string[]> = {
   19: [...filesIn("src/http", /\.ts$/), ...filesIn("src/domain", /\.ts$/), "src/db/errors.ts", ...filesIn("migrations", /\.sql$/)].filter((f) => !excluded(f)),
-  20: filesIn("src/http", /\.ts$/).filter((f) => !excluded(f)),
+  20: [...filesIn("src/http", /\.ts$/), "src/surface/next-words.ts"].filter((f) => !excluded(f)),
   21: ["src/oauth/routes.ts", "src/oauth/uris.ts"],
   22: ["src/mcp/server.ts", "src/mcp/compat.ts", "src/mcp/listen.ts", "src/mcp/prompts.ts", "src/mcp/resources.ts"],
   23: ["src/mcp/render.ts", "src/http/markdown.ts"],
@@ -1230,6 +1231,17 @@ async function renderMore(): Promise<string> {
     ...sayingsAt("src/http/app.ts", /\breason:\s*/g, "why GET /healthz answers 503", spanOf("src/http/app.ts", 'app.get("/healthz"')),
   );
   sayings(guidance, (s) => `${base(s.file)}: ${firstWords(s.text)}`);
+  // Why next hands out its job: one sentence a case, which next_job() fills with numbers.
+  for (const [key, text] of Object.entries(NEXT_WORDS.why)) put(`next why: ${key}`, "why next hands out this job; the database fills in each {number}", text);
+  // What calls a task review, task numbers as a sentence says them, and the upkeep briefs:
+  // the title and body of a task the service hands out, filled with numbers only.
+  for (const [key, text] of Object.entries(NEXT_WORDS.signals)) put(`next signal: ${key}`, "what calls a task review, in its why and its brief", text);
+  for (const [key, text] of Object.entries(NEXT_WORDS.tasks)) put(`next task numbers: ${key}`, "task numbers inside a signal", text);
+  put("next count at its cap", "a count of findings and results at 100", NEXT_WORDS.count_cap);
+  for (const [key, brief] of Object.entries(NEXT_WORDS.upkeep)) {
+    put(`upkeep ${key}: title`, "an upkeep task's title, the service's own", brief.title);
+    put(`upkeep ${key}: body`, "an upkeep task's body, the service's fixed brief", brief.body);
+  }
   // A sentence a database function puts in its answer, found by the sweep: a field of a
   // jsonb_build_object whose value is words.
   for (const file of filesIn("migrations", /\.sql$/)) {

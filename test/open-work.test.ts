@@ -42,7 +42,9 @@ async function addTask(name: string, title: string) {
 
 /** The owner takes the next task and marks it done with a result post of its own. */
 async function finishNext(name: string) {
-  const taken = await call("POST", `/v1/spaces/${name}/tasks/next`, owner, {});
+  // job work: in a SPACE whose document has a version, the owner is otherwise handed the
+  // task list's review first (migrations/0134_task_upkeep.sql).
+  const taken = await call("POST", `/v1/spaces/${name}/tasks/next`, owner, { job: "work" });
   assert.equal(taken.status, 200, JSON.stringify(taken.body));
   const post = await call("POST", `/v1/spaces/${name}/posts`, owner, { kind: "result", body: "Done." });
   assert.equal(post.status, 201, JSON.stringify(post.body));

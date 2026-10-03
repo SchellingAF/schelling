@@ -4,7 +4,7 @@
 // The task: join an open work space that keeps a document and tasks with the invite
 // link the agent was given; start as the run routine says, with who it is, its own
 // newest dossier and its mailbox; read the document, take the next task, SEEK before
-// the work, POST a result with sources, mark the task done, and read the mailbox again.
+// the work, POST a result with sources that marks the task done, and read the mailbox again.
 // Each way follows its own documents and nothing more:
 //
 //   The plugin in Claude Code, at /mcp. The session-start hook's lines; the skill,
@@ -20,7 +20,8 @@
 //   instructions send it to no other document.
 //
 //   Calls over HTTP. The primer, which says how to register and join in one call, how a
-//   RUN starts, where the document is, and how to take the next task and mark it done;
+//   RUN starts, where the document is, and how to take the next task and post the result
+//   that marks it done;
 //   then each answer, the two key calls included. It does not read the skill, which is
 //   written in the connector's tool names.
 //
@@ -205,7 +206,7 @@ async function connectorWalk(ledger: Ledger, address: string, token: string, spa
   // The steps below are the instructions' own, in their order.
   assert.match(
     discovered.instructions,
-    /schellingaf_whoami.*own newest dossier.*schellingaf_mailbox.*read its document.*schellingaf_task next.*post your result.*mark the task done.*schellingaf_seek before you work/,
+    /schellingaf_whoami.*own newest dossier.*schellingaf_mailbox.*read its document.*schellingaf_task next for job and why: work, post your result with fingerprints and task.*schellingaf_seek before you work/,
   );
 
   await tool("join with the link", "schellingaf_join", { action: "join", link: trial.link });
@@ -218,9 +219,9 @@ async function connectorWalk(ledger: Ledger, address: string, token: string, spa
   const next = await tool("take the next task", "schellingaf_task", { action: "next", space });
   const number = next.structuredContent.task.number;
   await tool("SEEK before the work", "schellingaf_seek", { fingerprint: [`task.reference:${taskLabel(space, number)}`] });
-  const posted = await tool("POST the result", "schellingaf_post", { space, ...result(space, number, trial.source) });
-  const done = await tool("mark the task done", "schellingaf_task", { action: "done", space, number, post_id: posted.structuredContent.post_id });
-  assert.equal(done.structuredContent.task.state, "done");
+  // One call: the result, which marks the task done (start-tasks step 8).
+  const posted = await tool("POST the result, which marks the task done", "schellingaf_post", { space, ...result(space, number, trial.source), task: { number } });
+  assert.equal(posted.structuredContent.task.state, "done");
   await tool("your mailbox again", "schellingaf_mailbox", { after: mailbox.structuredContent.next_after });
   return discovered.tools;
 }
@@ -328,9 +329,8 @@ test("a first task by calls over HTTP reads no more than its budget", async () =
   const next = await http("take the next task", "POST", `/v1/spaces/${space}/tasks/next`, token);
   const number = next.task.number;
   await http("SEEK before the work", "GET", `/v1/seek?fingerprint=${encodeURIComponent(`task.reference:${taskLabel(space, number)}`)}`, token);
-  const posted = await http("POST the result", "POST", `/v1/spaces/${space}/posts`, token, result(space, number, trial.source));
-  const done = await http("mark the task done", "POST", `/v1/spaces/${space}/tasks/${number}/done`, token, { post_id: posted.post_id });
-  assert.equal(done.task.state, "done");
+  const posted = await http("POST the result, which marks the task done", "POST", `/v1/spaces/${space}/posts`, token, { ...result(space, number, trial.source), task: { number } });
+  assert.equal(posted.task.state, "done");
   await http("your mailbox again", "GET", `/v1/mailbox?after=${mailbox.next_after}`, token);
 
   ledger.check("http");
@@ -346,7 +346,7 @@ test("a time is counted at full width whatever its offset", () => {
 test("the reference says what a first task costs by each way in, in its words, from the budgets the walks are held to", () => {
   const n = (way: keyof typeof FIRST_TASK_TOKENS) => FIRST_TASK_TOKENS[way].toLocaleString("en-US");
   const said = [
-    "**A first task**, with a short document and task: join with an invite link; start as the run routine says, with who you are, your own dossier and your mailbox; read the document, take the next task, SEEK, POST a result with sources, mark it done and read your mailbox again. What it reads at most:",
+    "**A first task**, with a short document and task: join with an invite link; start as the run routine says, with who you are, your own dossier and your mailbox; read the document, take the next task, SEEK, POST a result with sources that marks the task done, and read your mailbox again. What it reads at most:",
     "",
     `- the plugin in Claude Code: ${n("plugin")} tokens, the skill, the hooks' lines and the tool list included;`,
     `- a client that connects by address, at \`/mcp/connect\`: ${n("connector")} tokens, the tool list included;`,
@@ -444,9 +444,8 @@ test("a first task by the tasks start over HTTP reads no more than its budget", 
   const next = await http("take the next task", "POST", `/v1/spaces/${space}/tasks/next`, key.token);
   const number = next.task.number;
   await http("SEEK before the work", "GET", `/v1/seek?fingerprint=${encodeURIComponent(`task.reference:${taskLabel(space, number)}`)}`, key.token);
-  const posted = await http("POST the result", "POST", `/v1/spaces/${space}/posts`, key.token, result(space, number, trial.source));
-  const done = await http("mark the task done", "POST", `/v1/spaces/${space}/tasks/${number}/done`, key.token, { post_id: posted.post_id });
-  assert.equal(done.task.state, "done");
+  const posted = await http("POST the result, which marks the task done", "POST", `/v1/spaces/${space}/posts`, key.token, { ...result(space, number, trial.source), task: { number } });
+  assert.equal(posted.task.state, "done");
   await http("your mailbox again", "GET", `/v1/mailbox?after=${mailbox.next_after}`, key.token);
   ledger.check("start_tasks");
 });

@@ -32,11 +32,18 @@ type Delivery = {
   space: string | null;
 };
 
-/** A task a delivery names, as the KEY reads it now: its row security answers who may. */
-type TaskRow = { task_id: string; number: number; state: string };
+/** A task a delivery names, as the KEY reads it now: its row security answers who may. The
+ *  last give-back of another KEY's claim is on the row (0131_task_give_back.sql), and who
+ *  retired or deleted it, and why (0132_task_retire_delete.sql). */
+type TaskRow = {
+  task_id: string; number: number; state: string; released_by: string | null; release_reason: string | null;
+  close_reason: string | null;
+};
 
 /** The check a task's notice is about, for a reject's reason. */
 type CheckRow = { task_id: string; cycle: number; peer: string; verdict: string; reason: string | null };
+/** Why a KEY changed a task's words: its newest change of that task (0130_task_changes.sql). */
+type ChangeRow = { task_id: string; actor: string; reason: string };
 
 /** An offer of a seat, as the KEY it names reads it: the policy invites_read lets a
  *  KEY read the offers made to it and nothing else of the SPACE's links. */
@@ -88,7 +95,8 @@ export function mountMailbox(app: Hono<Env>, db: Db): void {
 
     const reason = c.req.query("reason") ?? null;
     if (reason !== null && !(MAILBOX_REASONS as readonly string[]).includes(reason)) {
-      throw new ApiError("INVALID_REQUEST", { detail: `reason is one of ${MAILBOX_REASONS.join(", ")}` });
+      // The list itself outgrew a refusal's detail, which is cut past 200 characters.
+      throw new ApiError("INVALID_REQUEST", { detail: "reason is one of the mailbox_reasons GET /v1/capabilities lists" });
     }
     const kinds = kindsOf(c.req.query("kind"));
     const author = c.req.query("author") ?? null;
@@ -208,7 +216,8 @@ export function mountMailbox(app: Hono<Env>, db: Db): void {
       const tasks = taskIds.length
         ? await sql<TaskRow[]>`
             select t.task_id::text, t.number,
-                   case when t.state = 'claimed' and t.claimed_until <= now() then 'open' else t.state end as state
+                   case when t.state = 'claimed' and t.claimed_until <= now() then 'open' else t.state end as state,
+                   encode(t.released_by, 'hex') as released_by, t.release_reason, t.close_reason
               from schellingaf.tasks t
              where t.task_id = any(${taskIds}::uuid[])`
         : [];
@@ -222,7 +231,21 @@ export function mountMailbox(app: Hono<Env>, db: Db): void {
                 on c.task_id = w.task_id and c.cycle = w.cycle and c.peer_id = decode(w.actor, 'hex')`
         : [];
 
-      return { head: head?.head_seq ?? "0", deliveries, posts, stages, requests, messages, conversations, offers, tasks, checks };
+      // A change's reason: the newest change of the task by the KEY that changed it, found
+      // by the task's revisions key. A notice keeps no revision of its own.
+      const changedBy = deliveries.filter((d) => d.task_id !== null && d.reason === "task_changed");
+      const changes = changedBy.length
+        ? await sql<ChangeRow[]>`
+            select w.task_id::text, w.actor,
+                   (select r.end_reason from schellingaf.task_revisions r
+                     where r.task_id = w.task_id and r.ended_by = decode(w.actor, 'hex')
+                     order by r.revision desc limit 1) as reason
+              from (select distinct x.task_id, x.actor
+                      from unnest(${changedBy.map((d) => d.task_id!)}::uuid[], ${changedBy.map((d) => d.actor!)}::text[])
+                           as x(task_id, actor)) w`
+        : [];
+
+      return { head: head?.head_seq ?? "0", deliveries, posts, stages, requests, messages, conversations, offers, tasks, checks, changes };
     });
 
     const result = waitFor > 0
@@ -246,6 +269,7 @@ export function mountMailbox(app: Hono<Env>, db: Db): void {
     const offerById = new Map(result.offers.map((o) => [o.invite_id, o]));
     const taskById = new Map(result.tasks.map((t) => [t.task_id, t]));
     const checkOf = new Map(result.checks.map((k) => [`${k.task_id}/${k.cycle}/${k.peer}`, k]));
+    const changeOf = new Map(result.changes.map((k) => [`${k.task_id}/${k.actor}`, k.reason]));
 
     const items: Record<string, unknown>[] = [];
     let spent = 0;
@@ -256,9 +280,17 @@ export function mountMailbox(app: Hono<Env>, db: Db): void {
       const message = d.message_id ? messageById.get(d.message_id) : undefined;
       const offer = d.invite_id ? offerById.get(d.invite_id) : undefined;
       const task = d.task_id ? taskById.get(d.task_id) : undefined;
-      // A reject's reason, the one PEER text a task's notice carries.
+      // A reject's reason, a change's, a give-back's, or a retire's or delete's: the PEER
+      // text a task's notice carries. A give-back's is the task's last, while the same KEY
+      // gave it; a retire's or delete's is read from the task while it is in that state.
       const check = task ? checkOf.get(`${d.task_id}/${d.task_cycle}/${d.actor}`) : undefined;
-      const reason = check?.verdict === "reject" ? check.reason : null;
+      const closed = task && (d.reason === "task_retired" || d.reason === "task_deleted")
+        && task.state === d.reason.slice("task_".length) ? task.close_reason : null;
+      const reason = task && d.reason === "task_changed"
+        ? changeOf.get(`${d.task_id}/${d.actor}`) ?? null
+        : task && d.reason === "task_reopened"
+          ? (task.released_by === d.actor ? task.release_reason : null)
+          : closed ?? (check?.verdict === "reject" ? check.reason : null);
       // A proposal's stage counts by the bytes it adds.
       const stage = post && d.reason === "proposal" ? stageById.get(post.post_id) : undefined;
       const price = post

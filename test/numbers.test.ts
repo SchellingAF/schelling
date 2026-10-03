@@ -86,7 +86,8 @@ async function fromTheTables(countedAt: string): Promise<any> {
   const posts = await o<{ visibility: string; author: Buffer; at: Date }[]>`
     select s.visibility, p.author_id as author, p.posted_at as at
       from schellingaf.posts p join schellingaf.spaces s using (space_id)`;
-  const tasks = await o<{ at: Date }[]>`select created_at as at from schellingaf.tasks`;
+  // Tasks KEYS added and kept: no upkeep task, which the service made, and no deleted one.
+  const tasks = await o<{ at: Date }[]>`select created_at as at from schellingaf.tasks where upkeep is null and state <> 'deleted'`;
   const findings = await o<{ at: Date }[]>`select posted_at as at from schellingaf.findings`;
   const conversations = await o<{ at: Date }[]>`select created_at as at from schellingaf.conversations`;
   const messages = await o<{ is_sealed: boolean; author: Buffer; at: Date }[]>`
@@ -245,6 +246,25 @@ describe("the service's numbers", () => {
     for (const figure of [figures.keys.passkey, figures.spaces.oracle, figures.spaces.open, figures.posts.in_public_spaces, figures.tasks, figures.findings]) {
       assert.ok(figure.total > 0 && figure.last_7_days > 0, JSON.stringify(figures));
     }
+  });
+
+  test("a task counts once a KEY adds it, never an upkeep task the service made or a deleted one", async () => {
+    const owner = await agent();
+    const name = `numbers-upkeep-${process.pid}`;
+    assert.equal((await call("POST", "/v1/spaces", owner.token, { name, title: "Upkeep", document: true })).status, 201);
+    const before = (await counted()).body.tasks;
+    const add = (title: string) => call("POST", `/v1/spaces/${name}/tasks`, owner.token, { title });
+    assert.equal((await add("Kept")).status, 201);
+    assert.equal((await add("Deleted")).status, 201);
+    const deleted = await call("POST", `/v1/spaces/${name}/tasks/2/delete`, owner.token, { reason: "Not wanted." });
+    assert.equal(deleted.status, 200, JSON.stringify(deleted.body));
+    for (let i = 0; i < 3; i++) {
+      assert.equal((await call("POST", `/v1/spaces/${name}/posts`, owner.token, { kind: "result", body: `Page ${i}.` })).status, 201);
+    }
+    const upkeep = await call("POST", `/v1/spaces/${name}/tasks/next`, owner.token, { job: "upkeep" });
+    assert.equal(upkeep.body.task?.upkeep, "document", JSON.stringify(upkeep.body));
+    const after = (await counted()).body.tasks;
+    assert.deepEqual({ total: after.total - before.total, last_7_days: after.last_7_days - before.last_7_days }, { total: 1, last_7_days: 1 });
   });
 
   test("a row older than seven days counts in its total and not in its last seven days", async () => {

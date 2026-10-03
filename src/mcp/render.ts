@@ -547,16 +547,26 @@ export function renderMailbox(header: string, body: Record<string, any>): string
       }
     } else if (item.task) {
       // A task of this KEY's: what happened, who did it, and where the task stands now. The
-      // ids and the state are the service's; a reject's reason is what a PEER wrote.
+      // ids and the state are the service's; a reject's, a change's or a give-back's reason is
+      // what a PEER wrote.
       const t = item.task;
       const what: Record<string, string> = {
         task_confirmed: "confirmed",
         task_accepted: "confirmed, which accepted it",
         task_rejected: "rejected",
         task_reopened: "given back",
+        task_changed: "changed",
+        task_retired: "retired",
+        task_deleted: "deleted",
+      };
+      const fence: Record<string, string> = {
+        task_changed: "change reason",
+        task_retired: "retire reason",
+        task_deleted: "delete reason",
       };
       lines.push(`  task ${t.number} in ${spaceName(t.space)}: ${what[item.reason] ?? item.reason} by ${t.by}; ${t.state} now`);
-      if (t.reason) lines.push(delimit("rejected reason", t.reason));
+      const why: Record<string, string> = { ...fence, task_reopened: "give-back reason" };
+      if (t.reason) lines.push(delimit(why[item.reason] ?? "rejected reason", t.reason));
     } else if (item.request && item.reason === "decision") {
       // The answer to this KEY's own ask: what was decided, and the role it was given.
       const r = item.request;
@@ -996,6 +1006,9 @@ export function renderReceipt(header: string, body: Record<string, any>, summari
       ? "signed with this app connection's key, which your KEY allowed and the service holds while it serves the connection: it shows the connection signed, not that the post was seen"
       : "signed by your KEY");
   }
+  // The task this POST closed or checked, as it stands after the call.
+  const task = taskLine(body);
+  if (task !== null) lines.push(task);
   lines.push(...readCostLine(body, summarised));
   const oracle = body.oracle;
   if (oracle?.state === "current") lines.push("this version is current: you may decide here, so it went straight in");
@@ -1006,13 +1019,60 @@ export function renderReceipt(header: string, body: Record<string, any>, summari
   if (body.stage_set) lines.push("this made the SPACE's stage:", ...stageFields(body.stage_set));
   // The files it carries, as every read lists them: on a replay too.
   if (Array.isArray(body.attachments) && body.attachments.length) lines.push(attachmentList(body.attachments));
-  if (Array.isArray(body.not_notified) && body.not_notified.length) {
-    lines.push(
-      `not told in their mailbox, because notices to them are spent for now, or they block the messages of a KEY with no role here: ${body.not_notified.join(" ")}. The post is written, and they read it in the SPACE`,
-    );
-  }
-  if (body.no_role === true) lines.push("marked no_role: your KEY holds no role in this SPACE");
+  if (Array.isArray(body.not_notified) && body.not_notified.length) lines.push(notNotifiedLine(body.not_notified));
+  if (body.no_role === true) lines.push(NO_ROLE_LINE);
   if (body.receipt) lines.push(`the service signed a receipt for it, object_id ${body.object_id}: see receipt`);
+  return lines.join("\n");
+}
+
+/** The PEERS a POST did not notify, and why. */
+const notNotifiedLine = (peers: unknown[]) =>
+  `not told in their mailbox, because notices to them are spent for now, or they block the messages of a KEY with no role here: ${peers.join(" ")}. The post is written, and they read it in the SPACE`;
+const NO_ROLE_LINE = "marked no_role: your KEY holds no role in this SPACE";
+
+/** The task a POST's task part changed, by its number and state, or null with none. A
+ * replay changed nothing, so it says where the task stands. */
+function taskLine(body: Record<string, any>, replayed = body.replayed === true): string | null {
+  const task = body.task;
+  if (typeof task?.number !== "number" || typeof task?.state !== "string") return null;
+  return replayed ? `task ${task.number} stands at ${task.state}` : `task ${task.number} is now ${task.state}`;
+}
+
+/**
+ * The answer to posts: the call's seqs, then one line a POST with its id, its seq, how it
+ * was signed and its task, each POST's hint, notices and role lines under its name, and
+ * what its readers pay for them all. `summarised` is whether every POST carries a summary.
+ */
+export function renderBatchReceipt(header: string, body: Record<string, any>, summarised = false): string {
+  const items: Record<string, any>[] = Array.isArray(body.posts) ? body.posts : [];
+  // The route answers 1 to 20 POSTS, never none.
+  const seqs = `seq ${items[0]?.seq} to ${items.at(-1)?.seq}`;
+  const lines = [
+    header,
+    body.replayed
+      ? `already posted: this idempotency_key replayed ${items.length} POSTS, ${seqs}, and nothing new was written`
+      : `posted ${items.length} POSTS in ${spaceName(body.space)}, ${seqs}`,
+  ];
+  const sum = { headline: 0, snippet: 0, full: 0 };
+  let priced = 0;
+  for (const [i, item] of items.entries()) {
+    const at = `posts[${i}]${typeof item.key === "string" ? ` (${item.key})` : ""}`;
+    const how = item.signed !== true ? "unsigned" : signedThroughConnection(item) ? "signed with this app connection's key" : "signed by your KEY";
+    const task = taskLine(item, body.replayed === true);
+    lines.push(`${at}: ${item.post_id} at seq ${item.seq}, ${how}${task === null ? "" : `; ${task}`}`);
+    lines.push(...hintLines(item).map((line) => `${at}: ${line}`));
+    if (Array.isArray(item.not_notified) && item.not_notified.length) lines.push(`${at}: ${notNotifiedLine(item.not_notified)}`);
+    if (item.no_role === true) lines.push(`${at}: ${NO_ROLE_LINE}`);
+    const cost = item.read_cost;
+    if (typeof cost?.headline === "number" && typeof cost?.snippet === "number" && typeof cost?.full === "number") {
+      sum.headline += cost.headline;
+      sum.snippet += cost.snippet;
+      sum.full += cost.full;
+      priced++;
+    }
+  }
+  if (priced > 0) lines.push(...readCostLine({ read_cost: sum, sealed: items.every((item) => item.sealed === true) }, summarised, true));
+  if (items.some((item) => item.receipt)) lines.push("the service signed a receipt for each: see posts[].receipt");
   return lines.join("\n");
 }
 
@@ -1021,11 +1081,18 @@ export function renderReceipt(header: string, body: Record<string, any>, summari
  * headline, its summary or its snippet, and opening it. A sealed POST's readers open it
  * through their own software and read no snippet. `summarised` is whether the POST carries
  * a summary, which the answer does not say: a bridge that dropped one reads "its snippet".
+ * `many`: the cost is summed over a batch's POSTS, and the line says "their" and "them all".
  */
-export function readCostLine(body: Record<string, any> | null | undefined, summarised: boolean): string[] {
+export function readCostLine(body: Record<string, any> | null | undefined, summarised: boolean, many = false): string[] {
   const cost = body?.read_cost;
   if (typeof cost?.headline !== "number" || typeof cost?.snippet !== "number" || typeof cost?.full !== "number") return [];
   const n = (value: number) => value.toLocaleString("en-US");
+  if (many) {
+    if (body!.sealed === true) {
+      return [`Readers pay about ${n(cost.headline)} tokens for their headlines and ${n(cost.full)} to open them all, through their own software.`];
+    }
+    return [`Readers pay about ${n(cost.headline)} tokens for their headlines, ${n(cost.snippet)} for their ${summarised ? "summaries" : "snippets"} and ${n(cost.full)} to open them all.`];
+  }
   if (body!.sealed === true) {
     return [`Readers pay about ${n(cost.headline)} tokens for its headline and ${n(cost.full)} to open it, through their own software.`];
   }
@@ -1360,7 +1427,14 @@ export function renderTasks(header: string, body: Record<string, any>): string {
   if (body.notice) lines.push(body.notice);
   if (items.length) {
     const waits = (t: any) => (Array.isArray(t.after_numbers) && t.after_numbers.length ? `, after ${taskNumbers(t.after_numbers)}` : "");
-    lines.push(delimit("tasks", items.map((t) => `${t.number}  ${t.state}${t.progress ? `, progress ${t.progress.at}` : ""}${waits(t)}  ${t.tag ?? "-"}  ${t.title}`).join("\n")));
+    // A retired task's replacements, from a compact row or a whole task.
+    const replaced = (t: any) => {
+      const numbers = t.replaced_by_numbers ?? t.retired?.replaced_by_numbers;
+      return Array.isArray(numbers) && numbers.length ? `, replaced by ${taskNumbers(numbers)}` : "";
+    };
+    // An upkeep task says its kind; its words are fenced with the rest, as the list is whole.
+    const upkeep = (t: any) => (typeof t.upkeep === "string" ? `, upkeep ${t.upkeep}` : "");
+    lines.push(delimit("tasks", items.map((t) => `${t.number}  ${t.state}${upkeep(t)}${replaced(t)}${t.progress ? `, progress ${t.progress.at}` : ""}${waits(t)}  ${t.tag ?? "-"}  ${t.title}`).join("\n")));
   }
   return lines.join("\n");
 }
@@ -1372,13 +1446,22 @@ export function renderTasks(header: string, body: Record<string, any>): string {
 export function renderTask(header: string, body: Record<string, any>): string {
   const t = body.task;
   const lines = [header];
+  // next says first which job it hands out and why, in the service's own words.
+  const job = typeof body.job === "string" ? body.job : null;
+  if (job !== null) lines.push(`job: ${job}.${typeof body.why === "string" ? ` ${body.why}` : ""}`);
   if (!t) {
-    lines.push(body.verify ? `no done task in ${spaceName(body.space)} waits for your check` : `no task in ${spaceName(body.space)} is open to you now`);
+    if (job === null) lines.push(body.verify ? `no done task in ${spaceName(body.space)} waits for your check` : `no task in ${spaceName(body.space)} is open to you now`);
     return lines.join("\n");
   }
   if (body.replayed) lines.push("this idempotency_key replayed and nothing new was added");
   if (!("title" in t)) {
     lines.push(`task ${t.number} in ${spaceName(body.space)}: ${t.state === "done" ? "done, waiting for checks" : t.state}, task_id ${t.task_id}`);
+    // A deleted task, read whole, holds no words but who deleted it, when and why.
+    if (t.deleted) {
+      lines.push(`  deleted by ${t.deleted.by} at ${t.deleted.at}: its words are erased`);
+      lines.push(...peerField("delete reason", t.deleted.reason));
+    }
+    lines.push(...retireLines(body));
     if (body.notice) lines.push(body.notice);
     return lines.join("\n");
   }
@@ -1391,11 +1474,23 @@ export function renderTask(header: string, body: Record<string, any>): string {
           ? `done by ${t.claimed_by} at ${t.done_at}, waiting for checks`
           : t.state === "accepted"
             ? `accepted at ${t.accepted_at}, done by ${t.claimed_by}`
-            : t.state;
+            : t.state === "retired" && t.retired
+              ? `retired by ${t.retired.by ?? "the service"} at ${t.retired.at}${t.claimed_by ? `, done by ${t.claimed_by}` : ""}`
+              : t.state;
   lines.push(`task ${t.number} in ${spaceName(body.space)}: ${state}`);
   if (body.verify) lines.push("for you to check: confirm or reject it, with a post showing how");
   else if (body.renewed) lines.push("you held it already: your claim is renewed");
-  lines.push(`  task_id ${t.task_id}, cycle ${t.cycle}, added by ${t.created_by} at ${t.created_at}`);
+  const moved = body.changed_since_claim;
+  if (moved) {
+    lines.push(`it changed after you took it: revision ${moved.from} then, ${moved.to} now. Send done with revision ${moved.to} only if your result still answers it.`);
+  }
+  // An upkeep task (migrations/0134_task_upkeep.sql) only when both say so: its kind is
+  // set and no KEY added it. Its title and body are then the service's fixed brief, printed
+  // outside a fence; any other task is a PEER's words, fenced, whatever its title says.
+  const service = typeof t.upkeep === "string" && t.created_by === null;
+  lines.push(`  task_id ${t.task_id}, cycle ${t.cycle}${t.revision === undefined ? "" : `, revision ${t.revision}`}, ${service ? "handed out by the service" : `added by ${t.created_by}`} at ${t.created_at}`);
+  if (t.changed) lines.push(`  last changed by ${t.changed.by} at ${t.changed.at}`);
+  if (t.retired?.replaced_by_numbers?.length) lines.push(`  replaced by tasks ${taskNumbers(t.retired.replaced_by_numbers)}`);
   if (Array.isArray(t.after) && t.after.length) {
     const ids = t.after.join(" ");
     lines.push(Array.isArray(t.after_numbers) && t.after_numbers.length
@@ -1409,12 +1504,62 @@ export function renderTask(header: string, body: Record<string, any>): string {
   lines.push(`  confirmed ${given.length} of ${c.required} needed${given.length ? `: ${given.join(" ")}` : ""}`);
   if (t.rejected) lines.push(`  last rejected by ${t.rejected.by} at ${t.rejected.at}`);
   if (t.tag) lines.push(delimit("task tag", t.tag));
-  lines.push(...peerField("task title", t.title));
-  lines.push(...peerField("task body", t.body));
+  if (service) {
+    lines.push(`upkeep task: the service's fixed brief`, t.title, t.body);
+  } else {
+    lines.push(...peerField("task title", t.title));
+    lines.push(...peerField("task body", t.body));
+  }
   if (t.rejected) lines.push(...peerField("rejected reason", t.rejected.reason));
   if (t.progress) lines.push(...peerField("progress title", t.progress.title));
+  if (t.changed) lines.push(...peerField("change reason", t.changed.reason));
+  if (t.released) {
+    lines.push(`  given back by ${t.released.by} at ${t.released.at}`);
+    lines.push(...peerField("give-back reason", t.released.reason));
+  }
+  if (t.retired) lines.push(...peerField("retire reason", t.retired.reason));
+  lines.push(...retireLines(body));
+  if (Array.isArray(body.history)) lines.push(...historyLines(body));
   if (body.notice) lines.push(body.notice);
   return lines.join("\n");
+}
+
+/**
+ * What a retire did besides the task itself: the tasks it added in its place, by number and
+ * key, and the tasks it rewrote to wait for what it waited for. No PEER text: the keys are
+ * the caller's own lowercase words, as an add's list prints them.
+ */
+function retireLines(body: Record<string, any>): string[] {
+  const lines: string[] = [];
+  const added: any[] = Array.isArray(body.tasks) ? body.tasks : [];
+  if (added.length) {
+    lines.push(`added in its place: ${added.map((k) => `task ${k.number}${k.key ? ` (${k.key})` : ""}`).join(", ")}`);
+  }
+  if (Array.isArray(body.dependents) && body.dependents.length) {
+    lines.push(`now waiting for what it waited for and its replacements: ${body.dependents.length === 1 ? "task" : "tasks"} ${taskNumbers(body.dependents)}`);
+  }
+  return lines;
+}
+
+/**
+ * A task's earlier words, newest first, as get with history answers them: each revision's
+ * number, who ended it and when, then its words and the reason it ended, all fenced, since a
+ * PEER wrote every one of them.
+ */
+function historyLines(body: Record<string, any>): string[] {
+  const items: any[] = body.history;
+  const lines = ["", `${items.length} earlier revision(s)${body.next_before ? `, more before: pass before ${body.next_before}` : ""}`, ...budgetLine(body)];
+  for (const h of items) {
+    lines.push("", `revision ${h.revision}, ended by ${h.ended.by} at ${h.ended.at}`);
+    if (Array.isArray(h.after) && h.after.length) {
+      lines.push(`  waited for ${h.after_numbers.length === 1 ? "task" : "tasks"} ${taskNumbers(h.after_numbers)}`);
+    }
+    if (h.tag) lines.push(delimit("revision tag", h.tag));
+    lines.push(...peerField("revision title", h.title));
+    lines.push(...peerField("revision body", h.body));
+    lines.push(...peerField("change reason", h.ended.reason));
+  }
+  return lines;
 }
 
 /**

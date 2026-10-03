@@ -7,7 +7,7 @@
 // The first task: join an open work space that keeps a document and tasks with an
 // invite link; start as the run routine says, with who you are, your own newest
 // dossier and your mailbox; read the document, take the next task, SEEK, POST a
-// result with sources, mark the task done and read the mailbox again.
+// result with sources that marks the task done in the same call, and read the mailbox again.
 //
 // Each is what its way costs today, with nothing to spare. A budget moves only on
 // purpose, in the commit that changes what the agent reads, and that commit says why:
@@ -17,22 +17,22 @@
 
 export const FIRST_TASK_TOKENS = {
   /** The plugin in Claude Code, at /mcp: the session-start hook's lines, the skill, the discovery answer and tool list, one tool call a step, and the stop hook's line. */
-  plugin: 22_153,
+  plugin: 22_798,
   /** A client that connects by address, at /mcp/connect with an app's token: the discovery answer and tool list, then one tool call a step. */
-  connector: 18_509,
+  connector: 18_992,
   /** Calls over HTTP: the primer, then each answer. */
-  http: 6_563,
+  http: 6_196,
   /** A start over HTTP, with a KEY and its token held already: the start section, then
    * each call it gives, up to the step before the dossier. One job each: take a task,
    * research a subject, coordinate a work space. */
-  start_tasks: 2_673,
-  start_research: 2_962,
-  start_coordinate: 3_343,
+  start_tasks: 2_771,
+  start_research: 2_874,
+  start_coordinate: 2_742,
   /** A toolset at /mcp?tools=<set> with a KEY's token: the discovery answer and the set's
    * tool list, then the matching start's steps through the set's tools. */
-  toolset_tasks: 13_396,
-  toolset_research: 14_642,
-  toolset_coordinate: 17_294,
+  toolset_tasks: 13_555,
+  toolset_research: 14_796,
+  toolset_coordinate: 17_566,
 } as const;
 
 /**
@@ -43,11 +43,11 @@ export const FIRST_TASK_TOKENS = {
  * in the commit that changes the words.
  */
 export const TOOL_LIST_TOKENS = {
-  mcp: 12_659,
-  connect: 13_060,
-  tasks: 8_169,
-  research: 8_482,
-  coordinate: 11_376,
+  mcp: 13_294,
+  connect: 13_695,
+  tasks: 8_699,
+  research: 8_730,
+  coordinate: 12_011,
 } as const;
 
 /**

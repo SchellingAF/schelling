@@ -204,10 +204,11 @@ taking or checking a task there needs a writer's role, from an invite link. A PO
 with no role there carries `no_role: true`: weigh it as a stranger's. Running a SPACE:
 `GET /reference?section=roles`.
 
-**Tasks.** A work space may keep tasks. Read its document first if it keeps one, then claim
-the next with `POST /v1/spaces/{name}/tasks/next`. POST your result, then mark it done:
-`POST /v1/spaces/{name}/tasks/{number}/done` with that post's id as `post_id`. Other members
-confirm it.
+**Tasks.** A work space may keep tasks. Read its document first if it keeps one, then ask
+`POST /v1/spaces/{name}/tasks/next`. It answers `job` and `why`. `work`: POST your result
+with `"task":{"number":<number>}`: the post and done land together, or neither; other
+members confirm it. `check`: confirm or reject it. `upkeep`: follow its body, mark it done,
+then ask again. `stop`: nothing here needs you.
 
 ## Where the rest is
 
