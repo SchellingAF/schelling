@@ -19,7 +19,7 @@ import type { Config } from "../src/config.ts";
 import { challengePreimage } from "../src/domain/protocol.ts";
 import { allowStreamsAgain, endAllStreams, streamsOpen } from "../src/mcp/listen.ts";
 import { defuse } from "../src/mcp/render.ts";
-import { COMPATIBILITY_TOOLS, MCP_TOOLS, serverIdentity, TOOLSETS } from "../src/mcp/server.ts";
+import { COMPATIBILITY_TOOLS, MCP_TOOLS, NO_DRY_RUN_HERE, serverIdentity, TOOLSETS } from "../src/mcp/server.ts";
 import { bridgeScript } from "../src/surface/plugin.ts";
 import { ERRORS } from "../src/db/errors.ts";
 import { ATTACHMENT_LIMITS } from "../src/surface/vocabulary.ts";
@@ -1391,6 +1391,40 @@ describe("the bridge, files", () => {
       const again = await bridge.ask("tools/call", { name: "schellingaf_post", arguments: post });
       assert.equal(again.result.isError, undefined, JSON.stringify(again));
       assert.equal(again.result.structuredContent.post_id, id);
+    } finally {
+      await bridge.stop();
+      rmSync(work, { recursive: true, force: true });
+    }
+  });
+
+  test("sends a dry run as it was written, neither signed nor uploaded, and the connector refuses it, so nothing is posted", async () => {
+    const work = workDir("files-dry", { "notes.txt": `notes ${process.pid}\n` });
+    const who = elsewhere("files-dry");
+    const space = `bridge-dry-${process.pid}`;
+    const bridge = start(who, work);
+    try {
+      await initialize(bridge);
+      await createSpace(bridge, space);
+      const kept = keptBy(who);
+      const asked = connectorAsked.length;
+      const uploads = requested.filter((r) => r.includes("/files/")).length;
+      const out = await bridge.ask("tools/call", { name: "schellingaf_post", arguments: {
+        space, kind: "obs", title: "Checked first", body: "Words to check.", idempotency_key: "dry-1", dry_run: true,
+        attachments: [{ path: "notes.txt", media_type: "text/plain" }, { text: "inline", name: "inline.txt", media_type: "text/plain" }],
+      } });
+      assert.equal(out.result.isError, true, JSON.stringify(out));
+      assert.ok(textOf(out).includes(NO_DRY_RUN_HERE), textOf(out));
+      // Sent once, as the agent wrote it: dry_run beside the fields, nothing signed, no hash.
+      const sent = connectorAsked.slice(asked).map((a) => JSON.parse(a.body)).filter((m) => m.method === "tools/call");
+      assert.equal(sent.length, 1, JSON.stringify(sent));
+      const args = sent[0].params.arguments;
+      assert.equal(args.dry_run, true);
+      assert.equal(args.canonical, undefined);
+      assert.equal(args.signature, undefined);
+      assert.deepEqual(args.attachments, [{ path: "notes.txt", media_type: "text/plain" }, { text: "inline", name: "inline.txt", media_type: "text/plain" }]);
+      // No file uploaded, and no POST.
+      assert.equal(requested.filter((r) => r.includes("/files/")).length, uploads);
+      assert.deepEqual((await readAs(kept.token, `/v1/spaces/${space}/posts`)).items, []);
     } finally {
       await bridge.stop();
       rmSync(work, { recursive: true, force: true });

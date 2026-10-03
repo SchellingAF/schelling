@@ -6,7 +6,7 @@
 
 import { createHash } from "node:crypto";
 import { Hono, type Context } from "hono";
-import type { PendingQuery } from "postgres";
+import type { PendingQuery, Sql } from "postgres";
 import type { Config } from "../config.ts";
 import type { Db } from "../db/sql.ts";
 import { ApiError, renderableDetail } from "../db/errors.ts";
@@ -19,6 +19,7 @@ import {
   asObject,
   queryFlag,
   optionalBody,
+  optionalBoolean,
   optionalString,
   optionalUuid,
   parseStrictJson,
@@ -35,9 +36,9 @@ import {
   type Attachment,
 } from "../domain/validate.ts";
 import { authorClause, authorOf, boundedNumber, budgetCut, cursor, itemCost, postColumns, detailOr, hideOldVersions, kindClause, kindsOf, openPart, openParts, PAGE_DETAILS, PostPage, readCost, readDenied, render, tokenBudget, type Detail, type PostRow, type Written, withinBudget } from "./postview.ts";
-import { charge, emptyOf, LIMITS, openPostsPerDay, OWN, SHARED, spend } from "./ratelimit.ts";
-import { connectorSignedWith, floorPlace, optionalBearer, requireBearer, type Env } from "./app.ts";
-import { receipt } from "./spaces.ts";
+import { charge, CONCURRENT_READS_PER_CALLER, emptyOf, holdRead, limitRead, LIMITS, openPostsPerDay, OWN, READS_PER_MINUTE, readKey, SHARED, spend } from "./ratelimit.ts";
+import { connectorSignedWith, floorPlace, inProcessCall, optionalBearer, requireBearer, type Env } from "./app.ts";
+import { RANKS, receipt } from "./spaces.ts";
 import { firstDay } from "./auth.ts";
 import { ATTACHMENT_LIMITS, isFinishedStage, SUMMARY_MAX_BYTES } from "../surface/vocabulary.ts";
 import { headsOf, recordHeads, recordReturned } from "./log.ts";
@@ -48,7 +49,7 @@ import { RECEIPT_VERSION, type ServiceState } from "./service.ts";
 import { jsonText } from "../mcp/render.ts";
 import { publishChange } from "../mcp/listen.ts";
 import { agrees, readSealedItem } from "./sealed.ts";
-import { hintForPost, STAGE_HINT } from "../domain/voice.ts";
+import { dryRunHint, hintForPost, STAGE_HINT } from "../domain/voice.ts";
 
 /** A sealed post's parts and what its header names, which the service acts on. */
 type SealedPost = {
@@ -420,6 +421,195 @@ function receiptForm(raw: string | undefined): boolean {
   throw new ApiError("INVALID_REQUEST", { detail: "receipt is full, or leave it out" });
 }
 
+/**
+ * Whether a POST's title or a sentence ran long, from the words it carries, signed or not,
+ * so a replay hears what the first answer said. Never of a sealed post, whose words the
+ * service cannot read; and never a refusal, since the post is written as sent. Before it,
+ * said of a post that is not a version but carries data.stage: there the key is free, and
+ * sets no stage. From the words sent, so a replay says the same.
+ */
+function hintOf(post: PostInput, sealed: boolean): string | null {
+  const stageHint = !sealed && post.kind !== "version" && post.data !== null && Object.hasOwn(post.data, "stage")
+    ? STAGE_HINT
+    : null;
+  const longHint = sealed ? null : hintForPost(post.title, post.body, post.kind);
+  return [stageHint, longHint].filter((line) => line !== null).join("\n") || null;
+}
+
+/** What a dry run found it could not refuse: the SPACE, and what a price needs. */
+type DryRun = { spaceId: string; noRole: boolean; head: { seq: string; revision: string } | null };
+
+/**
+ * A dry run's checks of an unsigned POST that is not sealed, once its fields are read,
+ * in one read as the caller, in append_post()'s order and with its refusals, so a dry run
+ * is refused where and as that POST would be and tells nobody more than it would.
+ *
+ * Who may post is decided first, from the SPACE's row, its policy and the caller's own
+ * role and block, before any post, member or source of the SPACE is read: an outsider
+ * meets WRITE_DENIED here as it does there, and never a check of what is inside. The rest
+ * reads as the caller, through the policies, which a KEY that may post passes: it is a
+ * member, or the SPACE is public. In a withheld SPACE, which nobody reads, a dry run reads
+ * neither the caller's role nor the SPACE's posts, and may refuse what the POST would not.
+ *
+ * Not made, because each holds only under append_post()'s lock or inside the write: an
+ * idempotency key used before, a replay or IDEMPOTENCY_CONFLICT; every allowance, posts,
+ * proposals, posting with no role and SEEK; a proposal's limits (PROPOSAL_LIMIT); a
+ * decision's rank and state (CONTROL_DENIED, PROPOSAL_DECIDED); and, for attachments,
+ * whether each file was uploaded and the SPACE's bytes (ATTACHMENT_NOT_FOUND, FILE_LIMIT),
+ * which only attach_files() reads. The service's reviewer, which decides in its own name,
+ * is checked as any KEY.
+ */
+async function dryChecks(sql: Sql, name: string, author: Buffer, post: PostInput, attachments: Attachment[]): Promise<DryRun> {
+  // The rule an upload meets, which the posts route meets for attachments before anything.
+  if (attachments.length > 0) await sql`select schellingaf.check_file_upload(${name}, ${author})`;
+  const [space] = await sql<{
+    space_id: string; owner: Buffer; visibility: string; join_policy: string; status: string; signed_only: boolean;
+    oracle: boolean; document: boolean; role: string | null; blocked: boolean; head_seq: string | null; revision: string | null;
+  }[]>`
+    select s.space_id::text, s.owner_id as owner, s.visibility, s.join_policy, s.status, s.signed_only,
+           s.oracle, s.document,
+           (select m.role from schellingaf.memberships m
+             where m.space_id = s.space_id and m.peer_id = ${author}) as role,
+           exists (select 1 from schellingaf.space_blocks b
+                    where b.space_id = s.space_id and b.peer_id = ${author}) as blocked,
+           h.head_seq::text, h.revision::text
+      from schellingaf.spaces s
+      left join lateral schellingaf.space_heads(s.space_id) h on true
+     where s.name = ${name}`;
+  if (!space) throw new ApiError("SPACE_NOT_FOUND");
+  const owner = toHex(space.owner);
+  const owns = space.owner.equals(author);
+  const rank = owns ? RANKS.owner! : RANKS[space.role ?? ""] ?? 0;
+  if (space.blocked && !owns) throw new ApiError("WRITE_BLOCKED", { detail: owner });
+  // Anyone writes in an oracle space and in an open work space.
+  if (rank < RANKS.writer! && !space.oracle && space.join_policy !== "open") {
+    throw new ApiError("WRITE_DENIED", {
+      detail: JSON.stringify({ owner, join_policy: space.join_policy, role: rank === RANKS.reader ? "reader" : null }),
+    });
+  }
+  if (post.kind === "version" && !(space.oracle || space.document)) throw new ApiError("NOT_AN_ORACLE");
+  if (space.visibility === "sealed") throw new ApiError("SPACE_SEALED");
+  if (post.kind === "version") {
+    if (post.replyTo !== null || post.retracts !== null || post.to.length > 0) {
+      throw new ApiError("INVALID_REQUEST", { detail: "a version names the version it edits in supersedes, and nothing else" });
+    }
+    const [current] = await sql<{ post_id: string }[]>`
+      select v.post_id::text from schellingaf.oracle_versions v
+       where v.space_id = ${space.space_id}::uuid and v.state = 'current'`;
+    if (post.supersedes !== (current?.post_id ?? null)) throw new ApiError("VERSION_CHANGED", { detail: current?.post_id ?? "none" });
+  }
+  if (space.status !== "active") throw new ApiError("SPACE_CLOSED");
+  const noRole = rank === 0;
+  if (noRole && post.to.some((peer) => peer !== owner)) {
+    throw new ApiError("INVALID_REQUEST", { detail: "a KEY with no role here addresses only the owner with to" });
+  }
+  if (space.signed_only) throw new ApiError("SIGNATURE_REQUIRED");
+  if (post.to.length > 0) {
+    const to = sql.array(post.to.map((hex) => Buffer.from(hex, "hex")));
+    const [unregistered] = await sql<{ peer: string }[]>`
+      select encode(x, 'hex') as peer from unnest(${to}::bytea[]) x
+       where not exists (select 1 from schellingaf.peers pe where pe.peer_id = x)
+       order by x limit 1`;
+    if (unregistered) throw new ApiError("RECIPIENT_NOT_REGISTERED", { detail: unregistered.peer });
+    // The roster, which a KEY with a role here reads; one with none names the owner alone.
+    const [outside] = await sql<{ one: number }[]>`
+      select 1 as one from unnest(${to}::bytea[]) x
+       where x <> ${space.owner}
+         and not exists (select 1 from schellingaf.memberships m
+                          where m.space_id = ${space.space_id}::uuid and m.peer_id = x)
+       limit 1`;
+    if (outside) throw new ApiError("RECIPIENT_NOT_A_MEMBER");
+  }
+  if (post.replyTo !== null) {
+    const [parent] = await sql<{ one: number }[]>`
+      select 1 as one from schellingaf.posts p
+       where p.space_id = ${space.space_id}::uuid and p.post_id = ${post.replyTo}::uuid`;
+    if (!parent) throw new ApiError("REPLY_TARGET_NOT_FOUND");
+  }
+  // A version's supersedes is the version it edits, checked above. Anything else revises
+  // only its author's own posts, and never a version.
+  for (const target of [post.kind === "version" ? null : post.supersedes, post.retracts]) {
+    if (target === null) continue;
+    const [revised] = await sql<{ mine: boolean; version: boolean }[]>`
+      select exists (select 1 from schellingaf.posts p
+                      where p.space_id = ${space.space_id}::uuid and p.post_id = ${target}::uuid
+                        and p.author_id = ${author}) as mine,
+             exists (select 1 from schellingaf.oracle_versions v where v.post_id = ${target}::uuid) as version`;
+    if (!revised!.mine || ((space.oracle || space.document) && revised!.version)) throw new ApiError("REVISION_TARGET_NOT_FOUND");
+  }
+  // Its sources, as project_post() resolves them: each a post of this SPACE, by its seq or
+  // its id, the first that is none named; then one post named twice, by its id and its seq.
+  const sources = Array.isArray(post.data?.sources) ? (post.data.sources as string[]) : [];
+  if (sources.length > 0) {
+    const named = await sql<{ raw: string; id: string | null }[]>`
+      select e.raw,
+             case when e.raw ~ '^[1-9][0-9]{0,17}$'
+                  then (select p.post_id::text from schellingaf.posts p
+                         where p.space_id = ${space.space_id}::uuid and p.seq = e.raw::bigint)
+                  else (select p.post_id::text from schellingaf.posts p
+                         where p.space_id = ${space.space_id}::uuid and p.post_id = e.raw::uuid) end as id
+        from unnest(${sources}::text[]) with ordinality as e(raw, i)
+       order by e.i`;
+    const missing = named.find((source) => source.id === null);
+    if (missing) throw new ApiError("SOURCE_NOT_FOUND", { detail: missing.raw });
+    const seen = new Set<string>();
+    for (const source of named) {
+      if (seen.has(source.id!)) throw new ApiError("INVALID_REQUEST", { detail: `data.sources names one post twice: ${source.raw}` });
+      seen.add(source.id!);
+    }
+  }
+  return {
+    spaceId: space.space_id,
+    noRole,
+    head: space.head_seq !== null && space.revision !== null ? { seq: space.head_seq, revision: space.revision } : null,
+  };
+}
+
+/**
+ * A dry run: an unsigned POST that is not sealed, checked as it would be posted, and
+ * nothing written, so a writer hears its hint and its price before the words are
+ * permanent. No post, seq, event, notice or claimed file; its idempotency key stays
+ * unused; and it is charged as a read, never the write allowance.
+ *
+ * Its price is the POST's at the SPACE's next seq and present revision, which is what it
+ * costs if nothing is posted there first. Left out where a file is named, since a file's
+ * size is read only as it is attached, and where the caller cannot read the SPACE's head.
+ */
+async function dryRunOf(c: Context<Env>, db: Db, name: string, author: Buffer, post: PostInput, attachments: Attachment[]) {
+  const me = toHex(author);
+  // The connector's in-process call was counted as a read with its /mcp request.
+  let release = () => {};
+  if (!inProcessCall(c)) {
+    const who = readKey(c, me);
+    limitRead(who, READS_PER_MINUTE);
+    release = holdRead(who, CONCURRENT_READS_PER_CALLER);
+  }
+  let found: DryRun;
+  try {
+    found = await db.readTx(me, (sql) => dryChecks(sql, name, author, post, attachments));
+  } finally {
+    release();
+  }
+  const price = attachments.length === 0 && found.head !== null
+    ? readCost({
+        space: name, author, post, attachments: [], sealed: null,
+        receipt: {
+          // The shapes a receipt carries, at their lengths: a uuid, a hex object id.
+          post_id: "00000000-0000-0000-0000-000000000000",
+          seq: String(BigInt(found.head.seq) + 1n),
+          space_id: found.spaceId,
+          posted_at: new Date().toISOString(),
+          object_id: "0".repeat(64),
+          signed: false,
+          no_role: found.noRole,
+          admitted_revision: found.head.revision,
+        },
+      })
+    : null;
+  const hint = hintOf(post, false);
+  return { dry_run: true, space: name, ...(price ? { read_cost: price } : {}), ...(hint ? { hint: dryRunHint(hint) } : {}) };
+}
+
 export function mountPosts(app: Hono<Env>, config: Config, db: Db, service: ServiceState): void {
   app.post("/v1/spaces/:name/posts", async (c) => {
     const bearer = requireBearer(c.get("bearer"));
@@ -432,6 +622,14 @@ export function mountPosts(app: Hono<Env>, config: Config, db: Db, service: Serv
       throw new ApiError("INVALID_REQUEST");
     });
     const input = asObject(parseStrictJson(text));
+
+    // A dry run checks this POST and writes nothing. It is no field of a signed or sealed
+    // POST, beside or inside canonical, so no signature ever covers it, and a signed POST
+    // that carries it is refused here rather than written.
+    const dryRun = optionalBoolean(input.dry_run, "dry_run") === true;
+    if (input.dry_run !== undefined && (input.canonical !== undefined || (input.sealed !== undefined && input.sealed !== null))) {
+      throw new ApiError("INVALID_REQUEST", { detail: "dry_run checks a POST that is neither signed nor sealed: send its fields, without canonical or sealed" });
+    }
 
     // A sealed SPACE takes no files, and a sealed post naming any is refused before any
     // other field is read: plain bytes would sit beside its ciphertext.
@@ -473,6 +671,9 @@ export function mountPosts(app: Hono<Env>, config: Config, db: Db, service: Serv
     if (post.kind === "version" && (post.summary ?? null) !== null) {
       throw new ApiError("INVALID_REQUEST", { detail: "a version carries no summary: its title says what changed" });
     }
+
+    // Every field read as the POST's own are: from here a dry run reads, and writes nothing.
+    if (dryRun) return c.json(await dryRunOf(c, db, c.req.param("name"), bearer.peerId, post, attachments), 200);
 
     // A post naming attachments meets the rule an upload meets, before anything is spent:
     // a KEY that may not upload here, or a sealed SPACE, is refused now.
@@ -693,16 +894,8 @@ export function mountPosts(app: Hono<Env>, config: Config, db: Db, service: Serv
     // decide, or the document it watches, has this post in its mailbox.
     const told = new Set(Array.isArray(delivered) ? (delivered as { recipient: string }[]).map((d) => d.recipient) : []);
     const notNotified = replayed || !scene ? [] : scene.reachable.filter((recipient) => !told.has(recipient));
-    // Whether its title or a sentence ran long, from the words it carries, signed or not,
-    // so a replay hears what the first answer said. Never of a sealed post, whose words
-    // the service cannot read; and never a refusal, since the post is written as sent.
-    // Before it, said of a post that is not a version but carries data.stage: there the key
-    // is free, and sets no stage. From the words sent, so a replay says the same.
-    const stageHint = sealed === null && post.kind !== "version" && post.data !== null && Object.hasOwn(post.data, "stage")
-      ? STAGE_HINT
-      : null;
-    const longHint = sealed === null ? hintForPost(post.title, post.body, post.kind) : null;
-    const hint = [stageHint, longHint].filter((line) => line !== null).join("\n") || null;
+    // Whether its title or a sentence ran long: see hintOf.
+    const hint = hintOf(post, sealed !== null);
     // What its readers pay for it, at each level, as a member reads it: so a writer sees
     // the price of a long title or a missing summary in the answer to the write itself.
     const readPrice = readCost({

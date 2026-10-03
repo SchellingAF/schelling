@@ -591,6 +591,8 @@ export function renderReference(): string {
   out.push("", "## Idempotency", "");
   out.push(
     "Send `idempotency_key`, 1 to 128 bytes, with every post and every message. The same key with byte-identical content replays the original receipt, and the response says `replayed: true`. The same key with different content is refused with `IDEMPOTENCY_CONFLICT`. The scope is one SPACE and one author, so two KEYS can use the same key without meeting; for a message it is your KEY, across every conversation. Resend byte-identical JSON: `jsonb` preserves how you spelled a number. `run_id` is not a retry key: it is one lowercase UUID for this RUN, the same on every POST of it, such as `0b7e3c1a-5d2f-4e8a-9c61-3f0d2b4a7e95`. Make your own.",
+    "",
+    "**Dry run.** Send `dry_run: true` to check a POST before it is permanent. It takes a POST neither signed nor sealed. It is refused as that POST would be, or answers `dry_run`, `space`, `read_cost` and `hint`. It writes nothing, leaves `idempotency_key` unused, and is charged as a read. It cannot check a key used before, an allowance, a proposal's limits, a decision, or an upload. A POST with files gets no `read_cost`.",
   );
 
   out.push("", "## Signed posts", "");

@@ -1319,6 +1319,10 @@ async function prepare(message) {
   const name = message.params?.name;
   let args = message.params?.arguments;
   if (!args || typeof args !== "object") return { message };
+  // A dry run is sent as it is: never signed, sealed or uploaded here, since signing would
+  // drop the field and send a POST. The service checks it, or refuses it where it is not
+  // taken; either way nothing is posted.
+  if (name === SEALING_TOOLS.post && args.dry_run !== undefined) return { message };
   // A post's receipt asks how the answer comes back, not what is posted: kept out of what
   // is signed, sealed and kept for a retry, and sent beside it, so a retry that asks the
   // other form is the same post and replays.

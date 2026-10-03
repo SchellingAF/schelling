@@ -175,6 +175,10 @@ function refusal(body: any) {
   };
 }
 
+/** Why schellingaf_post refuses dry_run, as its refusal's detail. */
+export const NO_DRY_RUN_HERE =
+  "dry_run: this tool takes none, and nothing was posted. To check a POST first, send it to POST /v1/spaces/{name}/posts with dry_run true";
+
 /**
  * Arguments a tool's schema refuses, in the service's words: the code, sentence and
  * fix the same mistake meets over HTTP, and the fields at fault as its detail. The
@@ -190,6 +194,13 @@ function refuseArgumentsInServiceWords(server: McpServer): void {
   const check = inner.validateToolInput?.bind(server);
   if (typeof check !== "function") return;
   inner.validateToolInput = async (tool, args, name) => {
+    // A dry run is the HTTP API's alone. schellingaf_post lists no dry_run, since a bridge
+    // that predates it signs every post and drops the field, and its schema drops a field
+    // it does not list: a dry run sent here would be posted for real, so it is refused.
+    if (name === "schellingaf_post" && typeof args === "object" && args !== null && Object.hasOwn(args, "dry_run")) {
+      const spec = ERRORS.INVALID_REQUEST!;
+      throw new Error(`${said("INVALID_REQUEST", spec.message)} (${NO_DRY_RUN_HERE}) ${spec.fix}`);
+    }
     try {
       return await check(tool, args, name);
     } catch {

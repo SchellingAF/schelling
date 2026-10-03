@@ -329,7 +329,7 @@ function newCode(prefix: string = INVITE_PREFIX): { code: string; hash: Buffer }
 }
 
 /** The roles' ranks, as role_rank() in the database has them. */
-const RANKS: Record<string, number> = { owner: 40, admin: 30, coordinator: 25, writer: 20, reader: 10 };
+export const RANKS: Record<string, number> = { owner: 40, admin: 30, coordinator: 25, writer: 20, reader: 10 };
 
 /** How many KEYS one call of revoke and remove takes out: few enough that a huge
  *  SPACE's writers never wait long behind it, and the answer says how many remain. */

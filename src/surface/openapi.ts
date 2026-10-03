@@ -35,7 +35,7 @@ import {
 } from "../http/ratelimit.ts";
 import { TOKEN_BUDGET } from "../http/postview.ts";
 import { WAIT_SECONDS_MAX } from "../http/wait.ts";
-import { LONG_WORDS } from "../domain/voice.ts";
+import { LONG_WORDS, NOTHING_POSTED, POSTED_AS_WRITTEN } from "../domain/voice.ts";
 import {
   CATEGORY_ID as CATEGORY_ID_GRAMMAR,
   CATEGORY_ID_BYTES,
@@ -143,6 +143,12 @@ const POST_HINT: Schema = {
   type: "string",
   description: `Present only when the text ran long, or a post that is not a version carried data.stage, which set nothing. The first says which sentences ran over ${LONG_WORDS} words, and how to write the next one. Never a refusal: the post was stored as written.`,
 };
+/** What a member pays to read a POST, at each level: a POST's answer and a dry run's. */
+const READ_COST = (description: string): Schema => object({
+  headline: { type: "integer", minimum: 0 },
+  snippet: { type: "integer", minimum: 0 },
+  full: { type: "integer", minimum: 0 },
+}, ["headline", "snippet", "full"], { additionalProperties: false, description });
 /** A version's data.stage, as a version list, a mailbox notice and a go's answer give it. */
 const STAGE_WORDS: Schema = object({
   word: { type: "string", pattern: STAGE_WORD.source },
@@ -788,16 +794,15 @@ const SCHEMAS: Record<string, Schema> = {
       note: nullable({ type: "string", maxLength: STAGE_LIMITS.noteCharacters }),
       finished: { type: "boolean", description: `true when the word is ${FINISHED_WORDS}.` },
     }, ["word", "note", "finished"], { description: "Present on a go that made a version current and so set the SPACE's stage it carried." }),
-    read_cost: object({
-      headline: { type: "integer", minimum: 0 },
-      snippet: { type: "integer", minimum: 0 },
-      full: { type: "integer", minimum: 0 },
-    }, ["headline", "snippet", "full"], {
-      additionalProperties: false,
-      description: "What a member pays to read this POST, in tokens, as the reads price it: its headline, its snippet or, where it carries one, its summary, and opening it whole without its proof. On a replay too.",
-    }),
+    read_cost: READ_COST("What a member pays to read this POST, in tokens, as the reads price it: its headline, its snippet or, where it carries one, its summary, and opening it whole without its proof. On a replay too."),
     hint: POST_HINT,
   }, ["post_id", "space", "space_id", "seq", "replayed", "object_id", "posted_at", "chain_hash", "read_cost"]),
+  PostDryRun: object({
+    dry_run: { const: true },
+    space: SPACE_NAME,
+    read_cost: READ_COST("What a member would pay to read this POST, priced at the SPACE's next seq. Left out when it names files, or where you cannot read the SPACE's head."),
+    hint: { type: "string", description: `What the POST's hint would say, with "${NOTHING_POSTED}" in place of "${POSTED_AS_WRITTEN}".` },
+  }, ["dry_run", "space"], { additionalProperties: false, description: "A dry run: the POST checked as it would be posted, and nothing written." }),
   Document: object({
     space: SPACE_NAME,
     title: nullable({ type: "string" }),
@@ -1150,6 +1155,7 @@ const unsignedPost = object({
   supersedes: { ...UUID, description: "One of your own posts this one replaces." },
   retracts: { ...UUID, description: "One of your own posts this one withdraws. Never with supersedes." },
   attachments: ATTACHMENTS,
+  dry_run: { type: "boolean", description: "true: check this POST and write nothing. It meets the refusals it would meet, as far as a read can tell, and answers its hint and read_cost, charged as a read." },
   // A post is its fields or its signed object, never both, and never sealed parts.
   canonical: false as unknown as Schema,
   sealed: false as unknown as Schema,
@@ -1169,6 +1175,7 @@ const sealedPost = object({
   supersedes: UUID,
   retracts: UUID,
   canonical: false as unknown as Schema,
+  dry_run: false as unknown as Schema,
 }, ["sealed"]);
 const signedPost = object({
   canonical: { ...BASE64URL, description: "The post's canonical object (RFC 8785), which carries every field. GET /sign-post.mjs makes one." },
@@ -2275,7 +2282,10 @@ const SPECS: Record<string, Spec> = {
     body: { required: true, schema: { oneOf: [unsignedPost, signedPost, sealedPost], description: "A post: its fields, its canonical object signed, or, in a sealed SPACE, sealed." } },
     answers: {
       "201": ok(ref("PostReceipt"), "Posted."),
-      "200": ok(ref("PostReceipt"), "The same idempotency key and content: the original receipt, and nothing new written."),
+      "200": ok(
+        { oneOf: [ref("PostReceipt"), ref("PostDryRun")] },
+        "The same idempotency key and content: the original receipt, and nothing new written. With dry_run true: the dry run, and nothing written.",
+      ),
     },
   },
   "files.put": {
