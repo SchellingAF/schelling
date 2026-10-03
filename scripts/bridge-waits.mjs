@@ -10,6 +10,12 @@
 //   node scripts/bridge-waits.mjs --scale 0.02    every case, each time limit at a fiftieth
 //   node scripts/bridge-waits.mjs mcp-silent --cap 330
 //   node scripts/bridge-waits.mjs --list
+//   node scripts/bridge-waits.mjs --stack http://127.0.0.1:<port>
+//
+// With --stack, against a product running on this machine, such as the one
+// `npm run stack -- up` starts from the website's checkout: a proxy in front of it drops
+// the answer to a post after the product wrote it, and the post must be sent twice and
+// held once. Only an address on this machine is taken.
 //
 // Not part of `npm test`: test/bridge-waits.test.ts holds the bridge to each case there.
 //
@@ -30,8 +36,8 @@
 
 import { spawn } from "node:child_process";
 import { createServer } from "node:http";
-import { generateKeyPairSync, createPublicKey } from "node:crypto";
-import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { generateKeyPairSync, createPrivateKey, createPublicKey, sign as signBytes } from "node:crypto";
+import { mkdtempSync, readFileSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -315,13 +321,103 @@ async function runCase(name, c) {
   return result;
 }
 
+// ── against a running product ───────────────────────────────────────────────
+
+/** A post whose answer a proxy drops after the product wrote it: sent twice by the bridge,
+ *  under one idempotency key, and held once. Answers whether it was. */
+async function stackCase(origin) {
+  const url = new URL(origin);
+  if (!["127.0.0.1", "localhost", "[::1]"].includes(url.hostname)) throw new Error(`--stack takes a product on this machine, not ${origin}`);
+  const dir = mkdtempSync(join(tmpdir(), "bridge-waits-stack-"));
+  const key = await makeKey(dir);
+  // A token minted straight from the product: the bridge goes through the proxy, whose
+  // address no challenge names.
+  const post = async (path, body, bearer) => {
+    const res = await fetch(`${origin}${path}`, {
+      method: "POST",
+      headers: { "content-type": "application/json", ...(bearer ? { authorization: `Bearer ${bearer}` } : {}) },
+      body: JSON.stringify(body),
+    });
+    return { status: res.status, body: await res.json().catch(() => null) };
+  };
+  const privateKey = createPrivateKey(readFileSync(key.file));
+  const publicKey = Buffer.from(createPublicKey(privateKey).export({ format: "der", type: "spki" }).subarray(-32)).toString("hex");
+  const challenge = (await post("/v1/keys/challenge", { public_key: publicKey })).body;
+  const preimage = Buffer.concat([Buffer.from("agent-state:token-challenge:v1"), Buffer.from([0]), Buffer.from(challenge.audience), Buffer.from([0]), Buffer.from(challenge.challenge, "hex")]);
+  const verified = (await post("/v1/keys/verify", { public_key: publicKey, challenge: challenge.challenge, signature: signBytes(null, preimage, privateKey).toString("hex"), label: "bridge-waits" })).body;
+  const token = verified.token;
+
+  // The proxy: every request passed on, but the first post's answer read whole and dropped.
+  const space = `bridge-waits-${process.pid}`;
+  let posts = 0;
+  const proxy = createServer(async (req, res) => {
+    const body = await readBody(req);
+    const ahead = await fetch(`${origin}${req.url}`, {
+      method: req.method,
+      headers: Object.fromEntries(Object.entries(req.headers).filter(([k]) => !["host", "connection", "content-length"].includes(k))),
+      ...(["GET", "HEAD"].includes(req.method) ? {} : { body }),
+    });
+    const answer = Buffer.from(await ahead.arrayBuffer());
+    let rpc = null;
+    try {
+      rpc = req.url.startsWith("/mcp") ? JSON.parse(body) : null;
+    } catch {}
+    if (rpc?.method === "tools/call" && rpc.params?.name === "schellingaf_post" && rpc.params?.arguments?.space === space && ++posts === 1) {
+      req.socket.destroy();
+      return;
+    }
+    res.writeHead(ahead.status, { "content-type": ahead.headers.get("content-type") ?? "application/json" });
+    res.end(answer);
+  });
+  await new Promise((ok) => proxy.listen(0, "127.0.0.1", ok));
+  const child = spawn(process.execPath, [BRIDGE], {
+    env: { PATH: process.env.PATH, HOME: dir, SCHELLINGAF_API: `http://127.0.0.1:${proxy.address().port}`, SCHELLINGAF_KEY_FILE: key.file, SCHELLINGAF_TOKEN: token },
+    cwd: dir,
+  });
+  let buffered = "";
+  const answers = new Map();
+  child.stdout.setEncoding("utf8");
+  child.stdout.on("data", (chunk) => {
+    buffered += chunk;
+    for (let end = buffered.indexOf("\n"); end >= 0; end = buffered.indexOf("\n")) {
+      const m = JSON.parse(buffered.slice(0, end));
+      buffered = buffered.slice(end + 1);
+      answers.get(m.id)?.(m);
+    }
+  });
+  let next = 0;
+  const ask = (params) => new Promise((ok) => {
+    const id = ++next;
+    answers.set(id, ok);
+    child.stdin.write(JSON.stringify({ jsonrpc: "2.0", id, method: "tools/call", params }) + "\n");
+  });
+  try {
+    const made = await ask({ name: "schellingaf_space_control", arguments: { action: "create", name: space, title: "a post whose answer is dropped once", categories: ["general"] } });
+    if (made.result?.isError) throw new Error(`could not make ${space}: ${made.result.content[0].text}`);
+    const posted = await ask({ name: "schellingaf_post", arguments: { space, kind: "obs", title: "its answer was dropped once", body: "held once" } });
+    const read = await fetch(`${origin}/v1/spaces/${space}/posts`, { headers: { authorization: `Bearer ${token}` } }).then((r) => r.json());
+    const held = read.items?.length ?? 0;
+    const ok = !posted.result?.isError && posts === 2 && held === 1;
+    console.log(`stack-resend                   ${ok ? "as expected" : "NOT AS EXPECTED"}: sent ${posts} times, held ${held} times`);
+    console.log(`  said: ${(posted.result?.content?.[0]?.text ?? posted.error?.message ?? "").slice(0, 160)}`);
+    return ok;
+  } finally {
+    child.kill("SIGKILL");
+    proxy.closeAllConnections();
+    proxy.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
 // ── main ─────────────────────────────────────────────────────────────────────
+
+if (opt("--stack") !== undefined) process.exit((await stackCase(opt("--stack"))) ? 0 : 1);
 
 if (args.includes("--list")) {
   for (const [name, c] of Object.entries(CASES)) console.log(`${name.padEnd(30)} ${c.what}`);
   process.exit(0);
 }
-const named = args.filter((a, i) => !a.startsWith("--") && !(i > 0 && ["--cap", "--bridge", "--scale"].includes(args[i - 1])));
+const named = args.filter((a, i) => !a.startsWith("--") && !(i > 0 && ["--cap", "--bridge", "--scale", "--stack"].includes(args[i - 1])));
 const chosen = named.length ? named : Object.keys(CASES);
 for (const n of chosen) if (!CASES[n]) throw new Error(`no case ${n}: --list names them`);
 const results = await Promise.all(chosen.map((n) => runCase(n, CASES[n])));

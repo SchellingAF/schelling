@@ -1112,8 +1112,19 @@ async function secretIn(s, want) {
  * that sealed afresh would be a different post, and the service would refuse it. */
 const sealedOnce = new Map();
 
+/** A value as JSON with every object's keys sorted: the same call, its fields in another
+ *  order or its key in another place, reads the same. */
+function sortedJson(value) {
+  if (Array.isArray(value)) return ["[", value.map(sortedJson).join(","), "]"].join("");
+  if (value !== null && typeof value === "object") {
+    const fields = Object.keys(value).filter((k) => value[k] !== undefined).sort().map((k) => JSON.stringify(k) + ":" + sortedJson(value[k]));
+    return ["{", fields.join(","), "}"].join("");
+  }
+  return JSON.stringify(value) ?? String(null);
+}
+
 function once(key, args, make) {
-  const plain = JSON.stringify(args);
+  const plain = sortedJson(args);
   const kept = key === undefined ? undefined : sealedOnce.get(key);
   if (kept && kept.plain === plain) return kept.sealed;
   const sealed = make();
@@ -1641,7 +1652,7 @@ async function prepare(message) {
       again: async () => {
         const idempotencyKey = JSON.parse(Buffer.from(sealed.canonical, "base64url").toString("utf8")).idempotency_key;
         const next = await sealedPost({ ...args, idempotency_key: idempotencyKey }, { fresh: true });
-        if (key !== undefined) sealedOnce.set(key, { plain: JSON.stringify(args), sealed: Promise.resolve(next) });
+        if (key !== undefined) sealedOnce.set(key, { plain: sortedJson(args), sealed: Promise.resolve(next) });
         return withArgs(next);
       },
     };
@@ -2260,12 +2271,15 @@ const KEYED = Object.freeze({
   schellingaf_oracle: ["approve", "decline", "propose"],
 });
 
+/** Whether a call is one of those writes, whose schema takes an idempotency_key. */
+const takesKey = (name, args) =>
+  Object.hasOwn(KEYED, name) && args !== null && typeof args === "object" && !Array.isArray(args) &&
+  (KEYED[name] === null || KEYED[name].includes(args.action));
+
 /** Whether a call is a write the service dedupes by idempotency_key, and the key it
  *  carries: at the top of its arguments, or inside canonical when the agent signed it. */
 function keyOf(name, args) {
-  if (!Object.hasOwn(KEYED, name) || args === null || typeof args !== "object") return { keyed: false };
-  const actions = KEYED[name];
-  if (actions !== null && !actions.includes(args.action)) return { keyed: false };
+  if (!takesKey(name, args)) return { keyed: false };
   if (name === SEALING_TOOLS.post && typeof args.canonical === "string") {
     let inside;
     try {
@@ -2320,6 +2334,12 @@ async function relay(message) {
   const name = message?.params?.name ?? message?.params?.uri;
   const isCall = message.method === "tools/call";
   const isListen = message.method === "subscriptions/listen";
+  // The key the bridge adds to a write the service dedupes, when the agent gave none and
+  // did not sign the post itself: here, before anything is prepared, so what is signed,
+  // sealed or kept for a retry carries it.
+  const given = message.params?.arguments;
+  const madeKey = isCall && takesKey(name, given) && given.idempotency_key === undefined && given.canonical === undefined;
+  if (madeKey) message = { ...message, params: { ...message.params, arguments: { ...given, idempotency_key: globalThis.crypto.randomUUID() } } };
   // The call's deadline: CALL_MS, plus the wait a tools/call gives in whole seconds, never
   // past CALL_CEILING_MS; a listen's, LISTEN_MS. /mcp may hold a call's answer for its wait,
   // or WAIT_ALLOWANCE_MS when it gives less or none.
@@ -2344,10 +2364,20 @@ async function relay(message) {
     if (inFlight.get(id) === entry) inFlight.delete(id);
     emit(m);
   };
-  // Whether the request went to the connector: the moment it is handed to fetch.
+  // Whether the request went to the connector: the moment it is handed to fetch; and how
+  // many times it went.
   let sent = false;
+  let sends = 0;
+  // Why a keyed write was sent again, once it was, and the service's refusal of that send.
+  let lostCause = null;
+  let secondRefusal = null;
   const { key, keyed } = isCall ? keyOf(name, message.params?.arguments) : { keyed: false };
-  const noAnswer = (cause) => noAnswerFor(message, cause, { sent, key: keyed ? key : null });
+  const noAnswer = (cause) => {
+    let twice = null;
+    if (keyed && sends >= 2) twice = " It was sent twice, under the same idempotency_key.";
+    if (twice !== null && secondRefusal !== null) twice = ` It was sent twice, under the same idempotency_key. The second send was refused: ${secondRefusal}`;
+    return noAnswerFor(message, cause, { sent, key: keyed ? key : null, given: !madeKey, twice });
+  };
   // The service's result for the id, once it arrived: written, whatever the way back meets.
   let inHand = null;
 
@@ -2424,7 +2454,11 @@ async function relay(message) {
       }
     }
 
-    const send = async (bearer) => {
+    // Each send of the /mcp request, and the bearer it went with, for a resend.
+    let bearer = null;
+    const send = async (given) => {
+      bearer = given;
+      sends++;
       sent = true;
       try {
         return await timed(CONNECTOR, {
@@ -2432,7 +2466,7 @@ async function relay(message) {
           headers: {
             "content-type": "application/json",
             accept: "application/json, text/event-stream",
-            authorization: `Bearer ${bearer}`,
+            authorization: `Bearer ${given}`,
             ...(modern ? { "MCP-Protocol-Version": modern, "Mcp-Method": message.method } : negotiated ? { "MCP-Protocol-Version": negotiated } : {}),
             ...(modern && typeof name === "string" && ["tools/call", "prompts/get", "resources/read"].includes(message.method) ? { "Mcp-Name": name } : {}),
           },
@@ -2442,23 +2476,29 @@ async function relay(message) {
         throw lostAs(error);
       }
     };
-
-    let res = await send(await token());
+    // A write the service dedupes is sent once more, the same bytes under the same key,
+    // when its answer was lost, never a third time, and only with RESEND_LEFT_MS of its
+    // deadline left. Never a proposal: the connector reads the document before it writes it.
+    const resends = keyed && message.params?.arguments?.action !== "propose";
     // Each at most once, and only for a request whose own answer says so: the token is
     // the problem, and the request goes again with a fresh one; or the SPACE's key
-    // changed under a sealed post, and it is sealed again under the new key.
+    // changed under a sealed post, and it is sealed again under the new key. A keyed write
+    // goes again for one only while it has been sent once.
     let retriedToken = false;
-    for (;;) {
+    const mayAgain = () => lostCause === null && (!keyed || sends < 2);
+
+    /** One answer of the connector, read: the request's own is written and null comes back;
+     *  "token", "key" or "sign" when the request must go again; a NoAnswer when none came. */
+    const answered = async (res) => {
       if (res.status === 202) {
         res.cancel();
-        answer(noAnswer("The service accepted the request and sent no answer to it."));
-        return;
+        throw new NoAnswer("The service accepted the request and sent no answer to it.");
       }
-      let retry = null;
       // What came instead of the request's own answer: the service's refusal before the
       // connector, with no JSON-RPC message, and whether it answered another id.
       let envelope = null;
       let other = false;
+      let retry = null;
       try {
         for await (const m of messagesOf(res)) {
           // Notifications and the service's own requests are relayed as they come.
@@ -2480,17 +2520,18 @@ async function relay(message) {
             say(`dropped an answer the service sent for another request than ${JSON.stringify(id)}`);
             continue;
           }
-          if (!retriedToken && !process.env.SCHELLINGAF_TOKEN && tokenRefused(m)) {
-            retry = "token";
-            break;
+          if (mayAgain()) {
+            if (!retriedToken && !process.env.SCHELLINGAF_TOKEN && tokenRefused(m)) retry = "token";
+            else if (again && toolRefused(m, "KEY_CHANGED")) retry = "key";
+            else if (resign && toolRefused(m, "SIGNATURE_REQUIRED")) retry = "sign";
+            if (retry !== null) break;
           }
-          if (again && toolRefused(m, "KEY_CHANGED")) {
-            retry = "key";
-            break;
-          }
-          if (resign && toolRefused(m, "SIGNATURE_REQUIRED")) {
-            retry = "sign";
-            break;
+          // Sent again after a lost answer, only a success is known: the routes spend the
+          // write allowance, and check a sealed post's key, before they replay, so a refusal
+          // now says nothing of whether the first send landed.
+          if (lostCause !== null && (m.error || m.result?.isError)) {
+            secondRefusal = m.error?.message ?? m.result?.content?.[0]?.text ?? "";
+            throw new NoAnswer(lostCause);
           }
           // The result is here: the deadline can no longer turn it into NO_ANSWER, and the
           // way back has OPEN_MS at least.
@@ -2522,30 +2563,51 @@ async function relay(message) {
           }
           // The request's answer is written: nothing more of this response is read.
           answer(out);
-          return;
+          return null;
         }
       } catch (error) {
+        // A gateway's own page in place of the service's answer is an answer lost too.
+        if (error instanceof NoAnswer && !error.lost && [502, 503, 504].includes(res.status)) {
+          throw new NoAnswer(`The service answered ${res.status} and no result.`, { lost: true });
+        }
         throw lostAs(error);
       }
-      if (retry === null) {
-        if (!isRequest) return;
-        // The service's refusal, made before the connector read the request: said as the
-        // service said it, for this request's id.
-        if (envelope) {
-          const refused = refusedBy(envelope, res.status, res.headers);
-          answer(isCall
-            ? { jsonrpc: "2.0", id, result: { content: [{ type: "text", text: refused.message }], isError: true } }
-            : { jsonrpc: "2.0", id, error: { code: -32603, message: refused.message } });
-          return;
+      if (retry !== null) return retry;
+      if (!isRequest) return null;
+      // The service's refusal, made before the connector read the request: said as the
+      // service said it, for this request's id.
+      if (envelope) {
+        const refused = refusedBy(envelope, res.status, res.headers);
+        if (lostCause !== null) {
+          secondRefusal = refused.message;
+          throw new NoAnswer(lostCause);
         }
-        if (other) throw new NoAnswer("The service answered another request instead.");
-        if (res.status >= 400) throw new NoAnswer(`The service answered ${res.status} and no result.`, { lost: [502, 503, 504].includes(res.status) });
-        if ((res.headers.get("content-type") ?? "").includes("text/event-stream")) throw new NoAnswer("The service's answer ended before its result.", { lost: true });
-        throw new NoAnswer("The service sent an empty answer.");
+        answer(isCall
+          ? { jsonrpc: "2.0", id, result: { content: [{ type: "text", text: refused.message }], isError: true } }
+          : { jsonrpc: "2.0", id, error: { code: -32603, message: refused.message } });
+        return null;
       }
+      if (other) throw new NoAnswer("The service answered another request instead.");
+      if (res.status >= 400) throw new NoAnswer(`The service answered ${res.status} and no result.`, { lost: [502, 503, 504].includes(res.status) });
+      if ((res.headers.get("content-type") ?? "").includes("text/event-stream")) throw new NoAnswer("The service's answer ended before its result.", { lost: true });
+      throw new NoAnswer("The service sent an empty answer.");
+    };
+
+    let pending = async () => send(await token());
+    for (;;) {
+      let retry;
+      try {
+        retry = await answered(await pending());
+      } catch (error) {
+        if (!(error instanceof NoAnswer && error.lost && resends && sends < 2 && ctx.deadline - Date.now() >= RESEND_LEFT_MS)) throw error;
+        lostCause = error.message;
+        pending = () => send(bearer);
+        continue;
+      }
+      if (retry === null) return;
       if (retry === "token") {
         retriedToken = true;
-        res = await send(await token({ fresh: true }));
+        pending = async () => send(await token({ fresh: true }));
       } else {
         const next = retry === "sign" ? resign : again;
         if (retry === "sign") resign = null;
@@ -2557,7 +2619,7 @@ async function relay(message) {
           refuseHere(error, retry === "sign" ? "sign" : "seal");
           return;
         }
-        res = await send(await token());
+        pending = async () => send(await token());
       }
     }
   };

@@ -72,7 +72,7 @@ describe("the copy under review", () => {
     const face = faceText(text);
     assert.equal(face.match(/^## \d+\. /gm)?.length, 11, "the face is not sections 1 to 11");
     const size = tokens(face);
-    assert.ok(size < 50343, `the face is ${size} tokens; it should stay readable in one sitting`);
+    assert.ok(size < 50486, `the face is ${size} tokens; it should stay readable in one sitting`);
     assert.ok(size > 4000, `the face is only ${size} tokens; something is missing from it`);
     // And it is the face the record holds, read from the same boundary.
     const recorded = readFileSync(APPROVED, "utf8");

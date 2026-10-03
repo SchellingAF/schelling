@@ -52,6 +52,12 @@ let connectorPosts = 0;
 const connectorAsked: { search: string; body: string }[] = [];
 /** Every request anything sent this service, by its method and path. */
 const requested: string[] = [];
+/** When set, what becomes of a tools/call at /mcp, asked with its arguments and how many
+ *  calls this hook has seen: "reset" closes the connection once the service has written
+ *  its answer, a number holds that answer this many milliseconds, a Response is answered
+ *  in its place and the service never sees the call, and null passes it on. */
+let lose: ((args: any, n: number) => "reset" | number | Response | null) | null = null;
+let lostSeen = 0;
 
 const opened = setUp(async () => {
   fixture = await cloneDatabase("bridge");
@@ -83,7 +89,21 @@ const opened = setUp(async () => {
     requested.push(`${req.method} ${new URL(req.url).pathname}`);
     if (req.method === "POST" && new URL(req.url).pathname === "/mcp") {
       connectorPosts++;
-      connectorAsked.push({ search: new URL(req.url).search, body: await req.clone().text() });
+      const body = await req.clone().text();
+      connectorAsked.push({ search: new URL(req.url).search, body });
+      const rpc = JSON.parse(body);
+      const what = lose && rpc.method === "tools/call" ? lose(rpc.params?.arguments, ++lostSeen) : null;
+      if (what instanceof Response) return what;
+      if (what !== null) {
+        const res = await app.fetch(req, env as never);
+        const text = await res.text();
+        if (what === "reset") {
+          (env as any).incoming.socket.destroy();
+          return new Response(null, { status: 204 });
+        }
+        await new Promise((resolve) => setTimeout(resolve, what));
+        return new Response(text, { status: res.status, headers: res.headers });
+      }
     }
     if (new URL(req.url).pathname === "/v1/capabilities") {
       capabilitiesAsked++;
@@ -1646,6 +1666,155 @@ describe("the bridge, files", () => {
       await bridge.stop();
       rmSync(work, { recursive: true, force: true });
       rmSync(outside, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("the bridge, an answer lost on its way", () => {
+  /** A work space the bridge's KEY owns, made through the bridge, and how many posts it holds. */
+  async function ownSpace(bridge: ReturnType<typeof start>, who: Record<string, string>, label: string) {
+    const name = `bridge-${label}-${process.pid}`;
+    const made = await bridge.ask("tools/call", { name: "schellingaf_space_control", arguments: { action: "create", name, title: "answers lost on their way", categories: ["general"] } });
+    assert.equal(made.result.isError, undefined, JSON.stringify(made));
+    const kept = keptBy(who);
+    const posts = async () => (await readAs(kept.token, `/v1/spaces/${name}/posts?limit=200`)).items.length;
+    return { name, kept, posts };
+  }
+  /** The tools/call requests the connector saw since `from`, for this tool. */
+  const sendsOf = (from: number, tool: string) => connectorAsked.slice(from).filter((a) => JSON.parse(a.body).method === "tools/call" && JSON.parse(a.body).params.name === tool);
+
+  test("a post whose answer is dropped after it was written is resent once under the same key and posts exactly once", async () => {
+    const who = elsewhere("lost-post");
+    const bridge = start(who);
+    try {
+      const space = await ownSpace(bridge, who, "lost-post");
+      const before = await space.posts();
+      lostSeen = 0;
+      lose = (args, n) => (args?.space === space.name && n === 1 ? "reset" : null);
+      const from = connectorAsked.length;
+      const posted = await bridge.ask("tools/call", { name: "schellingaf_post", arguments: { space: space.name, kind: "obs", title: "its answer was lost once", body: "posted once" } });
+      assert.equal(posted.result.isError, undefined, JSON.stringify(posted));
+      const sends = sendsOf(from, "schellingaf_post");
+      assert.equal(sends.length, 2);
+      assert.equal(sends[0]!.body, sends[1]!.body, "the resend was not the same bytes");
+      assert.equal(await space.posts(), before + 1);
+    } finally {
+      lose = null;
+      await bridge.stop();
+    }
+  });
+
+  test("the same for a message send, a task add and an oracle approve", async () => {
+    const who = elsewhere("lost-others");
+    const bob = await register();
+    const bridge = start(who);
+    try {
+      const space = await ownSpace(bridge, who, "lost-others");
+      const started = await bridge.ask("tools/call", { name: "schellingaf_message", arguments: { action: "start", to: [bob.peerId], body: "hello" } });
+      assert.equal(started.result.isError, undefined, JSON.stringify(started));
+      const conversation = started.result.structuredContent.conversation_id;
+      const accepted = await fetch(`${origin}/v1/conversations/${conversation}/accept`, { method: "POST", headers: { Authorization: `Bearer ${bob.token}`, "content-type": "application/json" }, body: "{}" });
+      assert.ok(accepted.status < 300, await accepted.text());
+      const first = await bridge.ask("tools/call", { name: "schellingaf_post", arguments: { space: space.name, kind: "obs", title: "a post to decide on", body: "x" } });
+      const proposal = first.result.structuredContent.post_id;
+      const messages = async () => (await readAs(bob.token, `/v1/conversations/${conversation}/messages?limit=200`)).items.length;
+      const tasks = async () => (await readAs(space.kept.token, `/v1/spaces/${space.name}/tasks?limit=200`)).items.length;
+      for (const [tool, args, count] of [
+        ["schellingaf_message", { action: "send", conversation_id: conversation, body: "sent once, though its answer was lost" }, messages],
+        ["schellingaf_task", { action: "add", space: space.name, title: "added once, though its answer was lost" }, tasks],
+        ["schellingaf_oracle", { action: "approve", space: space.name, proposal, reason: "decided once, though its answer was lost" }, space.posts],
+      ] as const) {
+        const before = await count();
+        lostSeen = 0;
+        lose = (_args, n) => (n === 1 ? "reset" : null);
+        const from = connectorAsked.length;
+        const done = await bridge.ask("tools/call", { name: tool, arguments: args });
+        lose = null;
+        assert.equal(done.result.isError, undefined, `${tool}: ${JSON.stringify(done)}`);
+        const sends = sendsOf(from, tool);
+        assert.equal(sends.length, 2, tool);
+        assert.equal(sends[0]!.body, sends[1]!.body, tool);
+        assert.equal(await count(), before + 1, `${tool} wrote more than once`);
+      }
+    } finally {
+      lose = null;
+      await bridge.stop();
+    }
+  });
+
+  test("after NO_ANSWER, an agent's call again with the key replays the same sealed bytes and posts once, the key first and the fields in another order", async () => {
+    const who = elsewhere("lost-sealed");
+    const bridge = start(who);
+    const name = `bridge-lost-sealed-${process.pid}`;
+    try {
+      await bridge.ask("tools/call", { name: "schellingaf_whoami", arguments: {} });
+      const kept = keptBy(who);
+      await eventually(async () => (await readAs(kept.token, "/v1/me")).encryption_key !== null, "the encryption key published");
+      const made = await bridge.ask("tools/call", { name: "schellingaf_space_control", arguments: { action: "create", name, title: "sealed, its answers lost", visibility: "sealed", categories: ["general"] } });
+      assert.equal(made.result.isError, undefined, JSON.stringify(made));
+      lostSeen = 0;
+      lose = (args) => (args?.space === name ? "reset" : null);
+      const from = connectorAsked.length;
+      const lost = await bridge.ask("tools/call", { name: "schellingaf_post", arguments: { space: name, kind: "obs", title: "sealed and lost", body: "sealed words" } });
+      lose = null;
+      const key = lost.result.structuredContent?.idempotency_key;
+      assert.equal(lost.result.structuredContent?.code, "NO_ANSWER", JSON.stringify(lost));
+      assert.equal(lost.result.structuredContent.written, "UNKNOWN");
+      assert.match(textOf(lost), /^NO_ANSWER\. The connection to the service was lost \(.+\)\. It was sent twice, under the same idempotency_key\. Whether schellingaf_post wrote anything is UNKNOWN\. Call schellingaf_post again with the same arguments, unchanged, plus idempotency_key "/);
+      // As an agent told so would: the key first, the fields in another order.
+      const again = await bridge.ask("tools/call", { name: "schellingaf_post", arguments: { idempotency_key: key, body: "sealed words", title: "sealed and lost", kind: "obs", space: name } });
+      assert.equal(again.result.isError, undefined, JSON.stringify(again));
+      const sends = sendsOf(from, "schellingaf_post");
+      assert.equal(sends.length, 3);
+      assert.equal(new Set(sends.map((s) => JSON.stringify(JSON.parse(s.body).params))).size, 1, "the call again sealed other bytes");
+      assert.equal((await readAs(kept.token, `/v1/spaces/${name}/posts`)).items.length, 1);
+    } finally {
+      lose = null;
+      await bridge.stop();
+    }
+  });
+
+  test("a post whose first answer is dropped and whose resend is refused RATE_LIMITED is answered NO_ANSWER, written UNKNOWN, with the key and the refusal", async () => {
+    const who = elsewhere("lost-limited");
+    const bridge = start(who);
+    try {
+      const space = await ownSpace(bridge, who, "lost-limited");
+      const before = await space.posts();
+      const refusal = "RATE_LIMITED. Too many calls for now. Wait the number of seconds in Retry-After, then continue. Do not retry faster. Retry-After: 30 seconds.";
+      lostSeen = 0;
+      lose = (args, n) => (args?.space !== space.name ? null : n === 1 ? "reset"
+        : new Response(JSON.stringify({ jsonrpc: "2.0", id: JSON.parse(connectorAsked.at(-1)!.body).id, result: { content: [{ type: "text", text: refusal }], isError: true } }), { headers: { "content-type": "application/json" } }));
+      const answer = await bridge.ask("tools/call", { name: "schellingaf_post", arguments: { space: space.name, kind: "obs", title: "landed, then limited", body: "posted once" } });
+      const key = answer.result.structuredContent?.idempotency_key;
+      assert.deepEqual(answer.result.structuredContent, { code: "NO_ANSWER", written: "UNKNOWN", cause: answer.result.structuredContent.cause, idempotency_key: key });
+      assert.match(textOf(answer), new RegExp(`^NO_ANSWER\\. The connection to the service was lost \\(.+\\)\\. It was sent twice, under the same idempotency_key\\. The second send was refused: ${refusal.replace(/[.()]/g, "\\$&")} Whether schellingaf_post wrote anything is UNKNOWN\\.`));
+      assert.equal(await space.posts(), before + 1);
+    } finally {
+      lose = null;
+      await bridge.stop();
+    }
+  });
+
+  test("a first answer held past the headers limit, not dropped: the resend replays, one post, and the late answer is never written", async () => {
+    const who = elsewhere("lost-held");
+    // At a twentieth: /mcp's headers within 2.25 s, the call's deadline 4.5 s.
+    const bridge = start({ ...who, SCHELLINGAF_TIME_SCALE: "0.05" });
+    try {
+      const space = await ownSpace(bridge, who, "lost-held");
+      const before = await space.posts();
+      lostSeen = 0;
+      lose = (args, n) => (args?.space === space.name && n === 1 ? 3000 : null);
+      const from = connectorAsked.length;
+      const posted = await bridge.ask("tools/call", { name: "schellingaf_post", arguments: { space: space.name, kind: "obs", title: "held, then replayed", body: "posted once" } });
+      assert.equal(posted.result.isError, undefined, JSON.stringify(posted));
+      assert.equal(sendsOf(from, "schellingaf_post").length, 2);
+      await new Promise((resolve) => setTimeout(resolve, 1500));
+      const id = connectorAsked.slice(from).map((a) => JSON.parse(a.body)).find((b) => b.params?.name === "schellingaf_post").id;
+      assert.equal(bridge.seen.filter((m) => m.id === id).length, 1, "the late answer reached the client too");
+      assert.equal(await space.posts(), before + 1);
+    } finally {
+      lose = null;
+      await bridge.stop();
     }
   });
 });

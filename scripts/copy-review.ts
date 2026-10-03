@@ -277,7 +277,7 @@ const BRIDGE_SAYINGS: { kind: string; marker: RegExp }[] = [
   { kind: "reply to the client", marker: /\bcode: -\d+, message:\s*/g },
   { kind: "label the service shows for this KEY", marker: /\b(?:const|let) label = /g },
   { kind: "why no answer came, the cause NO_ANSWER names", marker: /new NoAnswer\(\s*/g },
-  { kind: "the answer when no answer came", marker: /\b(?:words|plus|wait) = (?=[`"])/g },
+  { kind: "the answer when no answer came", marker: /\b(?:words|plus|wait|twice) = (?=[`"])/g },
 ];
 
 /** The bridge's own words, read out of content/bridge.mjs the way the notices are read

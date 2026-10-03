@@ -592,3 +592,180 @@ describe("no request waits without end", () => {
     for (const value of ["0.001", "0.02", "1"]) assert.equal(scaleOf(value), Number(value));
   });
 });
+
+/** The /mcp requests a fake saw, their bodies parsed, tools/list left out. */
+const callsSent = (fake: Fake) => fake.bodies.filter((b) => b.route === "POST /mcp" && JSON.parse(b.body).method === "tools/call");
+/** A post's signed object, from the body that carried it. */
+const canonicalOf = (body: string) => JSON.parse(Buffer.from(JSON.parse(body).params.arguments.canonical, "base64url").toString("utf8"));
+/** Answers each /mcp tools/call with the next of `answers` in turn, the last for every one after. */
+const inTurn = (...answers: Handler[]): Handler => {
+  let n = 0;
+  return (req, res, body) => {
+    if (JSON.parse(body).method !== "tools/call") return healthy(key.peerId)["POST /mcp"]!(req, res, body);
+    return answers[Math.min(n++, answers.length - 1)]!(req, res, body);
+  };
+};
+const okAnswer: Handler = (_req, res, body) => json(res, 200, { jsonrpc: "2.0", id: JSON.parse(body).id, result: { content: [{ type: "text", text: "ok" }] } });
+const status = (code: number, text = ""): Handler => (_req, res) => void res.writeHead(code, { "content-type": text ? "text/html" : "application/json" }).end(text);
+
+describe("a write whose answer was lost is sent once more, under the same key", () => {
+  for (const code of [502, 503, 504]) {
+    test(`a ${code} with no message is resent once, the same bytes, and answered`, async () => {
+      const { bridge, fake, done } = await against({ "POST /mcp": inTurn(status(code, code === 502 ? "<html>bad gateway</html>" : ""), okAnswer) });
+      try {
+        bridge.send(call(1, POST));
+        assert.equal(textOf(await bridge.answerTo(1, 4000)), "ok");
+        const sent = callsSent(fake);
+        assert.equal(sent.length, 2);
+        assert.equal(sent[0]!.body, sent[1]!.body, "the resend was not the same bytes");
+        assert.match(JSON.parse(sent[0]!.body).params.arguments.idempotency_key, /^[0-9a-f-]{36}$/);
+      } finally {
+        await done();
+      }
+    });
+  }
+
+  test("a join whose answer is lost is never resent and is answered NO_ANSWER at once", async () => {
+    const { bridge, fake, done } = await against({ "POST /mcp": inTurn(status(503)) });
+    try {
+      const from = Date.now();
+      bridge.send(call(1, { name: "schellingaf_join", arguments: { action: "join", name: "fake-space" } }));
+      const answer = await bridge.answerTo(1, 4000);
+      assert.ok(since(from) < at(20), `answered after ${since(from)} ms`);
+      assert.equal(textOf(answer), "NO_ANSWER. The service answered 503 and no result. Whether schellingaf_join changed anything is UNKNOWN, and this call carries no idempotency_key. If it only reads, call it again. If it writes, read what it would change first: a second call may do it twice.");
+      assert.deepEqual(answer.result.structuredContent, { code: "NO_ANSWER", written: "UNKNOWN", cause: "The service answered 503 and no result." });
+      assert.equal(callsSent(fake).length, 1);
+      assert.equal(JSON.parse(callsSent(fake)[0]!.body).params.arguments.idempotency_key, undefined);
+    } finally {
+      await done();
+    }
+  });
+
+  test("an oracle propose whose answer is lost is not resent, and its answer says to read the history", async () => {
+    const { bridge, fake, done } = await against({ "POST /mcp": inTurn(status(503)) });
+    try {
+      bridge.send(call(1, { name: "schellingaf_oracle", arguments: { action: "propose", space: "fake-space", text: "the new text", summary: "one line changed" } }));
+      const answer = await bridge.answerTo(1, 4000);
+      const made = JSON.parse(callsSent(fake)[0]!.body).params.arguments.idempotency_key;
+      assert.match(made, /^[0-9a-f-]{36}$/);
+      assert.equal(textOf(answer), `NO_ANSWER. The service answered 503 and no result. Whether schellingaf_oracle wrote anything is UNKNOWN. If its history shows your version, the first call landed. If not, call propose again with the same arguments, unchanged, plus idempotency_key "${made}".`);
+      assert.deepEqual(answer.result.structuredContent, { code: "NO_ANSWER", written: "UNKNOWN", cause: "The service answered 503 and no result.", idempotency_key: made });
+      assert.equal(callsSent(fake).length, 1);
+    } finally {
+      await done();
+    }
+  });
+
+  test("a write is not resent with less than 30 s of the deadline left", async () => {
+    // Comments until the deadline is a quarter of RESEND_LEFT_MS from passing, then the
+    // stream ends without its result: the answer was lost, too late to send again.
+    const late: Handler = (_req, res) => {
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      const t = setInterval(() => res.write(": keep-alive\n\n"), at(10));
+      setTimeout(() => {
+        clearInterval(t);
+        res.end();
+      }, at(90) - at(30) + at(7));
+    };
+    const { bridge, fake, done } = await against({ "POST /mcp": inTurn(late, okAnswer) });
+    try {
+      bridge.send(call(1, POST));
+      const answer = await bridge.answerTo(1, 4000);
+      assert.equal(answer?.result?.structuredContent?.cause, "The service's answer ended before its result.", JSON.stringify(answer));
+      assert.equal(callsSent(fake).length, 1);
+    } finally {
+      await done();
+    }
+  });
+
+  test("a write is sent at most twice in one call: SIGNATURE_REQUIRED, then a lost answer, is not sent a third time", async () => {
+    const refused: Handler = (_req, res, body) => json(res, 200, { jsonrpc: "2.0", id: JSON.parse(body).id, result: { content: [{ type: "text", text: "SIGNATURE_REQUIRED. This SPACE takes only signed posts." }], isError: true } });
+    const { bridge, fake, done } = await against({ "POST /mcp": inTurn(refused, status(503), okAnswer) });
+    try {
+      bridge.send(call(1, POST));
+      const answer = await bridge.answerTo(1, 4000);
+      const made = canonicalOf(callsSent(fake)[1]!.body).idempotency_key;
+      assert.equal(textOf(answer), `NO_ANSWER. The service answered 503 and no result. It was sent twice, under the same idempotency_key. Whether schellingaf_post wrote anything is UNKNOWN. Call schellingaf_post again with the same arguments, unchanged, plus idempotency_key "${made}": the service writes it at most once, and if the first call landed it answers what that call wrote. IDEMPOTENCY_CONFLICT on that call means the first call landed.`);
+      assert.equal(callsSent(fake).length, 2);
+      assert.equal(JSON.parse(callsSent(fake)[0]!.body).params.arguments.idempotency_key, made, "the unsigned send and the signed one carried different keys");
+    } finally {
+      await done();
+    }
+  });
+
+  test("the key is added before signing, only where none was given, and a resent signed post is the same bytes", async () => {
+    const { bridge, fake, done } = await against({ "POST /mcp": inTurn(status(503)) }, { SCHELLINGAF_UNSIGNED: "" });
+    try {
+      bridge.send(call(1, POST));
+      const made = await bridge.answerTo(1, 4000);
+      const key1 = made?.result?.structuredContent?.idempotency_key;
+      assert.match(key1, /^[0-9a-f-]{36}$/, JSON.stringify(made));
+      const [first, second] = callsSent(fake);
+      assert.equal(canonicalOf(first!.body).idempotency_key, key1, "the signed object carries another key than the answer names");
+      assert.equal(JSON.parse(first!.body).params.arguments.idempotency_key, undefined, "a key was sent beside canonical");
+      assert.equal(first!.body, second!.body, "the resent signed post is not the same bytes");
+
+      bridge.send(call(2, { ...POST, arguments: { ...POST.arguments, idempotency_key: "mine-1" } }));
+      const kept = await bridge.answerTo(2, 4000);
+      assert.equal(kept?.result?.structuredContent?.idempotency_key, "mine-1");
+      assert.equal(canonicalOf(callsSent(fake)[2]!.body).idempotency_key, "mine-1");
+      assert.match(textOf(kept), /, with the idempotency_key "mine-1" you gave: the service writes it at most once/);
+    } finally {
+      await done();
+    }
+  });
+
+  test("a tool or action whose schema takes no key is sent with none", async () => {
+    const { bridge, fake, done } = await against({});
+    try {
+      const asked = [
+        { name: "schellingaf_task", arguments: { action: "next", space: "fake-space" } },
+        { name: "schellingaf_task", arguments: { action: "done", space: "fake-space", number: 1 } },
+        { name: "schellingaf_join", arguments: { action: "join", name: "fake-space" } },
+        { name: "schellingaf_message", arguments: { action: "accept", conversation_id: "c-1" } },
+        { name: "schellingaf_oracle", arguments: { action: "watch", space: "fake-space" } },
+        { name: "schellingaf_space_control", arguments: { action: "update", name: "fake-space", title: "t" } },
+        { name: "schellingaf_read_space", arguments: { space: "fake-space" } },
+      ];
+      for (const [i, params] of asked.entries()) {
+        bridge.send(call(i + 1, params));
+        assert.ok(await bridge.answerTo(i + 1, 4000));
+      }
+      for (const sent of callsSent(fake)) assert.equal(JSON.parse(sent.body).params.arguments.idempotency_key, undefined, sent.body);
+      const keyed = [
+        { name: "schellingaf_task", arguments: { action: "add", space: "fake-space", title: "a task" } },
+        { name: "schellingaf_message", arguments: { action: "send", conversation_id: "c-1", body: "hi" } },
+        { name: "schellingaf_oracle", arguments: { action: "approve", space: "fake-space", proposal: "p-1", reason: "yes" } },
+      ];
+      for (const [i, params] of keyed.entries()) {
+        bridge.send(call(100 + i, params));
+        assert.ok(await bridge.answerTo(100 + i, 4000));
+      }
+      for (const sent of callsSent(fake).slice(asked.length)) assert.match(JSON.parse(sent.body).params.arguments.idempotency_key, /^[0-9a-f-]{36}$/, sent.body);
+    } finally {
+      await done();
+    }
+  });
+
+  test("each NO_ANSWER says exactly what is known: a keyed write sent, a write with no key, a call not sent, another request", async () => {
+    const { bridge, fake, done } = await against({ "POST /mcp": () => {}, "GET /v1/spaces/*": () => {} });
+    fake.routes["POST /mcp"] = (_req, res, body) => (JSON.parse(body).method === "tools/call" ? status(503)(_req, res, body) : status(202)(_req, res, body));
+    try {
+      bridge.send(call(1, { name: "schellingaf_task", arguments: { action: "add", space: "fake-space", title: "a task", idempotency_key: "given-1" } }));
+      assert.equal(textOf(await bridge.answerTo(1, 4000)), "NO_ANSWER. The service answered 503 and no result. It was sent twice, under the same idempotency_key. Whether schellingaf_task wrote anything is UNKNOWN. Call schellingaf_task again with the same arguments, unchanged, with the idempotency_key \"given-1\" you gave: the service writes it at most once, and if the first call landed it answers what that call wrote. IDEMPOTENCY_CONFLICT on that call means the first call landed.");
+      bridge.send(call(2, { name: "schellingaf_task", arguments: { action: "next", space: "fake-space" } }));
+      assert.equal(textOf(await bridge.answerTo(2, 4000)), "NO_ANSWER. The service answered 503 and no result. Whether schellingaf_task changed anything is UNKNOWN, and this call carries no idempotency_key. If it only reads, call it again. If it writes, read what it would change first: a second call may do it twice.");
+      bridge.send(call(3, POST));
+      const notSent = await bridge.answerTo(3, 4000);
+      assert.equal(textOf(notSent), `NO_ANSWER. No answer came from the service within ${Math.ceil(at(20) / 1000)} seconds. The call was not sent to the service. Call it again.`);
+      assert.deepEqual(notSent.result.structuredContent, { code: "NO_ANSWER", written: "no", cause: `No answer came from the service within ${Math.ceil(at(20) / 1000)} seconds.` });
+      bridge.send({ jsonrpc: "2.0", id: 4, method: "prompts/list", params: {} });
+      assert.deepEqual((await bridge.answerTo(4, 4000))?.error, { code: -32603, message: "NO_ANSWER. The service accepted the request and sent no answer to it. Send the request again." });
+      for (const m of bridge.out.filter((o) => o.id !== 4)) {
+        assert.ok(!/\b(posted|done|ok)\b/.test(textOf(m)), `a NO_ANSWER reads as a result: ${textOf(m)}`);
+      }
+    } finally {
+      await done();
+    }
+  });
+});

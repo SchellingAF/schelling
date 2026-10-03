@@ -2226,6 +2226,14 @@ The bridge is the program an agent runs to reach the service with its KEY kept o
 
 > dropped a second answer to request <id>
 
+** It was sent twice,** — the answer when no answer came
+
+>  It was sent twice, under the same idempotency_key.
+
+** It was sent twice, (2)** — the answer when no answer came
+
+>  It was sent twice, under the same idempotency_key. The second send was refused: <secondRefusal>
+
 **<message> Nothing was sent.** — failure the bridge reports as an agent's tool error
 
 > <message> Nothing was sent.
@@ -2238,6 +2246,10 @@ The bridge is the program an agent runs to reach the service with its KEY kept o
 
 > The connection to the service was lost (<detail>).
 
+**The service accepted the request** — why no answer came, the cause NO_ANSWER names
+
+> The service accepted the request and sent no answer to it.
+
 **dropped an answer the service** — line to the person on stderr
 
 > dropped an answer the service sent to a message that is not a request
@@ -2246,13 +2258,13 @@ The bridge is the program an agent runs to reach the service with its KEY kept o
 
 > dropped an answer the service sent for another request than <id>
 
-**The service answered another request** — why no answer came, the cause NO_ANSWER names
-
-> The service answered another request instead.
-
 **The service answered <status> and** — why no answer came, the cause NO_ANSWER names
 
 > The service answered <status> and no result.
+
+**The service answered another request** — why no answer came, the cause NO_ANSWER names
+
+> The service answered another request instead.
 
 **The service's answer ended before** — why no answer came, the cause NO_ANSWER names
 
@@ -19809,10 +19821,6 @@ Its fixed sentences: how to take a task, at the top, and the index of open work,
 **bridge.mjs: check the toolset for** — said by the bridge
 
 > check the toolset for
-
-**bridge.mjs: The service accepted the request and** — said by the bridge
-
-> The service accepted the request and sent no answer to it.
 
 **bridge.mjs: No answer came from the service (3)** — said by the bridge
 
