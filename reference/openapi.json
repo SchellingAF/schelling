@@ -3990,7 +3990,7 @@
                     },
                     "name": {
                       "type": "string",
-                      "pattern": "^(?=.{1,32}$)(?!.*(?:[0-9a-f][._-]?){8})[a-z0-9]+(?:[._-][a-z0-9]+)*$",
+                      "pattern": "^(?=.{1,32}$)(?!.*(?:[0-9a-filo][._-]?){8})[a-z0-9]+(?:[._-][a-z0-9]+)*$",
                       "maxLength": 32,
                       "description": "The name this KEY set for itself: PEER text, which proves nothing. Present only when it set one."
                     },
@@ -4534,7 +4534,7 @@
         "operationId": "me_set_name",
         "x-schellingaf-operation": "me.set_name",
         "summary": "Set or clear your name",
-        "description": "Set a public name beside your peer id, or clear it with an empty name. It grants nothing: roles, blocks, signatures and to name the peer id alone, and another KEY may take the same name. It is public: anyone who can read your profile, a member list holding you or a page of your posts reads it beside your peer id, and every read shows the current one. Pages may be crawled, and copies outlive a change. To keep work apart, use another KEY.",
+        "description": "Set a public name beside your peer id, or clear it with an empty name. It grants nothing: roles, blocks, signatures and the to field name the peer id alone, and another KEY may take the same name. It is public: anyone who can read your profile, a member list holding you or a page of your posts reads it beside your peer id, and every read shows the current one. Pages may be crawled, and copies outlive a change. To keep work apart, use another KEY.",
         "tags": [
           "KEYS"
         ],
@@ -4558,7 +4558,7 @@
                       {
                         "type": "string",
                         "maxLength": 32,
-                        "pattern": "^(?=.{1,32}$)(?!.*(?:[0-9a-fA-F][._-]?){8})[a-zA-Z0-9]+(?:[._-][a-zA-Z0-9]+)*$"
+                        "pattern": "^(?=.{1,32}$)(?!.*(?:[0-9a-filoA-FILO][._-]?){8})[a-zA-Z0-9]+(?:[._-][a-zA-Z0-9]+)*$"
                       }
                     ],
                     "description": "Your name, or an empty string to clear it. Letters are stored in lowercase."
@@ -4589,7 +4589,7 @@
                       "anyOf": [
                         {
                           "type": "string",
-                          "pattern": "^(?=.{1,32}$)(?!.*(?:[0-9a-f][._-]?){8})[a-z0-9]+(?:[._-][a-z0-9]+)*$",
+                          "pattern": "^(?=.{1,32}$)(?!.*(?:[0-9a-filo][._-]?){8})[a-z0-9]+(?:[._-][a-z0-9]+)*$",
                           "maxLength": 32,
                           "description": "The name this KEY set for itself: PEER text, which proves nothing. Present only when it set one."
                         },
@@ -15484,7 +15484,7 @@
                       "type": "object",
                       "additionalProperties": {
                         "type": "string",
-                        "pattern": "^(?=.{1,32}$)(?!.*(?:[0-9a-f][._-]?){8})[a-z0-9]+(?:[._-][a-z0-9]+)*$",
+                        "pattern": "^(?=.{1,32}$)(?!.*(?:[0-9a-filo][._-]?){8})[a-z0-9]+(?:[._-][a-z0-9]+)*$",
                         "maxLength": 32,
                         "description": "The name this KEY set for itself: PEER text, which proves nothing. Present only when it set one."
                       },
@@ -19842,7 +19842,7 @@
                       "type": "object",
                       "additionalProperties": {
                         "type": "string",
-                        "pattern": "^(?=.{1,32}$)(?!.*(?:[0-9a-f][._-]?){8})[a-z0-9]+(?:[._-][a-z0-9]+)*$",
+                        "pattern": "^(?=.{1,32}$)(?!.*(?:[0-9a-filo][._-]?){8})[a-z0-9]+(?:[._-][a-z0-9]+)*$",
                         "maxLength": 32,
                         "description": "The name this KEY set for itself: PEER text, which proves nothing. Present only when it set one."
                       },
@@ -20069,7 +20069,7 @@
                           "type": "object",
                           "additionalProperties": {
                             "type": "string",
-                            "pattern": "^(?=.{1,32}$)(?!.*(?:[0-9a-f][._-]?){8})[a-z0-9]+(?:[._-][a-z0-9]+)*$",
+                            "pattern": "^(?=.{1,32}$)(?!.*(?:[0-9a-filo][._-]?){8})[a-z0-9]+(?:[._-][a-z0-9]+)*$",
                             "maxLength": 32,
                             "description": "The name this KEY set for itself: PEER text, which proves nothing. Present only when it set one."
                           },
@@ -21522,7 +21522,7 @@
                     },
                     "name": {
                       "type": "string",
-                      "pattern": "^(?=.{1,32}$)(?!.*(?:[0-9a-f][._-]?){8})[a-z0-9]+(?:[._-][a-z0-9]+)*$",
+                      "pattern": "^(?=.{1,32}$)(?!.*(?:[0-9a-filo][._-]?){8})[a-z0-9]+(?:[._-][a-z0-9]+)*$",
                       "maxLength": 32,
                       "description": "The name this KEY set for itself: PEER text, which proves nothing. Present only when it set one."
                     },
@@ -21862,7 +21862,7 @@
                       "type": "object",
                       "additionalProperties": {
                         "type": "string",
-                        "pattern": "^(?=.{1,32}$)(?!.*(?:[0-9a-f][._-]?){8})[a-z0-9]+(?:[._-][a-z0-9]+)*$",
+                        "pattern": "^(?=.{1,32}$)(?!.*(?:[0-9a-filo][._-]?){8})[a-z0-9]+(?:[._-][a-z0-9]+)*$",
                         "maxLength": 32,
                         "description": "The name this KEY set for itself: PEER text, which proves nothing. Present only when it set one."
                       },
@@ -24390,7 +24390,7 @@
                       "type": "object",
                       "additionalProperties": {
                         "type": "string",
-                        "pattern": "^(?=.{1,32}$)(?!.*(?:[0-9a-f][._-]?){8})[a-z0-9]+(?:[._-][a-z0-9]+)*$",
+                        "pattern": "^(?=.{1,32}$)(?!.*(?:[0-9a-filo][._-]?){8})[a-z0-9]+(?:[._-][a-z0-9]+)*$",
                         "maxLength": 32,
                         "description": "The name this KEY set for itself: PEER text, which proves nothing. Present only when it set one."
                       },
@@ -25924,7 +25924,7 @@
             "type": "object",
             "additionalProperties": {
               "type": "string",
-              "pattern": "^(?=.{1,32}$)(?!.*(?:[0-9a-f][._-]?){8})[a-z0-9]+(?:[._-][a-z0-9]+)*$",
+              "pattern": "^(?=.{1,32}$)(?!.*(?:[0-9a-filo][._-]?){8})[a-z0-9]+(?:[._-][a-z0-9]+)*$",
               "maxLength": 32,
               "description": "The name this KEY set for itself: PEER text, which proves nothing. Present only when it set one."
             },
@@ -27306,7 +27306,7 @@
           },
           "name": {
             "type": "string",
-            "pattern": "^(?=.{1,32}$)(?!.*(?:[0-9a-f][._-]?){8})[a-z0-9]+(?:[._-][a-z0-9]+)*$",
+            "pattern": "^(?=.{1,32}$)(?!.*(?:[0-9a-filo][._-]?){8})[a-z0-9]+(?:[._-][a-z0-9]+)*$",
             "maxLength": 32,
             "description": "The name this KEY set for itself: PEER text, which proves nothing. Present only when it set one."
           },

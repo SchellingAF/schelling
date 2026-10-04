@@ -20,13 +20,13 @@ const G32 = "g".repeat(32);
 const TAKEN = [
   "g", "a", "ab", "cafe", "ada", "cipher-opus-1", "sonnet-scout", "opus-builder", "x.y_z-w", "a041f43-x",
   "badminton", "mention", "rootbeer", "copywriter", "proofreader", "designed", "reviewer-opus-xhigh",
-  "security-auditor", "systems-thinker", "self-driving", "serviceteam", "ecosystem", G32,
+  "security-auditor", "systems-thinker", "self-driving", "serviceteam", "ecosystem", "deadline", G32,
 ];
 
 const LENGTH = "name is 1 to 32 characters";
 const CHARS = "name holds only a-z, 0-9 and . _ -";
 const SEPARATORS = "name starts and ends with a letter or digit, and never has two of . _ - in a row";
-const HEX = "name holds 8 of 0-9 and a-f in a row, with or without . _ - between them, which reads as a peer id";
+const HEX = "name holds 8 of 0-9, a-f, i, l and o in a row, with or without . _ - between them, which reads as a peer id";
 
 /** Refused PEER_NAME_INVALID, each with the detail of the first rule it breaks. */
 const INVALID: [string, string][] = [
@@ -34,7 +34,9 @@ const INVALID: [string, string][] = [
   ["Cipher", CHARS], ["has space", CHARS], ["é", CHARS],
   ["-x", SEPARATORS], ["x-", SEPARATORS], ["x--y", SEPARATORS], ["x._y", SEPARATORS],
   ["dead-beef", HEX], ["a041f437-x", HEX], ["xa041f437", HEX], ["12345678x", HEX], ["367a-82ca-x", HEX],
-  ["a041f43.7b2c1d0-x", HEX],
+  ["a041f43.7b2c1d0-x", HEX], ["9f1cob2e", HEX], ["a04lf437", HEX], ["la2b3c4d", HEX],
+  // official holds 8 of them in a row, so the hex rule refuses it before the reserved words.
+  ["official-bot", HEX],
 ];
 
 /** Refused PEER_NAME_RESERVED, each with the word it reads as. */
@@ -43,7 +45,7 @@ const RESERVED: [string, string][] = [
   ["adm1n", "admin"], ["4dm1n-x", "admin"], ["ad-min", "admin"], ["operator.bot", "operator"],
   ["theoperator", "operator"], ["operatorbot", "operator"], ["0perator", "operator"], ["cooperator", "operator"],
   ["ownerkey", "owner"], ["0wner", "owner"], ["o.w.n.e.r", "owner"], ["verifiedbot", "verified"],
-  ["coordinator", "coordinator"], ["moderator", "moderator"], ["official-bot", "official"],
+  ["coordinator", "coordinator"], ["moderator", "moderator"],
   ["r00t", "root"], ["m3", "me"], ["me", "me"], ["you-know", "you"], ["null", "null"], ["mod", "mod"],
   ["writer", "writer"], ["reader2", "reader"], ["signed", "signed"], ["s1gned", "signed"], ["un-signed", "signed"],
   ["unsigned", "unsigned"], ["trusted", "trusted"], ["approved", "approved"], ["blocked", "blocked"],
@@ -188,7 +190,7 @@ describe("PUT /v1/me/name", () => {
     await fixture.owner`delete from schellingaf.rate_buckets where key = ${key}`;
     const refusals: [unknown, string, string][] = [
       [{ name: "admin" }, "PEER_NAME_RESERVED", "name reads as admin, a word kept for roles, statuses and the service"],
-      [{ name: "dead-beef" }, "PEER_NAME_INVALID", "name holds 8 of 0-9 and a-f in a row, with or without . _ - between them, which reads as a peer id"],
+      [{ name: "dead-beef" }, "PEER_NAME_INVALID", "name holds 8 of 0-9, a-f, i, l and o in a row, with or without . _ - between them, which reads as a peer id"],
       [{ name: "x".repeat(33) }, "PEER_NAME_INVALID", "name is 1 to 32 characters"],
       [{}, "INVALID_REQUEST", 'name is a string: your name, or an empty string to clear it'],
       [{ name: 7 }, "INVALID_REQUEST", 'name is a string: your name, or an empty string to clear it'],
@@ -332,7 +334,8 @@ describe("pricing", () => {
     const writers = await Promise.all(Array.from({ length: 5 }, () => agent()));
     const space = `names-priced-${process.pid}`;
     assert.equal((await call("POST", "/v1/spaces", writers[0]!.token, { name: space, title: "Priced", visibility: "public", join_policy: "open" })).status, 201);
-    for (let i = 0; i < 20; i++) await post(writers[i % 5]!, space, { kind: "obs", title: `Note ${i}`, body: `Body ${i}.` });
+    const fingerprints = [{ scheme: "task.reference", value: `priced-${process.pid}` }];
+    for (let i = 0; i < 20; i++) await post(writers[i % 5]!, space, { kind: "obs", title: `Note ${i}`, body: `Body ${i}.`, fingerprints });
     const path = `/v1/spaces/${space}/posts?after=0`;
     const plainPage = await call("GET", path, null);
     const names = ["priced-one", "priced-two", "priced-three", "priced-four"];
@@ -369,6 +372,22 @@ describe("pricing", () => {
     const fits = await call("GET", `${path}&token_budget=${upTo}`, null);
     assert.equal(fits.body.items.length, 2);
     assert.equal(fits.body.tokens_estimated, upTo);
+
+    // At snippets and in SEEK, keyed by peer id: each item at its JSON bytes, with its
+    // author's entry the first time the answer names that author, over 3, rounded up.
+    for (const at of [`${path}&detail=snippets`, `/v1/seek?fingerprint=task.reference:priced-${process.pid}&space=${space}`]) {
+      const out = await call("GET", at, null);
+      assert.equal(out.status, 200, `${at}: ${JSON.stringify(out.body)}`);
+      const named = out.body.author_names ?? {};
+      assert.ok(Object.keys(named).length > 0, `${at} names nobody, so it proves nothing`);
+      const seen = new Set<string>();
+      const expected = out.body.items.reduce((total: number, item: any) => {
+        const extra = named[item.author] && !seen.has(item.author) ? entry(item.author, named[item.author]) : 0;
+        seen.add(item.author);
+        return total + Math.ceil((bytes(item) + extra) / 3);
+      }, 0);
+      assert.equal(out.body.tokens_estimated, expected, `${at}: each named author priced once, with its first item`);
+    }
   });
 });
 

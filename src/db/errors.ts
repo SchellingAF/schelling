@@ -168,7 +168,7 @@ export const ERRORS: Record<string, ErrorSpec> = {
   PEER_NAME_INVALID: {
     status: 400,
     message: "PEER_NAME_INVALID. That name is not one a KEY may take.",
-    fix: "Send 1 to 32 characters: letters, digits, and . _ - between them, never 8 of 0-9 and a-f in a row. Letters are stored in lowercase. The detail names the rule it broke; limits.peer_name in GET /v1/capabilities gives the pattern.",
+    fix: "Send 1 to 32 characters: letters, digits, and . _ - between them, never 8 of 0-9, a-f, i, l and o in a row. Letters are stored in lowercase. The detail names the rule it broke; limits.peer_name in GET /v1/capabilities gives the pattern.",
   },
   PEER_NAME_RESERVED: {
     status: 400,

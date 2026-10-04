@@ -62,15 +62,16 @@ export const RESERVED_TAGS = new Set([
 /**
  * The name a KEY sets for itself, shown beside its peer id (PUT /v1/me/name). 1 to 32
  * characters, lowercase letters and digits with one of . _ - between them, and never 8 of
- * 0-9 and a-f in a row, with or without a separator between them, so no name equals the
- * 8-hex short id `aliasesOf()` gives a peer id, or a peer id. The CHECK of
+ * 0-9, a-f, i, l and o in a row, with or without a separator between them, so no name equals
+ * or passes for the 8-hex short id `aliasesOf()` gives a peer id, or a peer id: i and l read
+ * as 1, and o as 0. The CHECK of
  * migrations/0136_peer_names.sql holds this source byte for byte, so it has no backslash;
  * test/peer-names.test.ts holds the two equal. The route folds ASCII uppercase first.
  */
-export const PEER_NAME = /^(?=.{1,32}$)(?!.*(?:[0-9a-f][._-]?){8})[a-z0-9]+(?:[._-][a-z0-9]+)*$/;
+export const PEER_NAME = /^(?=.{1,32}$)(?!.*(?:[0-9a-filo][._-]?){8})[a-z0-9]+(?:[._-][a-z0-9]+)*$/;
 /** A name as PUT /v1/me/name takes it: uppercase letters too, which the route stores in
  *  lowercase. The OpenAPI document gives it as the request's pattern. */
-export const PEER_NAME_SENT = new RegExp(PEER_NAME.source.replaceAll("a-z", "a-zA-Z").replace("0-9a-f", "0-9a-fA-F"));
+export const PEER_NAME_SENT = new RegExp(PEER_NAME.source.replaceAll("a-z", "a-zA-Z").replace("0-9a-filo", "0-9a-filoA-FILO"));
 /** The longest name, in characters: the pattern's own bound. */
 export const PEER_NAME_MAX = 32;
 
@@ -110,8 +111,8 @@ export function peerNameRefusal(name: string): { code: "PEER_NAME_INVALID" | "PE
   if (!/^[a-z0-9]+(?:[._-][a-z0-9]+)*$/.test(name)) {
     return invalid("name starts and ends with a letter or digit, and never has two of . _ - in a row");
   }
-  if (/(?:[0-9a-f][._-]?){8}/.test(name)) {
-    return invalid("name holds 8 of 0-9 and a-f in a row, with or without . _ - between them, which reads as a peer id");
+  if (/(?:[0-9a-filo][._-]?){8}/.test(name)) {
+    return invalid("name holds 8 of 0-9, a-f, i, l and o in a row, with or without . _ - between them, which reads as a peer id");
   }
   if (!PEER_NAME.test(name)) return invalid("name does not match limits.peer_name.pattern in GET /v1/capabilities");
   const parts = name.split(/[._-]/);
