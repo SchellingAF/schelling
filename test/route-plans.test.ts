@@ -963,6 +963,13 @@ describe("a contest's notices find whom to tell through an index", () => {
         from schellingaf.spaces s, generate_series(1, 5000) g
        where s.name = 'contesting-space'
        order by g`;
+    // And a finding among the newest 500 citers, so both calls deliver a contested row.
+    await fixture.owner`
+      insert into schellingaf.posts (space_id, seq, admitted_revision, author_id, kind, title, body, data, content_hash)
+      select s.space_id, 550000, 1, decode(${other.peerId}, 'hex'), 'finding', 'late finding', 'evidence',
+             jsonb_build_object('claim', 'Row 4 reads TA, late', 'status', 'proposed', 'confidence', 'medium',
+                                'sources', jsonb_build_array(${result.body.post_id}::text)), sha256('contesting late'::bytea)
+        from schellingaf.spaces s where s.name = 'contesting-space'`;
     const [warned] = await fixture.owner<{ post_id: string }[]>`
       insert into schellingaf.posts (space_id, seq, admitted_revision, author_id, kind, title, body, data, content_hash)
       select s.space_id, 600000, 1, decode(${warner.peerId}, 'hex'), 'warn', 'Row 4 reads TO', 'doubt',
@@ -1001,8 +1008,11 @@ describe("a contest's notices find whom to tell through an index", () => {
       .filter((m) => m.includes("{"))
       .map((m) => JSON.parse(m.slice(m.indexOf("{"))) as { "Query Text": string; Plan: PlanNode });
   }
-  /** The statements of the notice's own SQL, and what each scans. */
-  function check(plans: { "Query Text": string; Plan: PlanNode }[], label: string) {
+  /** The statements of the notice's own SQL, and what each scans: a contested row's insert too. */
+  function check(plans: { "Query Text": string; Plan: PlanNode }[], label: string, delivered: unknown) {
+    const reasons = (delivered as { reason: string }[]).map((d) => d.reason);
+    assert.ok(reasons.includes("contested"), `${label}: no contested row was delivered: ${JSON.stringify(delivered)}`);
+    assert.ok(plans.some((p) => p["Query Text"].includes("INSERT INTO mailbox_deliveries AS dl")), `${label}: deliver_notices() inserted nothing`);
     const ours = plans.filter((p) => /contested_scan|deliver_notices\(|post_objections|mailbox_deliveries/.test(p["Query Text"]));
     const walk = ours.find((p) => p["Query Text"].includes("contested_scan"));
     assert.ok(walk, `${label}: contested_findings() was not run`);
@@ -1018,16 +1028,24 @@ describe("a contest's notices find whom to tell through an index", () => {
   }
 
   test("a reject through task_check() walks the citers of its result backward and probes findings by key", async () => {
-    const plans = await plansOf((tx) => tx`
-      select schellingaf.task_check('contesting-space', decode(${checker.peerId}, 'hex'), 1, 'reject', null, 'Row 4 reads TO.', true)`);
+    let delivered: unknown;
+    const plans = await plansOf(async (tx) => {
+      const [row] = await tx<{ out: { delivered: unknown } }[]>`
+        select schellingaf.task_check('contesting-space', decode(${checker.peerId}, 'hex'), 1, 'reject', null, 'Row 4 reads TO.', true) as out`;
+      delivered = row!.out.delivered;
+    });
     assert.ok(plans.some((p) => /deliver_notices\(s\.space_id, p_actor/.test(p["Query Text"])), "the reject block was not run");
-    check(plans, "reject");
+    check(plans, "reject", delivered);
   });
 
   test("a warn through contest_notices() reads its objections and walks the citers backward", async () => {
-    const plans = await plansOf((tx) => tx`select schellingaf.contest_notices(${warnId}::uuid, decode(${warner.peerId}, 'hex'))`);
+    let delivered: unknown;
+    const plans = await plansOf(async (tx) => {
+      const [row] = await tx<{ out: unknown }[]>`select schellingaf.contest_notices(${warnId}::uuid, decode(${warner.peerId}, 'hex')) as out`;
+      delivered = row!.out;
+    });
     assert.ok(plans.some((p) => p["Query Text"].includes("post_objections o")), "contest_notices() read no objections");
-    check(plans, "warn");
+    check(plans, "warn", delivered);
   });
 });
 

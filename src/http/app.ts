@@ -6,7 +6,7 @@ import { readFileSync, statfsSync } from "node:fs";
 import { bodyLimit } from "hono/body-limit";
 import { API_CHANGES, API_VERSION, envNumber, type Config } from "../config.ts";
 import type { Db } from "../db/sql.ts";
-import { ApiError, ERRORS, refusalBody, toApiError } from "../db/errors.ts";
+import { ApiError, deadlocked, ERRORS, refusalBody, toApiError } from "../db/errors.ts";
 import { OPERATIONS, type Operation } from "../surface/operations.ts";
 import { refusalsOf } from "../surface/refusals.ts";
 import { buildOpenApi, openApiSlice, queryNames } from "../surface/openapi.ts";
@@ -898,7 +898,7 @@ export function createApp(config: Config, db: Db): Hono<Env> {
       );
     }
     // A deadlock is BUSY to the caller, and written down too: the request id beside 40P01.
-    if ((error as { code?: unknown } | null)?.code === "40P01") logDeadlock(c, "answered BUSY");
+    if (deadlocked(error)) logDeadlock(c, "answered BUSY");
     if (api.retryAfter !== undefined) c.header("Retry-After", String(api.retryAfter));
     // A shared bucket's balance is a measure of how busy somebody else is. An
     // earlier spend from the caller's own bucket may have written these already,

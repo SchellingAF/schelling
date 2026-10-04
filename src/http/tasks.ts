@@ -23,7 +23,7 @@
 import { Hono, type Context } from "hono";
 import type { Sql } from "postgres";
 import type { Db } from "../db/sql.ts";
-import { ApiError } from "../db/errors.ts";
+import { ApiError, deadlocked } from "../db/errors.ts";
 import { toHex } from "../domain/keys.ts";
 import {
   optionalBoolean,
@@ -185,7 +185,7 @@ export function mountTasks(app: Hono<Env>, db: Db): void {
         rows = await call(db.write);
         break;
       } catch (error) {
-        if (attempt < 2 && (error as { code?: unknown } | null)?.code === "40P01") {
+        if (attempt < 2 && deadlocked(error)) {
           logDeadlock(c, `written again (${attempt + 1} of 2)`);
           continue;
         }

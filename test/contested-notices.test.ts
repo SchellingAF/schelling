@@ -233,6 +233,92 @@ describe("a check's reject", () => {
       ["deadlock_detected: written again (1 of 2)"]);
     assert.deepEqual(await toldOf(other), [f.post_id]);
   });
+
+  test("15: a finding written while a reject waits for the SPACE is told, on the tasks route and in a POST", async () => {
+    // A third session holds the SPACE row. A finding on the result queues first, then the
+    // reject: the reject's transaction starts before the finding is written under the lock.
+    const { owner, doer, checker, other, name } = await crew();
+    const su = postgres({ ...SUPERUSER, database: fixture.name, max: 1, onnotice: () => {} });
+    const waiting = async (text: string, count: number) => {
+      for (let i = 0; i < 500; i++) {
+        const [row] = await su<{ n: number }[]>`
+          select count(*)::int as n from pg_stat_activity
+           where datname = current_database() and wait_event_type = 'Lock' and query like ${`%${text}%`}`;
+        if (row!.n >= count) return;
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      throw new Error(`fewer than ${count} waited in ${text}`);
+    };
+    const race = async (rejecting: (number: number) => Promise<Reply>) => {
+      const number = await task(owner, name);
+      const r = await posted(doer, name, { kind: "result", body: `Row ${number} reads TA.` });
+      await done(doer, name, number, r.post_id);
+      const holder = postgres({ ...SUPERUSER, database: fixture.name, max: 1, onnotice: () => {} });
+      const release = Promise.withResolvers<void>();
+      const held = Promise.withResolvers<void>();
+      const holding = holder.begin(async (tx) => {
+        await tx`select 1 from schellingaf.spaces where name = ${name} for no key update`;
+        held.resolve();
+        await release.promise;
+      });
+      try {
+        await held.promise;
+        const f = call("POST", `/v1/spaces/${name}/posts`, other.token, finding({ sources: [r.seq] }));
+        await waiting("append_post", 1);
+        const k = rejecting(number);
+        // The tasks route waits in task_check(); a POST waits in its own append_post().
+        await waiting("schellingaf.", 2);
+        release.resolve();
+        await holding;
+        const [fo, ko] = await Promise.all([f, k]);
+        assert.equal(fo.status, 201, JSON.stringify(fo.body));
+        assert.ok(ko.status === 200 || ko.status === 201, JSON.stringify(ko.body));
+        return fo.body.post_id as string;
+      } finally {
+        release.resolve();
+        await holding.catch(() => {});
+        await holder.end({ timeout: 5 });
+      }
+    };
+    try {
+      const one = await race((number) => call("POST", `/v1/spaces/${name}/tasks/${number}/reject`, checker.token, { reason: REASON }));
+      assert.deepEqual(await toldOf(other), [one]);
+      const two = await race((number) => call("POST", `/v1/spaces/${name}/posts`, checker.token,
+        { kind: "obs", title: `Check of task ${number}`, body: "Row 4 reads TO.", task: { number, check: "reject", reason: REASON } }));
+      assert.deepEqual(await toldOf(other), [one, two]);
+    } finally {
+      await su.end({ timeout: 5 });
+    }
+  });
+
+  test("16: a fail citing the result with a task reject is free: each finding's author told once, uncharged", async () => {
+    const { owner, doer, checker, other, name } = await crew();
+    const number = await task(owner, name);
+    const r = await posted(doer, name, { kind: "result", body: "Row 4 reads TA." });
+    await done(doer, name, number, r.post_id);
+    const f = await posted(other, name, finding({ sources: [r.seq] }));
+    const g = await posted(owner, name, finding({ sources: [r.seq] }));
+    // At capacity, so a charge shows and no refill can hide one; but the pair's allowance
+    // to other is spent, so the fail cannot cite f to it, and the reject tells it instead.
+    const buckets = new Map([
+      [SHARED.delivery(checker.peerId, other.peerId).key, 0],
+      [SHARED.inbound(other.peerId).key, SHARED.inbound(other.peerId).capacity],
+      [SHARED.delivery(checker.peerId, owner.peerId).key, SHARED.delivery(checker.peerId, owner.peerId).capacity],
+      [SHARED.inbound(owner.peerId).key, SHARED.inbound(owner.peerId).capacity],
+    ]);
+    for (const [key, tokens] of buckets) await fixture.setBucket(key, tokens);
+    const out = await call("POST", `/v1/spaces/${name}/posts`, checker.token,
+      { ...warn([r.seq, f.seq], "fail"), task: { number, check: "reject", reason: REASON } });
+    assert.equal(out.status, 201, JSON.stringify(out.body));
+    assert.equal(out.body.task.state, "open", JSON.stringify(out.body));
+    assert.equal(out.body.not_notified, undefined, "told contested is told");
+    for (const [key, tokens] of buckets) {
+      const [row] = await fixture.owner<{ tokens: number }[]>`select tokens from schellingaf.rate_buckets where key = ${key}`;
+      assert.equal(Number(row!.tokens), tokens, `${key} was charged`);
+    }
+    assert.deepEqual(await toldOf(other), [f.post_id]);
+    assert.deepEqual(await toldOf(owner), [g.post_id]);
+  });
 });
 
 describe("a member's warn or fail", () => {
@@ -398,6 +484,49 @@ describe("a member's warn or fail", () => {
     const items = await mailbox(other);
     assert.equal(items.some((i) => i.reason === "cited" && i.post.post_id === w.post_id), false);
     assert.equal(items.filter((i) => i.reason === "contested").at(-1).post.post_id, f.post_id);
+  });
+
+  test("17: a warn telling one author of several findings charges each bucket once, with the total", async () => {
+    const { owner, doer, checker, other, name } = await crew();
+    const r = await posted(doer, name, { kind: "result", body: "Row 4 reads TA." });
+    for (let i = 0; i < 3; i++) await posted(other, name, finding({ sources: [r.seq], claim: `Row 4, reading ${i}` }));
+    for (let i = 0; i < 2; i++) await posted(owner, name, finding({ sources: [r.seq], claim: `Row 4, view ${i}` }));
+    // The warn's own counts: three contested to other, two to owner, and one cited to doer.
+    const totals = new Map<string, number>();
+    for (const [peer, count] of [[other.peerId, 3], [owner.peerId, 2], [doer.peerId, 1]] as const) {
+      for (const bucket of [SHARED.delivery(checker.peerId, peer), SHARED.inbound(peer)]) totals.set(bucket.key, count);
+    }
+    const setAt = new Map<string, string>();
+    for (const key of totals.keys()) {
+      await fixture.setBucket(key, 20);
+      const [row] = await fixture.owner<{ at: string }[]>`select updated_at::text as at from schellingaf.rate_buckets where key = ${key}`;
+      setAt.set(key, row!.at);
+    }
+    const original = db.write;
+    const charged: string[] = [];
+    db.write = new Proxy(original, {
+      apply(target, self, args) {
+        if (Array.isArray(args[0]) && args[0].join("?").includes("schellingaf.charge_tokens")) charged.push(...(args[1] as string[]));
+        return Reflect.apply(target, self, args);
+      },
+    });
+    try {
+      await posted(checker, name, warn([r.seq]));
+    } finally {
+      db.write = original;
+    }
+    assert.deepEqual([...charged].sort(), [...totals.keys()].sort(), "a bucket was charged more than once, or not at all");
+    // Each bucket stands where one charge an item would have left it: to a hundredth for the
+    // pair's, and within half a charge for the inbound one, which refills 278 a second.
+    for (const [key, total] of totals) {
+      const { capacity, refillPerSec } = key.startsWith("dm:") ? SHARED.delivery(checker.peerId, other.peerId) : SHARED.inbound(other.peerId);
+      const [row] = await fixture.owner<{ tokens: number; since: number }[]>`
+        select tokens, extract(epoch from (updated_at - ${setAt.get(key)!}::timestamptz))::float8 as since
+          from schellingaf.rate_buckets where key = ${key}`;
+      const refilled = Math.min(capacity, 20 + refillPerSec * Number(row!.since));
+      const within = key.startsWith("dm:") ? 0.01 : 0.5;
+      assert.ok(Math.abs(Number(row!.tokens) - (refilled - total)) < within, `${key}: ${row!.tokens}, expected ${refilled - total}`);
+    }
   });
 });
 

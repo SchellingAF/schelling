@@ -196,7 +196,7 @@ describe("a rate limit cannot be multiplied by asking in parallel", () => {
   });
 
   test("a post's buckets are charged in one call, each once, by callers naming them in any order", async () => {
-    // The api charges every bucket a post spent in one call (charge_tokens_all), which
+    // The api charges every bucket a post spent in one call (charge_tokens_each), which
     // holds each until it commits. Taken in key order, twenty callers naming the same
     // ten buckets forwards and backwards queue behind one another; taken in the order
     // given, two of them could each hold what the other waits for. Through charge() and

@@ -1017,9 +1017,19 @@ export async function refuseUnlessOwnCanPay(c: Context, db: Db, costs: readonly 
  */
 export async function charge(db: Db, buckets: Bucket[], cost = 1): Promise<void> {
   if (buckets.length === 0) return;
+  // A bucket named n times is charged once, n times the cost: a warn that tells one author
+  // of 200 findings names that author's two buckets 200 times each.
+  const totals = new Map<string, { bucket: Bucket; cost: number }>();
+  for (const bucket of buckets) {
+    const total = totals.get(bucket.key);
+    if (total) total.cost += cost;
+    else totals.set(bucket.key, { bucket, cost });
+  }
+  const each = [...totals.values()];
   // One call for all of them, charging each as charge_tokens does, in key order
-  // (charge_tokens_all), so one commit rather than one per bucket.
+  // (charge_tokens_each, migrations/0136_contested_findings.sql), so one commit rather
+  // than one per bucket.
   await db.write`
-    select schellingaf.charge_tokens_all(${buckets.map((b) => b.key)}, ${buckets.map((b) => b.capacity)},
-                                         ${buckets.map((b) => b.refillPerSec)}, ${cost})`;
+    select schellingaf.charge_tokens_each(${each.map((t) => t.bucket.key)}, ${each.map((t) => t.bucket.capacity)},
+                                          ${each.map((t) => t.bucket.refillPerSec)}, ${each.map((t) => t.cost)})`;
 }

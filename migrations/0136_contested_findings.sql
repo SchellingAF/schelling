@@ -13,8 +13,8 @@
 --
 -- S1, the mark: cap() names, post_objections, project_post(), the lock and the backfill,
 -- and the fill of task 7 of cipher-trial-1. S2, the notice: deliver_notices(), which
--- deliver_task_notices() now wraps, contested_findings(), task_check()'s reject block and
--- contest_notices().
+-- deliver_task_notices() now wraps, contested_findings(), task_check()'s reject block,
+-- contest_notices() and charge_tokens_each().
 
 SET LOCAL search_path = pg_catalog, schellingaf, pg_temp;
 
@@ -395,7 +395,9 @@ BEGIN
              WHERE c.task_id = t.task_id AND c.cycle = v_cycle AND c.verdict = 'confirm') q;
     -- 0136 BEGIN contested: the same delivery tells the author of each standing finding
     -- that is this result or rests on it, once a finding. The result is read from the check
-    -- just made, which kept it before the update above cleared it.
+    -- just made, which kept it before the update above cleared it. clock_timestamp(), taken
+    -- under the SPACE lock, never now(): a finding written while this call waited for that
+    -- lock is posted after the transaction began, and would be marked and never told.
     SELECT deliver_notices(s.space_id, p_actor, t.task_id, v_cycle,
              v_peers || coalesce(array_agg(c.peer ORDER BY c.peer, c.post) FILTER (WHERE c.peer IS NOT NULL), '{}'),
              array_fill('task_rejected'::text, ARRAY[cardinality(v_peers)])
@@ -404,7 +406,7 @@ BEGIN
                || coalesce(array_agg(c.post ORDER BY c.peer, c.post) FILTER (WHERE c.peer IS NOT NULL), '{}'))
       INTO v_delivered
       FROM task_checks k
-      LEFT JOIN LATERAL contested_findings(s.space_id, ARRAY[k.result_post_id], p_actor, now()) c ON true
+      LEFT JOIN LATERAL contested_findings(s.space_id, ARRAY[k.result_post_id], p_actor, clock_timestamp()) c ON true
      WHERE k.task_id = t.task_id AND k.cycle = v_cycle AND k.peer_id = p_actor;
     -- 0136 END contested
   END IF;
@@ -421,7 +423,10 @@ END $$;
 -- standing finding it marks, cited or resting on a post it cites, is told once a finding as
 -- contested. Only posts it objects to count, so never a post of its own author: its own
 -- sources, at most 32, each probed in post_objections by key. Answers what it delivered,
--- for the route. Only for p_actor's own post.
+-- for the route. Only for p_actor's own post. A call tells at most the newest
+-- cap('contested_notices') findings not yet told, so a second call is not a no-op: it tells the
+-- next ones. The posts route calls it once a warn: a replay skips the call, and a retry
+-- after a deadlock rolled the first call back with the POST, so each warn is told once.
 CREATE FUNCTION schellingaf.contest_notices(p_post uuid, p_actor bytea) RETURNS jsonb
   LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, schellingaf, pg_temp
 AS $$
@@ -447,3 +452,31 @@ BEGIN
                          array_fill('contested'::text, ARRAY[cardinality(v_peers)]), v_posts);
 END $$;
 GRANT EXECUTE ON FUNCTION schellingaf.contest_notices(uuid, bytea) TO schellingaf_api;
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- S2: each bucket charged once, with its total
+-- ─────────────────────────────────────────────────────────────────────────────
+
+-- charge_tokens_all() with a cost a key, which charge() in src/http/ratelimit.ts calls
+-- with each key once and its total: a warn telling one author of 200 findings updates each
+-- of that author's buckets once, not 200 times. Each charged as charge_tokens() charges
+-- it, in key order, so two calls that share buckets never wait on each other. A key named
+-- twice is charged once, with the sum of its costs. charge_tokens_all() stays for an api
+-- still running the code before this file.
+CREATE FUNCTION schellingaf.charge_tokens_each(
+  p_keys text[], p_capacities double precision[], p_refills_per_sec double precision[],
+  p_costs double precision[])
+  RETURNS void
+  LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, schellingaf, pg_temp
+AS $$
+DECLARE b record;
+BEGIN
+  FOR b IN SELECT u.k, min(u.c) AS c, min(u.r) AS r, sum(u.n) AS n
+             FROM unnest(p_keys, p_capacities, p_refills_per_sec, p_costs) AS u(k, c, r, n)
+            GROUP BY u.k ORDER BY u.k LOOP
+    PERFORM charge_tokens(b.k, b.c, b.r, b.n);
+  END LOOP;
+END $$;
+GRANT EXECUTE ON FUNCTION
+  schellingaf.charge_tokens_each(text[], double precision[], double precision[], double precision[])
+TO schellingaf_api;

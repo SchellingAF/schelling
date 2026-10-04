@@ -9,7 +9,7 @@ import { Hono, type Context } from "hono";
 import type { PendingQuery, Sql } from "postgres";
 import type { Config } from "../config.ts";
 import type { Db } from "../db/sql.ts";
-import { ApiError, renderableDetail, toApiError } from "../db/errors.ts";
+import { ApiError, deadlocked, renderableDetail, toApiError } from "../db/errors.ts";
 import { toHex } from "../domain/keys.ts";
 import { checkAssertion, importPasskeyKey, isPasskeyAlgorithm } from "../domain/passkeys.ts";
 import { objectIdOf, passkeyChallengeOf, readPostObject, type PostFields } from "../domain/objects.ts";
@@ -736,10 +736,6 @@ type Item = {
 /** What may sit beside posts, at the top of a call that sends several POSTS. */
 const BATCH_FIELDS = ["posts", "idempotency_key", "dry_run"];
 
-/** Whether PostgreSQL ended this write as a deadlock's victim: rolled back whole, and safe
- * to write again. */
-const deadlocked = (error: unknown) => (error as { code?: unknown } | null)?.code === "40P01";
-
 /**
  * task_done()'s refusal of an upkeep task's post, as a POST carrying `task` meets it. That
  * POST is the caller's own, in this SPACE, written now, so only its kind can be wrong; the
@@ -1169,7 +1165,8 @@ export function mountPosts(app: Hono<Env>, config: Config, db: Db, service: Serv
     // after a reject reopened the task is answered, not raised, with its notice: thrown
     // here, so the notice rolls back with the POST. A replayed POST changes no task again.
     // A member's warn or fail that cites posts may contest findings, whose authors are told
-    // in the same transaction (contest_notices(), migrations/0136_contested_findings.sql).
+    // in the same transaction, after its task part (contest_notices(),
+    // migrations/0136_contested_findings.sql).
     const objects = (post: PostInput) => (post.kind === "warn" || post.kind === "fail") && sourcesOf(post).length > 0;
     // contested is what contest_notices() delivered, kept apart from the receipt's own.
     type Wrote = { receipt: Record<string, unknown>; attached: unknown[]; task: Record<string, unknown> | null; delivered: unknown; contested: unknown };
@@ -1184,13 +1181,15 @@ export function mountPosts(app: Hono<Env>, config: Config, db: Db, service: Serv
         const [list] = await attachFiles(sql, receipt.post_id, item.attachments, replayed);
         attached = list!.list;
       }
-      let contested: unknown = null;
-      if (!replayed && objects(item.post)) {
+      // After the task part, never before: a reject tells the findings it contests, free
+      // (task_check()), and this call then finds them told and charges nobody for them.
+      const contest = async () => {
+        if (replayed || !objects(item.post)) return null;
         const [told] = await sql<{ delivered: unknown }[]>`
           select schellingaf.contest_notices(${String(receipt.post_id)}::uuid, ${bearer.peerId}) as delivered`;
-        contested = told!.delivered;
-      }
-      if (item.task === null || replayed) return { receipt, attached, task: null, delivered: null, contested };
+        return told!.delivered;
+      };
+      if (item.task === null || replayed) return { receipt, attached, task: null, delivered: null, contested: await contest() };
       const { number, revision, check, reason } = item.task;
       // A finish without revision is refused TASK_CHANGED once the task changed after its
       // holder took it, as done is (migrations/0130_task_changes.sql).
@@ -1203,7 +1202,7 @@ export function mountPosts(app: Hono<Env>, config: Config, db: Db, service: Serv
                                           ${String(receipt.post_id)}::uuid, ${reason}, true) as out`;
       const { refused, detail, delivered, task } = out!.out;
       if (typeof refused === "string") throw new ApiError(refused, typeof detail === "string" ? { detail } : {});
-      return { receipt, attached, task: short(shown(task as Record<string, unknown>)), delivered, contested };
+      return { receipt, attached, task: short(shown(task as Record<string, unknown>)), delivered, contested: await contest() };
     };
 
     // A POST with neither attachments nor a task, and not a warn or fail citing posts, is
@@ -1395,8 +1394,14 @@ export function mountPosts(app: Hono<Env>, config: Config, db: Db, service: Serv
       // one who blocks the messages of a KEY with no role here. Told is told by any notice
       // of this post, the service's own included: a cited author handed a proposal to
       // decide, or the document it watches, has this post in its mailbox; one told that
-      // its finding is contested has that finding.
-      const told = new Set([...(Array.isArray(delivered) ? (delivered as { recipient: string }[]) : []), ...contests].map((d) => d.recipient));
+      // its finding is contested has that finding, whether this post's reject told it, free,
+      // or contest_notices() did.
+      const rejected = results[i]!.delivered;
+      const told = new Set([
+        ...(Array.isArray(delivered) ? (delivered as { recipient: string }[]) : []),
+        ...contests,
+        ...(Array.isArray(rejected) ? (rejected as { recipient: string; reason: string }[]).filter((d) => d.reason === "contested") : []),
+      ].map((d) => d.recipient));
       const scene = scenes[i];
       const notNotified = replayed || !scene ? [] : scene.reachable.filter((recipient) => !told.has(recipient));
       // Whether its title or a sentence ran long: see hintOf.
