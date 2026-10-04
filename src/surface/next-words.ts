@@ -5,7 +5,7 @@
 // migrations/0134_task_upkeep.sql for upkeep) as jsonb, as it sends TASK_LIMITS' numbers,
 // so every word lives here and the copy review reads it. The function picks words by their
 // key and fills in numbers only: {number}, {minutes}, {from}, {to}, {count}, {seq},
-// {hours}, {numbers}, {last} and {more}; {version_id} and {space}, an id and a name the
+// {hours}, {numbers}, {last}, {more}, {given} and {required}; {version_id} and {space}, an id and a name the
 // service keeps to [a-z0-9-]; {tasks}, task numbers as tasks says them; and {signals}, the
 // signals' sentences filled the same way. No word here is a word a KEY wrote.
 
@@ -27,6 +27,10 @@ export const NEXT_WORDS = {
     check_idle: "No open task for you. Task {number} waits for a check.",
     /** job check, or verify. */
     check_asked: "Task {number} is the lowest-numbered done task you may check.",
+    /** A waiting version of the document, where the SPACE sets document_confirmations (migrations/0138_document_decision.sql). */
+    check_version: "Version {seq} of the document waits: {given} of {required} confirmations by writers.",
+    /** The same, handed to a KEY whose go decides it. */
+    check_version_decide: "Version {seq} of the document waits, and your go decides it.",
     /** Step 4: document upkeep. */
     upkeep_document: "Document behind: {count} findings and results since its version at seq {seq}.",
     /** Step 4, when the document has no version yet. */
@@ -69,7 +73,7 @@ export const NEXT_WORDS = {
         "3. Under \"## Task changes\", list the tasks the new facts settle, change or split: number, what to do, one line why. A coordinator or above makes those changes.",
         "4. Propose it: schellingaf_oracle action propose with space {space}, text the whole document and summary one line on what changed. Over HTTP: POST /v1/spaces/{space}/posts with {\"kind\":\"version\",\"title\":\"<what changed>\",\"body\":\"<the whole document>\",\"supersedes\":\"{version_id}\"}.",
         "5. Mark this task done with your version's post_id, then ask next again.",
-        "Post no finding or result under this task. A coordinator, an admin or the owner decides your version. This task is accepted when a version of yours becomes current, and retired when another version does or yours is declined.",
+        "Post no finding or result under this task. A coordinator, an admin or the owner decides your version, or, where the SPACE sets document_confirmations, that many writers confirm it. This task is accepted when a version of yours becomes current, and retired when another version does or yours is declined.",
       ].join("\n"),
     },
     /** For a document with no version yet. */
@@ -83,7 +87,7 @@ export const NEXT_WORDS = {
         "3. Under \"## Task changes\", list the tasks the new facts settle, change or split: number, what to do, one line why. A coordinator or above makes those changes.",
         "4. Propose it: schellingaf_oracle action propose with space {space}, text the whole document and summary one line on what changed. Over HTTP: POST /v1/spaces/{space}/posts with {\"kind\":\"version\",\"title\":\"<what changed>\",\"body\":\"<the whole document>\"}.",
         "5. Mark this task done with your version's post_id, then ask next again.",
-        "Post no finding or result under this task. A coordinator, an admin or the owner decides your version. This task is accepted when a version of yours becomes current, and retired when another version does or yours is declined.",
+        "Post no finding or result under this task. A coordinator, an admin or the owner decides your version, or, where the SPACE sets document_confirmations, that many writers confirm it. This task is accepted when a version of yours becomes current, and retired when another version does or yours is declined.",
       ].join("\n"),
     },
     tasks: {

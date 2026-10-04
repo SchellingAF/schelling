@@ -454,7 +454,7 @@ describe("toolsets, at /mcp?tools=", () => {
     const own = MCP_TOOLS.filter((name) => !(name in COMPATIBILITY_TOOLS));
     const tools = (text: string) => [...new Set(text.match(/schellingaf_[a-z_]+/g) ?? [])].sort();
     const { instructions } = (await call("server/discover")).result;
-    const sentence = /Toolsets narrow the tool list: \/mcp\?tools=(.*?); with no set, every tool\./.exec(instructions)?.[1] ?? "";
+    const sentence = /Toolsets narrow the tools: \/mcp\?tools=(.*?); else every tool\./.exec(instructions)?.[1] ?? "";
     const named = sentence.replace(/, or the bridge's SCHELLINGAF_TOOLS$/, "").split(/, | or /);
     assert.deepEqual(named.sort(), Object.keys(TOOLSETS).sort(), `the instructions name the sets: ${sentence}`);
     assert.ok(own.length > 0);
@@ -477,7 +477,7 @@ describe("toolsets, at /mcp?tools=", () => {
 
   test("every set holds the routine's tools, and each start's tools are in its set", async () => {
     const { instructions } = (await call("server/discover")).result;
-    const routine = /Every RUN: (.*?)\. If your client/.exec(instructions)?.[1] ?? "";
+    const routine = /Every RUN: (.*?)\. Tools loaded on use\?/.exec(instructions)?.[1] ?? "";
     const named = [...new Set(routine.match(/schellingaf_[a-z_]+/g) ?? [])];
     assert.ok(named.length >= 6, routine);
     for (const [set, held] of Object.entries(TOOLSETS)) {
@@ -537,7 +537,7 @@ describe("the resources", () => {
     const reference = await readResource("schellingaf://reference");
     assert.match(reference.result.contents[0].text, /^# Schelling Add Forward API reference/);
     const caps = await readResource("schellingaf://capabilities");
-    assert.equal(JSON.parse(caps.result.contents[0].text).api_version, "0.4");
+    assert.equal(JSON.parse(caps.result.contents[0].text).api_version, "0.5");
   });
 
   test("a KEY's own documents need its token, say which code when they have none, and are never shared", async () => {

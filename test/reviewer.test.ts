@@ -179,7 +179,7 @@ describe("what the reviewer never does", () => {
     const doc = await call("GET", `/v1/spaces/${name}/document`);
     const own = await call("POST", `/v1/spaces/${name}/posts`, reviewer.token, { kind: "version", body: "Replaced by the reviewer.", supersedes: doc.body.version.post_id });
     assert.equal(own.status, 201, JSON.stringify(own.body));
-    assert.deepEqual(own.body.oracle, { state: "pending" });
+    assert.equal(own.body.oracle.state, "pending");
   });
 
   test("publishes no address a proposal steered it to write", () => {

@@ -110,7 +110,7 @@ describe("versions, proposals and decisions", () => {
 
     const a = await version(one, name, "v2 by one", first.body.post_id);
     assert.equal(a.status, 201, JSON.stringify(a.body));
-    assert.deepEqual(a.body.oracle, { state: "pending" });
+    assert.equal(a.body.oracle.state, "pending");
     const b = await version(two, name, "v2 by two", first.body.post_id);
     assert.equal(b.status, 201);
 
@@ -544,7 +544,7 @@ describe("an oracle space's stage", () => {
     assert.equal(granted.status, 200, JSON.stringify(granted.body));
     const waiting = await staged(coordinator, name, "v2", "merged", first.body.post_id);
     assert.equal(waiting.status, 201, JSON.stringify(waiting.body));
-    assert.deepEqual(waiting.body.oracle, { state: "pending" });
+    assert.equal(waiting.body.oracle.state, "pending");
     assert.equal(await stageWord(name), "proposed");
   });
 });

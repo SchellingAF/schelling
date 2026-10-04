@@ -93,6 +93,10 @@ export const ORACLE_LIMITS = {
   watchesPerKey: 200,
   /** KEYS that may watch one document. */
   watchersPerDocument: 10_000,
+  /** A work space's document_confirmations: how many writers' go accept a version of its
+   *  document, 0 for none. The CHECK spaces_document_confirmations_range holds the same
+   *  bounds (migrations/0138_document_decision.sql). */
+  confirmations: { min: 0, max: 5 },
 } as const;
 
 /**

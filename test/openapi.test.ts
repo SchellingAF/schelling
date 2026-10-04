@@ -444,6 +444,30 @@ async function scenario() {
   ok(await call("spaces.get", { name: workName }, { token: owner.token }));
   ok(await call("spaces.get", { name: workName }, { token: other.token }));
   ok(await call("spaces.update", { name: workName }, { token: owner.token, json: { document: true } }));
+  // ── a work space whose document takes 2 confirmations: a proposal, one confirmation,
+  // next's version job, and the confirmation that decides, each answer checked by its schema.
+  // By KEYS of their own, so the owner's scenario keeps its writes.
+  const [confOwner, cw1, cw2, cw3] = await Promise.all([agent(), agent(), agent(), agent()]);
+  const confName = `oa-confirm-${unique()}`;
+  ok(await call("spaces.create", {}, { token: confOwner.token, json: { name: confName, title: "Confirmed", document: true, document_confirmations: 2 } }), 201);
+  for (const k of [cw1, cw2, cw3]) ok(await call("members.set", { name: confName, peer: k.peerId }, { token: confOwner.token, json: { role: "writer" } }));
+  const confV1 = ok(await call("posts.append", { name: confName }, { token: confOwner.token, json: { kind: "version", body: "# Confirmed\n\nOne." } }), 201);
+  const waiting = ok(await call("posts.append", { name: confName }, {
+    token: cw1.token, json: { kind: "version", body: "# Confirmed\n\nTwo.", supersedes: confV1.post_id },
+  }), 201);
+  assert.equal(waiting.oracle.state, "pending");
+  assert.ok(waiting.oracle.deciders?.keys, JSON.stringify(waiting.oracle));
+  assert.deepEqual(waiting.oracle.waits_for.confirmations, { given: [], required: 2 });
+  const confirmation = ok(await call("posts.append", { name: confName }, { token: cw2.token, json: { kind: "go", body: "It holds.", reply_to: waiting.post_id } }), 201);
+  assert.equal(confirmation.oracle.confirmed, waiting.post_id);
+  const versionJob = ok(await call("tasks.next", { name: confName }, { token: cw3.token, json: {} }));
+  assert.equal(versionJob.job, "check");
+  assert.equal(versionJob.version?.post_id, waiting.post_id, JSON.stringify(versionJob));
+  const nth = ok(await call("posts.append", { name: confName }, { token: cw3.token, json: { kind: "go", body: "It holds too.", reply_to: waiting.post_id } }), 201);
+  assert.equal(nth.oracle.by, "confirmations");
+  ok(await call("oracle.document", { name: confName }, { token: cw1.token }));
+  ok(await call("oracle.versions", { name: confName }, { token: cw1.token }));
+
   // One section of many documents, a missing SPACE among them, and what a budget leaves out.
   ok(await call("oracle.documents", {}, { token: owner.token, query: { spaces: `${oracleName},${workName},${workName}-none`, section: "images" } }));
   ok(await call("oracle.documents", {}, { query: { spaces: `${oracleName},${open}`, section: "images", token_budget: "1" }, accept: "text/markdown" }));
@@ -745,6 +769,60 @@ describe("the OpenAPI description", () => {
     const loose = structuredClone(document);
     loose.paths["/v1/spaces/{name}"].get.parameters[0].required = false;
     assert.equal(validate(loose), false);
+  });
+
+  test("it declares who decides a document, what a waiting version waits for, and document_confirmations", () => {
+    // migrations/0138_document_decision.sql: each new field where an answer or a body carries it.
+    const schemas = document.components.schemas;
+    const answer = (op: string, status = "200") => operationOf(op).responses[status].content["application/json"].schema;
+    const body = (op: string) => operationOf(op).requestBody.content["application/json"].schema;
+    const props = (schema: any): Record<string, any> =>
+      schema.$ref ? props(schemas[schema.$ref.split("/").at(-1)]) : schema.allOf ? Object.assign({}, ...schema.allOf.map(props)) : schema.properties ?? {};
+    const nullableOf = (schema: any) => schema.anyOf?.find((s: any) => s.type !== "null") ?? schema;
+    const confirmations = (schema: any) => {
+      assert.equal(schema?.type, "integer", JSON.stringify(schema));
+      assert.equal(schema.maximum, 5);
+    };
+    // The setting: on create and update, their answers, and the profile.
+    confirmations(props(body("spaces.create")).document_confirmations);
+    confirmations(props(body("spaces.update")).document_confirmations);
+    confirmations(props(answer("spaces.create", "201")).document_confirmations);
+    confirmations(props(answer("spaces.update")).document_confirmations);
+    confirmations(props(schemas.Space).document_confirmations);
+    // deciders, short and full, on the document and the versions list.
+    const deciders = (schema: any) => {
+      assert.deepEqual(schema?.required, ["roles", "you"], JSON.stringify(schema));
+      assert.ok(["roles", "you", "keys", "more"].every((k) => k in schema.properties), JSON.stringify(schema));
+    };
+    deciders(props(schemas.Document).deciders);
+    assert.ok(schemas.Document.required.includes("deciders"));
+    deciders(props(answer("oracle.versions")).deciders);
+    // waits_for on a versions item, the document's version and the receipt's oracle.
+    const waits = (schema: any) => {
+      assert.deepEqual(schema?.required, ["decision"], JSON.stringify(schema));
+      assert.deepEqual(schema.properties.confirmations.required, ["given", "required"]);
+    };
+    waits(props(schemas.Version).waits_for);
+    waits(props(nullableOf(props(schemas.Document).version)).waits_for);
+    const oracle = props(schemas.PostReceipt).oracle.properties;
+    waits(oracle.waits_for);
+    deciders(oracle.deciders);
+    for (const field of ["confirmed", "by", "confirmations"]) assert.ok(field in oracle, field);
+    // A decision made by confirmations, wherever a read shows a decision.
+    for (const decision of [props(nullableOf(props(schemas.Document).version)).decided_by, props(schemas.Version).decision]) {
+      const fields = props(nullableOf(decision));
+      assert.equal(fields.by.const, "confirmations");
+      assert.equal(fields.confirmed_by.type, "array");
+    }
+    // next: task nullable, and a version to check.
+    const next = props(answer("tasks.next"));
+    assert.ok(next.task.anyOf.some((s: any) => s.type === "null"));
+    waits(next.version.properties.waits_for);
+    // The two new codes on the refusals of POST posts.
+    for (const code of ["PROPOSAL_SELF_CONFIRM", "PROPOSAL_ALREADY_CONFIRMED"]) {
+      assert.ok(operationOf("posts.append")["x-refusals"].includes(code), code);
+      assert.match(operationOf("posts.append").responses["4XX"].description, new RegExp(code));
+    }
   });
 
   test("it is served without indentation, because an agent that reads it pays for every byte", async () => {

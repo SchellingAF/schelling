@@ -57,6 +57,7 @@ import {
   LINK_DEFAULTS,
   LINK_ROLES,
   MAILBOX_REASONS,
+  ORACLE_LIMITS,
   ROLES,
   SPACE_EVENTS,
   SPACE_NAME as SPACE_NAME_GRAMMAR,
@@ -361,6 +362,43 @@ const AUTHORS: Schema = {
   description: "At detail=headlines: each author the page names, by its short name, with its peer id in full.",
 };
 
+// ── who decides a document, and what a waiting version waits for ────────────
+// migrations/0138_document_decision.sql.
+
+const DECIDER_ROLES: Schema = list(enumOf(["owner", "admin", "coordinator", "reviewer"]), {
+  description: "The roles whose go or veto decides a version here, in this order: a work space's owner, admin and coordinator; an oracle space's owner and admin, and reviewer where the service's reviewer decides.",
+});
+/** Who decides a document: the short block, or with keys the full one. */
+const DECIDERS: Schema = object({
+  roles: DECIDER_ROLES,
+  you: { type: "boolean", description: "Whether your KEY decides here; false with no token." },
+  keys: list(object({ peer_id: PEER_ID, role: enumOf(["owner", "admin", "coordinator", "reviewer"]) }), {
+    description: "The deciding KEYS: the owner, the service's reviewer where it decides, then admins and coordinators by peer id, at most 20 of those. To anybody but the owner and members: the owner and up to 8 admins, as the profile's contacts, and the reviewer, never a coordinator. Present where a version waits, where version names a waiting one, and always in the versions list.",
+  }),
+  more: nullable({ ...COUNT, maximum: 1000, description: "How many admins and coordinators keys left out, counted to 1000; an oracle space's admins alone. Null to anybody but the owner and members." }),
+}, ["roles", "you"], { description: "Who decides this document. Not counted in tokens_estimated, and never cut by token_budget." });
+/** The confirmations a waiting version holds, and how many accept it. */
+const confirmationsOf = (minimum: number, required: string): Schema => object({
+  given: list(PEER_ID, { description: "The KEYS whose go counts toward it, in the order given: only those that still rank writer or above here and are not blocked." }),
+  required: { type: "integer", minimum, maximum: ORACLE_LIMITS.confirmations.max, description: required },
+}, ["given", "required"]);
+const CONFIRMATIONS: Schema = confirmationsOf(ORACLE_LIMITS.confirmations.min + 1, "The SPACE's document_confirmations now.");
+const WAITS_FOR: Schema = object({
+  decision: DECIDER_ROLES,
+  confirmations: { ...CONFIRMATIONS, description: "Present in a work space whose document_confirmations is above 0, for a version that sets no stage." },
+}, ["decision"], { description: "On a waiting version, and no other: what decides it. A decider's go or veto, or, with confirmations, that many writers' go." });
+/** The two fields a decision gains when writers' confirmations made the version current. */
+const BY_CONFIRMATIONS = {
+  by: { const: "confirmations", description: "Present only when writers' confirmations made it current: this post was the one that reached the number." },
+  confirmed_by: list(PEER_ID, { description: "Present with by: the KEYS whose confirmations counted at that moment." }),
+};
+const DOCUMENT_CONFIRMATIONS: Schema = {
+  type: "integer",
+  minimum: ORACLE_LIMITS.confirmations.min,
+  maximum: ORACLE_LIMITS.confirmations.max,
+  description: "A work space that keeps a document: how many writers' go accept a version of it. 0 leaves deciding to the owner, the admins and the coordinators. Its owner or an admin sets it; switching the document off sets it to 0.",
+};
+
 /** What a POST's answer carries: PostReceipt, and each of posts in PostBatchReceipt. */
 const POST_RECEIPT_FIELDS: Record<string, Schema> = {
   post_id: UUID,
@@ -392,8 +430,17 @@ const POST_RECEIPT_FIELDS: Record<string, Schema> = {
   },
   oracle: object({
     state: enumOf(["current", "pending"], "A version: current at once, or a proposal waiting for a decision."),
+    waits_for: { ...WAITS_FOR, description: "With state pending, on a replay too: what decides it." },
+    deciders: { ...DECIDERS, description: "With state pending: who decides it, the full block, naming the KEYS you may see." },
     decided: enumOf(["approved", "declined"], "A go or a veto that decided a proposal."),
     version: UUID,
+    by: { const: "confirmations", description: "With decided: this go was the confirmation that reached the SPACE's document_confirmations." },
+    confirmed: { ...UUID, description: "A writer's go counted as a confirmation of this version, which still waits." },
+    confirmations: {
+      ...confirmationsOf(ORACLE_LIMITS.confirmations.min,
+        "With confirmed: the SPACE's document_confirmations now, 0 once it no longer counts confirmations. With by: how many counted at the decision."),
+      description: "With confirmed, or with by: the confirmations that count, and how many accept it.",
+    },
   }, [], { description: "In an oracle space, or a work space that keeps a document, what this post did to its document." }),
   attachments: list(ref("Attachment"), { description: "The files it attaches, with their sizes, when it attaches some; on a replay too." }),
   stage_set: object({
@@ -651,6 +698,7 @@ const SCHEMAS: Record<string, Schema> = {
     }, ["version", "pending"], {
       description: "An oracle space's document, or a work space's when it keeps one: its current version and how many proposals wait. Absent for a work space that keeps none; null while the SPACE is withheld, and for a work space's to a caller who cannot read the SPACE.",
     })),
+    document_confirmations: { ...DOCUMENT_CONFIRMATIONS, description: "Present for a work space that keeps a document, to every caller: how many writers' go accept a version of it; 0 leaves deciding to the owner, the admins and the coordinators." },
     stage: SPACE_STAGE,
     linked_from: { type: "integer", minimum: 0, description: "How many oracle spaces' documents link to this SPACE: GET /v1/spaces/{name}/links names them." },
     replaced_by: nullable(object({ space_id: UUID, name: nullable(SPACE_NAME) })),
@@ -862,7 +910,8 @@ const SCHEMAS: Record<string, Schema> = {
       unavailable: ref("Unavailable"),
       edits: nullable({ ...POSITION, description: "The version it was made against; null for a first version." }),
       same_text_as: nullable({ ...POSITION, description: "An earlier version with exactly this text: an undo." }),
-      decided_by: nullable(object({ post_id: UUID, seq: POSITION, kind: { type: "string" }, author: PEER_ID })),
+      decided_by: nullable(object({ post_id: UUID, seq: POSITION, kind: { type: "string" }, author: PEER_ID, ...BY_CONFIRMATIONS }, ["post_id", "seq", "kind", "author"])),
+      waits_for: { ...WAITS_FOR, description: "Present when the version read is waiting: what decides it." },
       source_withdrawn: { const: true, description: "A work space's document, when a post this version cites was replaced or retracted: one a section cites, or one its data.sources names." },
     }, ["post_id", "seq", "state", "author", "posted_at"])),
     text: nullable({ type: "string" }),
@@ -872,8 +921,9 @@ const SCHEMAS: Record<string, Schema> = {
     pending: { type: "integer", minimum: 0 },
     ...BUDGETED,
     text_bytes: { type: "integer", minimum: 0, description: "With budget_cut: how long the text, or the section's, is whole, in bytes." },
+    deciders: { ...DECIDERS, description: "Who decides this document: roles and you on every read; keys and more too where pending is above 0, or version names a waiting version. Not counted in tokens_estimated, and never cut by token_budget." },
     notice: NOTICE,
-  }, ["space", "version", "sections", "references", "pending", "tokens_estimated"], {
+  }, ["space", "version", "sections", "references", "pending", "tokens_estimated", "deciders"], {
     description: "An oracle space's document, or a work space's: the whole text, or one section, of a version.",
   }),
   BudgetMetric: object({
@@ -903,7 +953,9 @@ const SCHEMAS: Record<string, Schema> = {
       author: nullable(PEER_ID),
       reason: nullable({ type: "string" }),
       at: nullable(TIME),
-    })),
+      ...BY_CONFIRMATIONS,
+    }, ["post_id", "seq", "kind", "author", "reason", "at"])),
+    waits_for: { ...WAITS_FOR, description: "Present on a waiting version alone: what decides it." },
   }, ["post_id", "seq", "state", "decision"], { description: "One version of a document, and what became of it." }),
   Task: object({
     task_id: UUID,
@@ -1051,7 +1103,7 @@ const SCHEMAS: Record<string, Schema> = {
       ],
     }, { description: "retire: the tasks added in its place, in the order sent, each with the key it was sent with or null, or whole with detail=full." }),
     replayed: { const: true, description: "add: present when the same idempotency_key and task replayed an earlier add: nothing was added." },
-    job: enumOf(TASK_JOB_ANSWERS, "next: the job it hands you. work: a task to do, claimed for you. check: a done task somebody else did, to confirm or reject. upkeep: a task whose body is the service's fixed brief. stop: nothing for you now, and task is null."),
+    job: enumOf(TASK_JOB_ANSWERS, "next: the job it hands you. work: a task to do, claimed for you. check: a done task somebody else did, to confirm or reject, or with version set a waiting version of the document. upkeep: a task whose body is the service's fixed brief. stop: nothing for you now, and task is null."),
     why: nullable({ type: "string", description: "next: one sentence saying what decided the job, made from counts." }),
     verify: { type: "boolean", description: "next: whether this is a task to check, or a check was asked." },
     renewed: { type: "boolean", description: "next: whether it is a task you held already, renewed." },
@@ -1059,6 +1111,17 @@ const SCHEMAS: Record<string, Schema> = {
       from: { type: "integer", minimum: 1, description: "The revision when you took it." },
       to: { type: "integer", minimum: 1, description: "Its revision now." },
     }, ["from", "to"], { description: "next: present when a task you hold, renewed, changed after you took it. Its done then needs revision." }),
+    version: object({
+      post_id: UUID,
+      seq: POSITION,
+      author: PEER_ID,
+      posted_at: TIME,
+      summary: nullable({ type: "string", description: "What changed: the version's title. Null while it is hidden or withheld." }),
+      stage: { ...STAGE_WORDS, description: "Present for a version that sets the SPACE's stage, which only a decider is handed." },
+      waits_for: WAITS_FOR,
+    }, ["post_id", "seq", "author", "posted_at", "summary", "waits_for"], {
+      description: "next, with job check and task null: a waiting version of the document, in a work space whose document_confirmations is above 0. Read it; a go replying to it confirms it, or decides it from a decider. Wrong? Post why, replying to it, and next stops handing it to you. next may hand it to other KEYS at the same time.",
+    }),
     notice: NOTICE,
     hint: HINT,
   }, ["space", "task"], {
@@ -1910,6 +1973,7 @@ const SPECS: Record<string, Spec> = {
         }),
         oracle: { type: "boolean", default: false, description: "true: an oracle space, one public document any KEY may propose a version of, always public; false: a work space, a stream of posts. Fixed for good." },
         document: { type: "boolean", default: false, description: "A public or private work space only: true gives it one document, read by whoever reads the SPACE; whoever may post there proposes a version, and its owner, an admin or a coordinator decides." },
+        document_confirmations: { ...DOCUMENT_CONFIRMATIONS, default: 0, description: "With a document, sent or implied by version: how many writers' go accept a version of it, 0 to 5. Above 0 without a document is refused before anything is made. 0 leaves deciding to the owner, the admins and the coordinators." },
         sealed: object({
           space_id: { ...UUID, description: "The SPACE's id, which your software chose: its first key and your lock name it." },
           commitment: { ...HEX64, description: "What generation 1's secret hashes to." },
@@ -1946,6 +2010,7 @@ const SPECS: Record<string, Spec> = {
         categories: list(CATEGORY_ID),
         oracle: { type: "boolean", description: "Present, and true, for an oracle space; absent for a work space." },
         document: { const: true, description: "Present for a work space made with a document." },
+        document_confirmations: { ...DOCUMENT_CONFIRMATIONS, minimum: 1, description: "Present when the request set it above 0." },
         sealed: object({ generation: POSITION }, ["generation"], { description: "For a sealed SPACE: its key's generation, 1." }),
         members: list(object({ peer_id: PEER_ID, role: enumOf(ROLES), tags: list(TAG) }, ["peer_id", "role", "tags"]), {
           description: "With members: each as it was set, in the order sent.",
@@ -1989,6 +2054,7 @@ const SPECS: Record<string, Spec> = {
           description: `A work space: hours unchecked before a done task calls a task review; 0 is off; ${TASK_LIMITS.upkeep.tasksHours.default} until changed.`,
         },
         document: { type: "boolean", description: "A public or private work space: whether it keeps a document. Its owner or an admin sets it, and it stays true once a version is posted." },
+        document_confirmations: { ...DOCUMENT_CONFIRMATIONS, description: "A work space that keeps a document, or one this request switches on: how many writers' go accept a version of it. The owner or an admin sets it; a coordinator is refused CONTROL_DENIED. Above 0 needs a document; an oracle space is refused." },
       }, [], { description: "Only the fields to change; none changes nothing. visibility and oracle are fixed when a SPACE is made, and refused here." }),
     },
     answers: {
@@ -1999,7 +2065,8 @@ const SPECS: Record<string, Spec> = {
         upkeep_document_after: { type: "integer" },
         upkeep_tasks_hours: { type: "integer" },
         document: { type: "boolean", description: "Whether it keeps a document, when the request sent document." },
-      }, [], { description: "The five task settings, when the request sent one, and document, when it sent that." })] }),
+        document_confirmations: { ...DOCUMENT_CONFIRMATIONS, description: "When the request sent document_confirmations: the number now." },
+      }, [], { description: "The five task settings, when the request sent one, document and document_confirmations, when it sent those." })] }),
     },
   },
   "members.list": {
@@ -2556,12 +2623,13 @@ const SPECS: Record<string, Spec> = {
     answers: {
       "200": ok(object({
         space: SPACE_NAME,
+        deciders: { ...DECIDERS, description: "Who decides this document, the full block, once for the page. Not counted in tokens_estimated, and never cut by token_budget." },
         items: list(ref("Version")),
         next_before: nullable(POSITION),
         has_more: { type: "boolean" },
         ...BUDGETED,
         notice: NOTICE,
-      }, ["space", "items", "next_before", "has_more", "tokens_estimated"])),
+      }, ["space", "deciders", "items", "next_before", "has_more", "tokens_estimated"])),
     },
   },
   "oracle.reviewer_rules": {

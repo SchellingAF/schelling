@@ -1322,6 +1322,26 @@ export function mountPosts(app: Hono<Env>, config: Config, db: Db, service: Serv
       ...results.flatMap((w) => (Array.isArray(w.contested) && w.contested.length > 0 ? headsOf(null, { delivered: w.contested }) : [])),
     ], { replayed });
 
+    // A version that waits says who decides it, beside what it waits for, which
+    // append_post() built: read once for the call after the write commits, since every
+    // POST of a call is in one SPACE, and as the caller, so it names the KEYS the caller
+    // may see (migrations/0138_document_decision.sql). The write has committed, so a
+    // failed read is logged and the receipt answers without deciders, never an error
+    // that would send the caller to post again.
+    const waiting = results.filter((w) => (w.receipt.oracle as { state?: string } | undefined)?.state === "pending");
+    if (waiting.length > 0) {
+      const reviewer = config.oracleReviewer ? Buffer.from(config.oracleReviewer, "hex") : null;
+      const row = await db.readTx(me, (sql) => sql<{ deciders: Record<string, unknown> | null }[]>`
+        select schellingaf.document_deciders(${String(waiting[0]!.receipt.space_id)}::uuid, ${reviewer}::bytea, true) as deciders`)
+        .then(([found]) => found, (error: unknown) => {
+          console.error(`[${c.get("requestId")}] ${c.req.method} ${c.req.path}: deciders not read: ${(error as Error)?.message ?? String(error)}`);
+          return undefined;
+        });
+      if (row?.deciders) {
+        for (const w of waiting) w.receipt = { ...w.receipt, oracle: { ...(w.receipt.oracle as object), deciders: row.deciders } };
+      }
+    }
+
     const answers: Record<string, unknown>[] = [];
     for (const [i, { receipt: written, attached, contested }] of results.entries()) {
       const item = items[i]!;

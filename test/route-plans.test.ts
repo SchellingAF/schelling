@@ -644,6 +644,65 @@ describe("the reads the service actually issues", () => {
     assert.doesNotMatch(own, /Seq Scan on (posts|post_sources)/, own);
   });
 
+  test("11. who decides is read from memberships_governing_idx, and the version reads gain no join", async () => {
+    // planned-work with a waiting version, two admins, thirty coordinators and six hundred
+    // readers, so a walk of its members shows in the plan.
+    await fixture.owner`
+      insert into schellingaf.memberships (space_id, peer_id, role, via, granted_by, revision)
+      select s.space_id, pe.peer_id, case when pe.n <= 2 then 'admin' when pe.n <= 32 then 'coordinator' else 'reader' end,
+             'grant', s.owner_id, 1
+        from schellingaf.spaces s
+        cross join (select x.peer_id, row_number() over (order by x.peer_id) as n from schellingaf.peers x
+                     where x.peer_id <> decode(${owner.peerId}, 'hex')) pe
+       where s.name = 'planned-work'
+      on conflict do nothing`;
+    await fixture.owner`
+      insert into schellingaf.posts (space_id, seq, admitted_revision, author_id, kind, title, body, content_hash)
+      select s.space_id, s.last_seq + 1, 1, s.owner_id, 'version', 'waiting', 'a waiting version', sha256('planned waiting'::bytea)
+        from schellingaf.spaces s where s.name = 'planned-work'`;
+    await fixture.owner`
+      insert into schellingaf.oracle_versions (post_id, space_id, seq, author_id, state, text_hash)
+      select p.post_id, p.space_id, p.seq, p.author_id, 'pending', sha256(convert_to(p.body, 'UTF8'))
+        from schellingaf.posts p join schellingaf.spaces s on s.space_id = p.space_id
+       where s.name = 'planned-work' and p.seq = s.last_seq + 1`;
+    await fixture.owner`update schellingaf.spaces set last_seq = last_seq + 1 where name = 'planned-work'`;
+    await fixture.owner`vacuum analyze`;
+
+    for (const path of ["/v1/spaces/planned-work/versions?limit=50", "/v1/spaces/planned-work/document"]) {
+      const seen = await sent(path, owner);
+      const read = await genericPlanAll(statementFor(seen, "oracle_versions"));
+      assert.doesNotMatch(read, /memberships/, `${path}: the version read joined:\n${read}`);
+      statementFor(seen, "document_deciders(");
+    }
+
+    type PlanNode = { [field: string]: any; Plans?: PlanNode[] };
+    const nodesOf = (plan: PlanNode): PlanNode[] => [plan, ...(plan.Plans ?? []).flatMap(nodesOf)];
+    const [work] = await fixture.owner<{ id: string }[]>`select space_id::text as id from schellingaf.spaces where name = 'planned-work'`;
+    const logged: string[] = [];
+    const su = postgres({ ...SUPERUSER, database: fixture.name, onnotice: (n) => logged.push(n.message ?? "") });
+    try {
+      await su`load 'auto_explain'`;
+      for (const setting of ["log_min_duration = 0", "log_nested_statements = on", "log_format = json", "log_level = notice"]) {
+        await su.unsafe(`set auto_explain.${setting}`);
+      }
+      await su.begin(async (tx) => {
+        await tx.unsafe("set local role schellingaf_api");
+        await tx.unsafe("set local plan_cache_mode = force_generic_plan");
+        await tx`select set_config('schellingaf.peer_id', ${owner.peerId}, true)`;
+        await tx`select schellingaf.document_deciders(${work!.id}::uuid, null, true)`;
+      });
+    } finally {
+      await su.end({ timeout: 5 });
+    }
+    const plans = logged.filter((m) => m.includes("{")).map((m) => JSON.parse(m.slice(m.indexOf("{"))) as { "Query Text": string; Plan: PlanNode });
+    const inner = plans.filter((p) => nodesOf(p.Plan).some((n) => n["Relation Name"] === "memberships"));
+    assert.ok(inner.length > 0, plans.map((p) => p["Query Text"]).join("\n--\n"));
+    const nodes = inner.flatMap((p) => nodesOf(p.Plan));
+    const shown = JSON.stringify(nodes.filter((n) => n["Relation Name"] || n["Index Name"]), ["Node Type", "Relation Name", "Index Name", "Index Cond"], 1);
+    assert.ok(nodes.some((n) => n["Index Name"] === "memberships_governing_idx"), shown);
+    assert.ok(!nodes.some((n) => n["Node Type"] === "Seq Scan" && n["Relation Name"] === "memberships"), shown);
+  });
+
   test("a task list pages back on its number, and a state is read from the index that holds it", async () => {
     // The whole list, and the accepted tasks, which grow without end: walked back on the
     // number, never sorted.

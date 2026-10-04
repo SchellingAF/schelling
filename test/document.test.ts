@@ -301,13 +301,13 @@ describe("who proposes and who decides", () => {
 
     const p = await version(writer, name, "v2 by a member", first.body.post_id);
     assert.equal(p.status, 201, JSON.stringify(p.body));
-    assert.deepEqual(p.body.oracle, { state: "pending" });
+    assert.equal(p.body.oracle.state, "pending");
     assert.ok((await mailbox(owner, "proposal")).some((i) => i.post?.post_id === p.body.post_id));
 
     const go = await post(other, name, { kind: "go", body: "Looks right.", reply_to: p.body.post_id });
     assert.equal(go.status, 403, JSON.stringify(go.body));
     assert.equal(go.body.error.code, "CONTROL_DENIED");
-    assert.match(go.body.error.detail, /only the owner, an admin or a coordinator decides one/);
+    assert.match(go.body.error.detail, /only the owner, an admin or a coordinator decides a version here, with go or veto: GET \/v1\/spaces\/.+\/document names them/);
     assert.equal(await current(name, owner), first.body.post_id);
     // A go on anything else is a writer's to post.
     const remark = await post(other, name, { kind: "obs", body: "A remark." });
@@ -331,7 +331,7 @@ describe("who proposes and who decides", () => {
     const first = await version(owner, name, "v1");
     const p = await version(stranger, name, "v2 by a stranger", first.body.post_id);
     assert.equal(p.status, 201, JSON.stringify(p.body));
-    assert.deepEqual(p.body.oracle, { state: "pending" });
+    assert.equal(p.body.oracle.state, "pending");
     assert.equal(p.body.no_role, true);
     const veto = await post(stranger, name, { kind: "veto", body: "Mine is better.", reply_to: p.body.post_id });
     assert.equal(veto.body.error.code, "CONTROL_DENIED");
@@ -411,7 +411,7 @@ describe("who proposes and who decides", () => {
     const first = await version(owner, name, "v1");
     const kept = await version(stays, name, "v2 by one who stays", first.body.post_id);
     const gone = await version(leaves, name, "v2 by one who leaves", first.body.post_id);
-    assert.deepEqual([kept.body.oracle, gone.body.oracle], [{ state: "pending" }, { state: "pending" }]);
+    assert.deepEqual([kept.body.oracle.state, gone.body.oracle.state], ["pending", "pending"]);
     assert.equal((await call("DELETE", `/v1/spaces/${name}/members/${leaves.peerId}`, owner.token)).status, 200);
     const next = await version(owner, name, "v2 by the owner", first.body.post_id);
     assert.deepEqual(next.body.oracle, { state: "current" });
@@ -428,7 +428,7 @@ describe("who proposes and who decides", () => {
     const first = await version(owner, name, "v1", null, reviewerApp);
     const before = (await mailbox(reviewer, "proposal", reviewerApp)).length;
     const p = await version(writer, name, "v2", first.body.post_id, reviewerApp);
-    assert.deepEqual(p.body.oracle, { state: "pending" });
+    assert.equal(p.body.oracle.state, "pending");
     assert.equal((await mailbox(reviewer, "proposal", reviewerApp)).length, before, "the reviewer is not told");
     const go = await post(reviewer, name, { kind: "go", body: "A genuine contribution.", reply_to: p.body.post_id }, reviewerApp);
     assert.equal(go.status, 403, JSON.stringify(go.body));
@@ -766,7 +766,7 @@ describe("a SPACE's stage, set by a version", () => {
     assert.ok(!Number.isNaN(Date.parse(set.set_at)));
 
     const proposal = await staged(writer, name, "v2", { word: "accepted" }, first.body.post_id);
-    assert.deepEqual(proposal.body.oracle, { state: "pending" });
+    assert.equal(proposal.body.oracle.state, "pending");
     assert.equal((await stageOf(name)).word, "proposed", "a pending version sets nothing");
 
     const go = await post(coordinator, name, { kind: "go", body: "Sourced.", reply_to: proposal.body.post_id });

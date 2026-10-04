@@ -16,6 +16,7 @@
 import { Hono } from "hono";
 import type { Sql } from "postgres";
 import type { Db } from "../db/sql.ts";
+import type { Config } from "../config.ts";
 import { ApiError } from "../db/errors.ts";
 import { toHex } from "../domain/keys.ts";
 import { MAX_LINKS, parseDocument, sectionText, type Inline, type ParsedDocument } from "../domain/document.ts";
@@ -64,13 +65,15 @@ type SpaceRow = {
   owner: Buffer;
   oracle: boolean;
   document: boolean;
+  service_reviewer: boolean;
+  document_confirmations: number;
   withheld: boolean;
 };
 
 async function spaceFor(sql: Sql, name: string): Promise<SpaceRow | null> {
   const [space] = await sql<SpaceRow[]>`
     select s.space_id::text, s.name, s.title, schellingaf.can_read_space(s.space_id) as readable,
-           s.owner_id as owner, s.oracle, s.document,
+           s.owner_id as owner, s.oracle, s.document, s.service_reviewer, s.document_confirmations,
            exists (select 1 from schellingaf.withheld_spaces w
                     where w.space_id = s.space_id and w.released_at is null) as withheld
       from schellingaf.spaces s where s.name = ${name}`;
@@ -154,8 +157,31 @@ function before(raw: string | undefined): bigint | null {
 export const DOCUMENTS_MAX = 20;
 export const DOCUMENTS_PER_READ = 5;
 
-export function mountOracle(app: Hono<Env>, db: Db): void {
+/** A version's confirmations, as the version reads give them: the KEYS that counted when
+ *  confirmations made it current, said only then (migrations/0138_document_decision.sql). */
+function byConfirmations(confirmedBy: string[] | null): { by: "confirmations"; confirmed_by: string[] } | Record<string, never> {
+  return confirmedBy === null ? {} : { by: "confirmations", confirmed_by: confirmedBy };
+}
+
+export function mountOracle(app: Hono<Env>, db: Db, config: Config): void {
   const publicSpaceMinKeyAgeHours = publicKeyAgeHours();
+  // The service's reviewer, which decides in an oracle space whose owner left it on.
+  const reviewer = config.oracleReviewer ? Buffer.from(config.oracleReviewer, "hex") : null;
+  const reviewerDecides = (space: SpaceRow) => space.oracle && space.service_reviewer && reviewer !== null;
+  /** What a pending version waits for, built in SQL from the row and the SPACE's settings,
+   *  with its standing confirmers; null for any other state. And the KEYS whose
+   *  confirmations made it current, where they did. */
+  const waitsFor = (sql: Sql, space: SpaceRow) => sql`
+    case when v.state = 'pending'
+         then schellingaf.version_waits_for(${space.oracle}, ${reviewerDecides(space)}, ${space.document_confirmations}::int,
+                                            v.stage_word is not null, schellingaf.version_confirmers(v.post_id)) end as waits_for,
+    case when v.by_confirmations then schellingaf.hex_list(v.confirmed_by::bytea[]) end as confirmed_by`;
+  /** Who decides: the short block, or with keys the full one. One statement of its own. */
+  const decidersOf = async (sql: Sql, space: SpaceRow, keys: boolean) => {
+    const [row] = await sql<{ deciders: Record<string, unknown> | null }[]>`
+      select schellingaf.document_deciders(${space.space_id}::uuid, ${reviewer}::bytea, ${keys}::boolean) as deciders`;
+    return row?.deciders ?? null;
+  };
 
   // The document: its current version, whole or one section, or the version with a
   // given number. Anyone may read it, as anyone may read an oracle space; a work space's,
@@ -183,9 +209,10 @@ export function mountOracle(app: Hono<Env>, db: Db): void {
         (PostRow & {
           state: string; pending: number; base_seq: string | null; same_as: string | null;
           decision_id: string | null; decision_seq: string | null; decision_kind: string | null; decision_author: Buffer | null;
+          waits_for: Record<string, unknown> | null; confirmed_by: string[] | null;
         })[]
       >`
-        select pr.*, v.state, b.seq::text as base_seq,
+        select pr.*, v.state, b.seq::text as base_seq, ${waitsFor(sql, space)},
                d.post_id::text as decision_id, d.seq::text as decision_seq, d.kind as decision_kind, d.author_id as decision_author,
                ${sameTextAs(sql)},
                (select count(*)::int from schellingaf.oracle_versions w
@@ -213,7 +240,10 @@ export function mountOracle(app: Hono<Env>, db: Db): void {
             from schellingaf.posts p where p.post_id = ${row.post_id}::uuid`;
         withdrawn = { sections, version: sections.size > 0 || own?.withdrawn === true };
       }
-      return { space, row, pending: row?.pending ?? waiting?.pending ?? 0, withdrawn };
+      const pending = row?.pending ?? waiting?.pending ?? 0;
+      // Who decides: the KEYS too whenever a version waits, or the version read waits.
+      const deciders = await decidersOf(sql, space, pending > 0 || row?.state === "pending");
+      return { space, row, pending, withdrawn, deciders };
     });
     if (!found) throw new ApiError("SPACE_NOT_FOUND");
     if (me === null) c.set("publicRead", true);
@@ -230,7 +260,11 @@ export function mountOracle(app: Hono<Env>, db: Db): void {
         references: [],
         pending: found.pending,
         tokens_estimated: 0,
-        notice: "This document has no version yet. Propose the first with POST /v1/spaces/" + space.name + "/posts, kind version and no supersedes.",
+        deciders: found.deciders,
+        notice: found.pending > 0
+          ? "No version is current yet. " + found.pending + " proposal(s) wait for a decision. Read them with GET /v1/spaces/" + space.name +
+            "/versions?state=pending before you propose."
+          : "This document has no version yet. Propose the first with POST /v1/spaces/" + space.name + "/posts, kind version and no supersedes.",
       });
     }
     recordReturned(c, "open", [row]);
@@ -277,15 +311,18 @@ export function mountOracle(app: Hono<Env>, db: Db): void {
         edits: row.base_seq,
         same_text_as: row.same_as,
         decided_by: row.decision_id && row.decision_seq && row.decision_kind && row.decision_author
-          ? { post_id: row.decision_id, seq: row.decision_seq, kind: row.decision_kind, author: toHex(row.decision_author) }
+          ? { post_id: row.decision_id, seq: row.decision_seq, kind: row.decision_kind, author: toHex(row.decision_author),
+              ...byConfirmations(row.confirmed_by) }
           : null,
         ...(found.withdrawn?.version ? { source_withdrawn: true } : {}),
+        ...(row.waits_for ? { waits_for: row.waits_for } : {}),
       },
       ...(section ? { section: { ...section, text: answered, ...marked(section.id) } } : { text: answered }),
       sections: parsed ? parsed.sections.map((s) => ({ id: s.id, level: s.level, heading: s.heading, ...marked(s.id) })) : [],
       references: parsed ? parsed.references : [],
       pending: found.pending,
       ...budgetFields,
+      deciders: found.deciders,
       notice: NOTICE,
     });
   });
@@ -435,9 +472,11 @@ export function mountOracle(app: Hono<Env>, db: Db): void {
           same_as: string | null;
           stage_word: string | null;
           stage_note: string | null;
+          waits_for: Record<string, unknown> | null;
+          confirmed_by: string[] | null;
         })[]
       >`
-        select pr.*, v.state, v.stage_word, v.stage_note,
+        select pr.*, v.state, v.stage_word, v.stage_note, ${waitsFor(sql, space)},
                b.seq::text as base_seq,
                v.decision::text as decision_id, d.seq::text as decision_seq, d.kind as decision_kind,
                d.author_id as decision_author, left(d.body, 280) as decision_reason, v.decided_at,
@@ -452,7 +491,7 @@ export function mountOracle(app: Hono<Env>, db: Db): void {
           left join schellingaf.oracle_versions b on b.post_id = v.base
           left join schellingaf.visible_posts d on d.post_id = v.decision
          order by v.seq desc`;
-      return { space, rows };
+      return { space, rows, deciders: await decidersOf(sql, space, true) };
     });
     if (!found) throw new ApiError("SPACE_NOT_FOUND");
     if (me === null) c.set("publicRead", true);
@@ -484,8 +523,10 @@ export function mountOracle(app: Hono<Env>, db: Db): void {
               author: r.decision_author ? toHex(r.decision_author) : null,
               reason: r.decision_reason,
               at: r.decided_at?.toISOString() ?? null,
+              ...byConfirmations(r.confirmed_by),
             }
           : null,
+        ...(r.waits_for ? { waits_for: r.waits_for } : {}),
       };
     });
     const { items, spent, cut } = itemsWithin(page, budgetTokens);
@@ -493,6 +534,7 @@ export function mountOracle(app: Hono<Env>, db: Db): void {
     const more = cut || items.length === limit;
     return c.json({
       space: found.space.name,
+      deciders: found.deciders,
       items,
       next_before: more ? items.at(-1)!.seq : null,
       has_more: more,

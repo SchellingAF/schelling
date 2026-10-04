@@ -15,6 +15,7 @@ import { OPERATIONS } from "../src/surface/operations.ts";
 import { API_CHANGES, API_VERSION } from "../src/config.ts";
 import { prune } from "../src/db/prune.ts";
 import { renderTask } from "../src/mcp/render.ts";
+import { TEST_TITLE } from "./helpers.ts";
 
 before(() => {
   process.env.PUBLIC_SPACE_MIN_KEY_AGE_HOURS = "0";
@@ -408,11 +409,11 @@ describe("the release before", () => {
 });
 
 describe("the words", () => {
-  const sql = ["0133_task_next_job.sql", "0134_task_upkeep.sql"]
+  const sql = ["0133_task_next_job.sql", "0134_task_upkeep.sql", "0138_document_decision.sql"]
     .map((file) => readFileSync(new URL(`../migrations/${file}`, import.meta.url), "utf8")).join("\n");
 
   test("every sentence next_job names is in NEXT_WORDS, and every one in NEXT_WORDS is named", () => {
-    const named = new Set([...sql.replace(/--.*$/gm, "").matchAll(/'((?:renewed|renewed_changed|held_upkeep|number|work|check_first|check_idle|check_asked|upkeep_document|upkeep_document_first|upkeep_tasks|stop|stop_waiting|stop_upkeep|stop_check))'/g)].map((m) => m[1]!));
+    const named = new Set([...sql.replace(/--.*$/gm, "").matchAll(/'((?:renewed|renewed_changed|held_upkeep|number|work|check_first|check_idle|check_asked|upkeep_document|upkeep_document_first|upkeep_tasks|stop|stop_waiting|stop_upkeep|stop_check|check_version|check_version_decide))'/g)].map((m) => m[1]!));
     // work and number are also job values and a field name; each sentence key must appear.
     assert.deepEqual([...named].sort(), Object.keys(NEXT_WORDS.why).sort());
   });
@@ -420,7 +421,7 @@ describe("the words", () => {
   test("why is filled with numbers only: each placeholder is a number next counted, or the signals made of them", async () => {
     // hours is twice the SPACE's claim hours, an upkeep claim's cap. signals is NEXT_WORDS' own signal sentences, filled with task numbers and hours
     // (test/task-upkeep.test.ts).
-    const values = { number: "12", minutes: "61", from: "1", to: "3", count: "4", seq: "70", hours: "8", signals: "a new document version since the last review" };
+    const values = { number: "12", minutes: "61", from: "1", to: "3", count: "4", seq: "70", hours: "8", given: "1", required: "2", signals: "a new document version since the last review" };
     for (const [key, text] of Object.entries(NEXT_WORDS.why)) {
       for (const [, name] of text.matchAll(/\{([a-z_]+)\}/g)) assert.ok(Object.keys(values).includes(name!), `${key}: {${name}}`);
       const [row] = await fixture.owner<{ text: string }[]>`
@@ -435,11 +436,13 @@ describe("the words", () => {
   test("the operation, the capability document and the API version say it", async () => {
     const op = OPERATIONS.find((o) => o.name === "tasks.next")!;
     assert.ok(op.describe.includes(`waited ${TASK_LIMITS.checkFirstMinutes} minutes for a check`), op.describe);
-    assert.equal(API_VERSION, "0.4");
-    assert.equal(API_CHANGES[0].api_version, "0.4");
-    assert.match(API_CHANGES[0].what, /answers job \(work, check, upkeep or stop\) and why/);
+    assert.equal(API_VERSION, "0.5");
+    assert.equal(API_CHANGES[0].api_version, "0.5");
+    assert.match(API_CHANGES[0].what, /may answer job check with task null and version set/);
+    assert.equal(API_CHANGES[1].api_version, "0.4");
+    assert.match(API_CHANGES[1].what, /answers job \(work, check, upkeep or stop\) and why/);
     const caps = (await call("GET", "/v1/capabilities")).body;
-    assert.equal(caps.api_version, "0.4");
+    assert.equal(caps.api_version, "0.5");
     assert.equal(caps.limits.tasks.check_first_minutes, 60);
     assert.equal(caps.limits.tasks.check_offer_minutes, 30);
   });
@@ -585,5 +588,217 @@ describe("the plans inside next_job", () => {
     const lowest = scansOf(idle, /FROM tasks d[\s\S]*ORDER BY d\.number/);
     assert.ok(!lowest.scans.some((n) => n["Node Type"] === "Seq Scan"), lowest.shown);
     assert.ok(lowest.scans.some((n) => n["Index Name"] === "tasks_done_idx"), lowest.shown);
+  });
+
+  test("43. a waiting version for next is found through oracle_versions_pending, the posts key and posts_reply_idx", async () => {
+    const owner = await agent();
+    const name = await workSpace(owner, { document: true, document_confirmations: 2 });
+    const [s] = await fixture.owner<{ space_id: string }[]>`select space_id::text from schellingaf.spaces where name = ${name}`;
+    // Three thousand posts, a hundred of them replies to versions, and twenty versions of
+    // which one waits, so a walk of posts or of oracle_versions shows in the plan.
+    await fixture.owner`
+      insert into schellingaf.posts (space_id, seq, admitted_revision, author_id, kind, title, body, content_hash)
+      select ${s!.space_id}::uuid, g, 1, decode(${owner.peerId}, 'hex'), case when g <= 20 then 'version' else 'obs' end,
+             'post ' || g, 'body ' || g, sha256(convert_to(${name} || g, 'UTF8'))
+        from generate_series(1, 2900) g`;
+    await fixture.owner`
+      insert into schellingaf.posts (space_id, seq, admitted_revision, author_id, kind, title, body, content_hash, reply_to)
+      select ${s!.space_id}::uuid, g, 1, decode(${owner.peerId}, 'hex'), 'obs', 'reply ' || g, 'body ' || g,
+             sha256(convert_to(${name} || g, 'UTF8')),
+             (select v.post_id from schellingaf.posts v where v.space_id = ${s!.space_id}::uuid and v.seq = (g % 20) + 1)
+        from generate_series(2901, 3000) g`;
+    await fixture.owner`
+      insert into schellingaf.oracle_versions (post_id, space_id, seq, author_id, state, text_hash)
+      select p.post_id, p.space_id, p.seq, p.author_id, case when p.seq = 20 then 'pending' when p.seq = 19 then 'current' else 'replaced' end,
+             sha256(convert_to(p.body, 'UTF8'))
+        from schellingaf.posts p where p.space_id = ${s!.space_id}::uuid and p.kind = 'version'`;
+    await fixture.owner`update schellingaf.spaces set last_seq = 3000 where name = ${name}`;
+    await fixture.owner`vacuum analyze`;
+    const writer = await agent();
+    await grant(owner, name, writer, "writer");
+    const key = Buffer.from(writer.peerId, "hex");
+    // Through next_job(), as the route calls it: next_version_check() is internal.
+    const plans = await plansInside((tx) => tx`
+      select schellingaf.next_job(${name}, ${key}, 'any', null, null, ${tx.json(NEXT_WORDS as never)}, 3, 60, 30, 10000, 2, 4)`);
+    const inner = plans.filter((p) => /FROM oracle_versions v/.test(p["Query Text"]) && /no_role/.test(p["Query Text"])
+                                      && !/next_job\(/.test(p["Query Text"]));
+    assert.equal(inner.length, 1, plans.map((p) => p["Query Text"]).join("\n--\n"));
+    const scans = nodesOf(inner[0]!.Plan).filter((n) => n["Relation Name"] || n["Index Name"]);
+    const shown = JSON.stringify(scans, ["Node Type", "Relation Name", "Index Name", "Index Cond", "Filter"], 1);
+    for (const index of ["oracle_versions_pending", "posts_pkey", "posts_reply_idx"]) {
+      assert.ok(scans.some((n) => n["Index Name"] === index), `${index} unused:\n${shown}`);
+    }
+    assert.ok(!scans.some((n) => n["Node Type"] === "Seq Scan"), `a table was walked:\n${shown}`);
+  });
+});
+
+describe("next hands a waiting version of the document as a check, where the SPACE sets document_confirmations", () => {
+  /** A public work space of a fresh owner's that keeps a document, confirmations as given,
+   *  with writers w1 w2 w3, a coordinator and the owner's first version current. */
+  async function documented(confirmations: number, extra: Record<string, unknown> = {}) {
+    const owner = await agent();
+    const [w1, w2, w3, coordinator] = await Promise.all([agent(), agent(), agent(), agent()]);
+    const name = await workSpace(owner, { document: true, document_confirmations: confirmations, ...extra });
+    for (const k of [w1, w2, w3]) await grant(owner, name, k, "writer");
+    await grant(owner, name, coordinator, "coordinator");
+    const v1 = await call("POST", `/v1/spaces/${name}/posts`, owner.token, { kind: "version", body: "# Pages\n\nOne." });
+    assert.equal(v1.status, 201, JSON.stringify(v1.body));
+    return { owner, w1, w2, w3, coordinator, name, v1: v1.body.post_id as string };
+  }
+
+  async function propose(who: Agent, name: string, supersedes: string, extra: Record<string, unknown> = {}) {
+    const out = await call("POST", `/v1/spaces/${name}/posts`, who.token, { kind: "version", body: `# Pages\n\n${n++}.`, supersedes, ...extra });
+    assert.equal(out.status, 201, JSON.stringify(out.body));
+    return out.body as { post_id: string; seq: string };
+  }
+
+  async function postedAt(postId: string): Promise<string> {
+    const [row] = await fixture.owner<{ at: string }[]>`select to_jsonb(posted_at) #>> '{}' as at from schellingaf.posts where post_id = ${postId}::uuid`;
+    return row!.at;
+  }
+
+  /** The words next sends, with the two version sentences left out: older words. */
+  const olderWords = () => {
+    const { check_version: _a, check_version_decide: _b, ...why } = NEXT_WORDS.why;
+    return { ...NEXT_WORDS, why };
+  };
+
+  /** next_job() called straight, inside a transaction rolled back, so nothing it claims stays. */
+  async function rolledBack<T>(fn: (tx: postgres.TransactionSql) => Promise<T>): Promise<T> {
+    let out: T | undefined;
+    await fixture.owner.begin(async (tx) => {
+      out = await fn(tx);
+      throw new Error("rolled back");
+    }).catch((error: Error) => {
+      if (error.message !== "rolled back") throw error;
+    });
+    return out!;
+  }
+
+  test("14. at 0 next answers exactly as main's next_job() did, with a version waiting", async () => {
+    const { owner, w1, w2, name, v1 } = await documented(0);
+    await propose(w2, name, v1);
+    const source = readFileSync(new URL("../migrations/0134_task_upkeep.sql", import.meta.url), "utf8");
+    const start = source.indexOf("CREATE FUNCTION schellingaf.next_job(p_space_name text, p_actor bytea, p_job text, p_tag text, p_number integer,");
+    const main = source.slice(start, source.indexOf("END $$;", start) + "END $$;".length)
+      .replace("CREATE FUNCTION schellingaf.next_job(", "CREATE FUNCTION schellingaf.next_job_main(");
+    const key = Buffer.from(w1.peerId, "hex");
+    const times = (x: unknown) => JSON.stringify(x).replace(/\d{4}-\d\d-\d\dT[\d:.]+(Z|[+-]\d\d:\d\d)/g, "<time>");
+    for (const scene of ["no task", "an open task"]) {
+      if (scene === "an open task") await added(owner, name);
+      for (const job of ["any", "check", "work"]) {
+        const theirs = await rolledBack(async (tx) => {
+          await tx.unsafe(main);
+          return (await tx`select schellingaf.next_job_main(${name}, ${key}, ${job}, null, null, ${tx.json(NEXT_WORDS as never)}, 3, 60, 30, 10000, 2, 4) as out`)[0]!.out;
+        });
+        const mine = await rolledBack(async (tx) =>
+          (await tx`select schellingaf.next_job(${name}, ${key}, ${job}, null, null, ${tx.json(NEXT_WORDS as never)}, 3, 60, 30, 10000, 2, 4) as out`)[0]!.out);
+        assert.equal(times(mine), times(theirs), `${scene}, job ${job}`);
+      }
+    }
+  });
+
+  test("38. a writer is handed the waiting version with job any, as 6.3 says; its author, a confirmer and a replier are not", async () => {
+    const { owner, w1, w2, w3, coordinator, name, v1 } = await documented(2);
+    const p = await propose(w2, name, v1);
+    const out = await job(w1, name);
+    const { notice, ...answer } = out;
+    assert.equal(typeof notice, "string");
+    assert.deepEqual(answer, {
+      space: name, job: "check", why: why("check_version", { seq: Number(p.seq), given: 0, required: 2 }),
+      verify: true, renewed: false, task: null,
+      version: {
+        post_id: p.post_id, seq: String(p.seq), author: w2.peerId, posted_at: await postedAt(p.post_id), summary: TEST_TITLE,
+        waits_for: { decision: ["owner", "admin", "coordinator"], confirmations: { given: [], required: 2 } },
+      },
+    });
+    assert.notEqual((await job(w2, name)).job, "check", "its author");
+    assert.equal((await call("POST", `/v1/spaces/${name}/posts`, w3.token, { kind: "go", body: "Holds.", reply_to: p.post_id })).status, 201);
+    assert.notEqual((await job(w3, name)).job, "check", "a confirmer");
+    assert.equal((await job(w1, name)).why, why("check_version", { seq: Number(p.seq), given: 1, required: 2 }));
+    const replier = await agent();
+    await grant(owner, name, replier, "writer");
+    assert.equal((await call("POST", `/v1/spaces/${name}/posts`, replier.token, { kind: "obs", body: "Page 3 is wrong.", reply_to: p.post_id })).status, 201);
+    assert.notEqual((await job(replier, name)).job, "check", "a KEY that replied");
+    // job work, a tag and a number never hand one.
+    assert.equal((await job(w1, name, { job: "work" })).version, undefined);
+    assert.equal((await job(w1, name, { tag: "pages" })).version, undefined);
+    await added(owner, name);
+    assert.equal((await job(w1, name, { number: 1 })).job, "work");
+
+    // A version that sets the stage goes to a decider alone, with its stage.
+    const staged = await documented(1);
+    const s = await propose(staged.w2, staged.name, staged.v1, { data: { stage: { word: "merged", note: "All in." } } });
+    assert.notEqual((await job(staged.w1, staged.name)).job, "check");
+    const decide = await job(staged.coordinator, staged.name);
+    assert.equal(decide.job, "check");
+    assert.equal(decide.why, why("check_version_decide", { seq: Number(s.seq) }));
+    assert.deepEqual(decide.version.stage, { word: "merged", note: "All in." });
+    assert.deepEqual(decide.version.waits_for, { decision: ["owner", "admin", "coordinator"] });
+    void coordinator;
+  });
+
+  test("39. a stranger's version is never handed, with job any or job check", async () => {
+    const { w1, name, v1 } = await documented(1, { join_policy: "open" });
+    const stranger = await agent();
+    await propose(stranger, name, v1);
+    assert.equal((await job(w1, name)).job, "stop");
+    assert.equal((await job(w1, name, { job: "check" })).job, "stop");
+  });
+
+  test("40. a check that waited comes first; then the version, before an open task and a task review; job work takes the task", async () => {
+    const { owner, w1, w2, w3, coordinator, name, v1 } = await documented(2);
+    assert.equal((await call("PATCH", `/v1/spaces/${name}`, owner.token, { task_confirmations: 1 })).status, 200);
+    const doer = await agent();
+    await grant(owner, name, doer, "writer");
+    await added(owner, name, { title: "Page 1" });
+    await added(owner, name, { title: "Page 2" });
+    await did(doer, name, 1);
+    await doneAgo(name, 1, 61);
+    const p = await propose(w2, name, v1);
+    const first = await job(w1, name);
+    assert.deepEqual([first.job, first.task?.number], ["check", 1]);
+    // The offer to w1 holds task 1's one place, so w3 is handed the version, before task 2.
+    const second = await job(w3, name);
+    assert.deepEqual([second.job, second.version?.post_id], ["check", p.post_id]);
+    const work = await job(w3, name, { job: "work" });
+    assert.deepEqual([work.job, work.task?.number], ["work", 2]);
+    // A coordinator, whom a task review would wait for, is handed the version first, to decide.
+    const decide = await job(coordinator, name);
+    assert.deepEqual([decide.job, decide.why], ["check", why("check_version_decide", { seq: Number(p.seq) })]);
+  });
+
+  test("41. job check: the version when no done task waits, and the done task when one does", async () => {
+    const { owner, w1, w2, name, v1 } = await documented(2);
+    const p = await propose(w2, name, v1);
+    const asked = await job(w1, name, { job: "check" });
+    assert.deepEqual([asked.job, asked.version?.post_id, asked.task], ["check", p.post_id, null]);
+    const doer = await agent();
+    await grant(owner, name, doer, "writer");
+    await added(owner, name);
+    await did(doer, name, 1);
+    const task = await job(w1, name, { job: "check" });
+    assert.deepEqual([task.job, task.task?.number, task.version], ["check", 1, undefined]);
+  });
+
+  test("42. no words, or older words without check_version, never hand a version", async () => {
+    const { w1, w2, name, v1 } = await documented(1);
+    await propose(w2, name, v1);
+    const key = Buffer.from(w1.peerId, "hex");
+    const answers = await rolledBack(async (tx) => {
+      const out: unknown[] = [];
+      for (const j of ["any", "check"]) {
+        out.push((await tx`select schellingaf.next_job(${name}, ${key}, ${j}) as out`)[0]!.out);
+        out.push((await tx`select schellingaf.next_job(${name}, ${key}, ${j}, null, null, ${tx.json(olderWords() as never)}) as out`)[0]!.out);
+        out.push((await tx`select schellingaf.next_job(${name}, ${key}, ${j}, null, null, ${tx.json(olderWords() as never)}, 3, 60, 30, 10000, 2, 4) as out`)[0]!.out);
+      }
+      out.push((await tx`select schellingaf.next_task(${name}, ${key}, null, true) as out`)[0]!.out);
+      return out as Record<string, unknown>[];
+    });
+    for (const a of answers) assert.equal(a.version, undefined, JSON.stringify(a));
+    // And the same call with today's words does.
+    const today = await rolledBack(async (tx) =>
+      (await tx`select schellingaf.next_job(${name}, ${key}, 'any', null, null, ${tx.json(NEXT_WORDS as never)}, 3, 60, 30, 10000, 2, 4) as out`)[0]!.out);
+    assert.equal((today as { job: string }).job, "check");
   });
 });
