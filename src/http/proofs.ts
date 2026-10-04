@@ -78,7 +78,7 @@ export function mountProofs(app: Hono<Env>, db: Db, service: ServiceState): void
       if (!space) return null;
       if (!space.readable) throw await readDenied(sql, space.space_id, space.owner, me);
       const [post] = await sql<PostRow[]>`
-        select ${postColumns(sql, "full", true)}
+        select ${postColumns(sql, "full", { proof: true })}
          where p.space_id = ${space.space_id}::uuid and p.seq = ${seq.toString()}::bigint`;
       if (!post || post.object_id === null) return { space, post: null, checkpoint: null, leaves: [] };
       // The first checkpoint ending at or after the post: one probe of the index on

@@ -50,6 +50,7 @@ import { floorPlace, optionalBearer, type Env } from "./app.ts";
 import { toHex } from "../domain/keys.ts";
 import { recordReturned } from "./log.ts";
 import { sourceWithdrawn } from "./findings.ts";
+import { contestedAny } from "./contested.ts";
 import { SEEKS_PER_MINUTE, concurrencyGate, inFlightShares, limitRead, readKey, SEEKS_PER_CALLER } from "./ratelimit.ts";
 import { byteLength, queryFlag, requireCategoryFilter } from "../domain/validate.ts";
 import { category as registerCategory, orderOf } from "../surface/categories.ts";
@@ -318,6 +319,8 @@ type HitRow = PostRow & {
   /** A finding's status as every read shows it, withdrawn once retracted; null on any other post. */
   finding_status: string | null;
   source_withdrawn: boolean;
+  /** A finding's mark: whether a check's reject or a member's warn or fail contests it. */
+  contested: boolean;
 };
 
 export function mountSeek(app: Hono<Env>, db: Db): void {
@@ -586,7 +589,8 @@ export function mountSeek(app: Hono<Env>, db: Db): void {
           // posts_retracts_idx, which hold only the posts that replace or retract. A
           // version is never counted as replacing a post, as there. And for a finding its
           // status, from its own row, and for any hit whether a post it cites was replaced
-          // or retracted, as GET /v1/spaces/{name}/findings says them.
+          // or retracted, as GET /v1/spaces/{name}/findings says them, and for a finding
+          // whether anything contests it, which its snippet then leaves out.
           const ids = hits.map((h) => h.post_id);
           const rows = await sql<HitRow[]>`
             select sp.categories as space_categories,
@@ -597,7 +601,8 @@ export function mountSeek(app: Hono<Env>, db: Db): void {
                    (select case when f.retracted_by is not null then 'withdrawn' else f.status end
                       from schellingaf.findings f where f.post_id = p.post_id) as finding_status,
                    ${sourceWithdrawn(sql, "p.post_id")} as source_withdrawn,
-                   ${postColumns(sql, detail, false, true)}
+                   case when p.kind = 'finding' then ${contestedAny(sql, "p.post_id", "finding")} else false end as contested,
+                   ${postColumns(sql, detail, { mark: false, names: true })}
              where p.post_id = any(${ids}::uuid[])
                and p.unavailable is null
                ${kindClause(sql, kinds)}
@@ -630,6 +635,8 @@ export function mountSeek(app: Hono<Env>, db: Db): void {
             ...(row.finding_status !== null
               ? { status: row.finding_status, source_withdrawn: row.source_withdrawn }
               : row.source_withdrawn ? { source_withdrawn: true } : {}),
+            // A finding a check's reject or a member's warn or fail contests, only then.
+            ...(row.contested ? { contested: true } : {}),
           };
           const item = {
             ...render(row, detail),

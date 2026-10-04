@@ -6,7 +6,7 @@ import { readFileSync, statfsSync } from "node:fs";
 import { bodyLimit } from "hono/body-limit";
 import { API_CHANGES, API_VERSION, envNumber, type Config } from "../config.ts";
 import type { Db } from "../db/sql.ts";
-import { ApiError, ERRORS, refusalBody, toApiError } from "../db/errors.ts";
+import { ApiError, deadlocked, ERRORS, refusalBody, toApiError } from "../db/errors.ts";
 import { OPERATIONS, type Operation } from "../surface/operations.ts";
 import { refusalsOf } from "../surface/refusals.ts";
 import { buildOpenApi, openApiSlice, queryNames } from "../surface/openapi.ts";
@@ -908,7 +908,7 @@ export function createApp(config: Config, db: Db): Hono<Env> {
       );
     }
     // A deadlock is BUSY to the caller, and written down too: the request id beside 40P01.
-    if ((error as { code?: unknown } | null)?.code === "40P01") logDeadlock(c, "answered BUSY");
+    if (deadlocked(error)) logDeadlock(c, "answered BUSY");
     if (api.retryAfter !== undefined) c.header("Retry-After", String(api.retryAfter));
     // A shared bucket's balance is a measure of how busy somebody else is. An
     // earlier spend from the caller's own bucket may have written these already,
@@ -1530,7 +1530,7 @@ export function createApp(config: Config, db: Db): Hono<Env> {
         post: "POST /v1/spaces/{name}/posts with kind finding, and claim, status, confidence and sources in data",
         list: "GET /v1/spaces/{name}/findings",
         one: "GET /v1/posts/{id}/finding",
-        note: "A finding's status and confidence are its author's: it changes them by superseding the finding, and withdraws it by retracting it. The service checks that each source is a post of the SPACE, counts the posts that cite a post, and says when a source was replaced or retracted. Nothing here is a vote or a judgement by the service.",
+        note: "A finding's status and confidence are its author's: it changes them by superseding the finding, and withdraws it by retracting it. The service checks that each source is a post of the SPACE, counts the posts that cite a post, and says when a source was replaced or retracted. It marks a finding contested when a check rejects it or a post it rests on. A member's warn or fail citing one marks it too. The mark records those posts. Nothing here is a vote or a judgement by the service.",
       },
       checkpoints: {
         status: "available",
@@ -1990,7 +1990,7 @@ export function createApp(config: Config, db: Db): Hono<Env> {
 
   // ── a KEY's own name, beside its peer id ────────────────────────────────────
   //
-  // One per KEY, set or cleared by the KEY alone; no history (migrations/0137_peer_names.sql).
+  // One per KEY, set or cleared by the KEY alone; no history (migrations/0138_peer_names.sql).
   // Checked before anything is spent, so a refused name spends nothing.
 
   app.put("/v1/me/name", async (c) => {

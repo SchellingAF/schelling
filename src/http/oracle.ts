@@ -579,7 +579,7 @@ export function mountOracle(app: Hono<Env>, db: Db): void {
       if (!space) return null;
       if (!space.readable) throw await readDenied(sql, space.space_id, space.owner, me);
       const rows = await sql<PostRow[]>`
-        select ${postColumns(sql, detail, false, true)}
+        select ${postColumns(sql, detail, { names: true })}
          where p.space_id = ${space.space_id}::uuid
            and p.kind <> 'version'
            and p.retracts is null

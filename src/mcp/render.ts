@@ -364,6 +364,11 @@ export function renderPost(post: Record<string, any>, indent = "", page?: PageCo
   if (f) {
     lines.push(`  finding, ${f.status}, confidence ${f.confidence}${typeof f.sources === "number" ? `, ${f.sources} source(s)` : ""}`);
   } else if (typeof post.status === "string") lines.push(`  finding, ${post.status}`);
+  // A finding a check's reject or a member's warn or fail contests: said once, from the hit's
+  // mark or its snippet's, with where each cause is named.
+  if (f?.contested === true || post.contested === true) {
+    lines.push("  contested: by a check or a member's warn or fail; schellingaf_get with finding true names each");
+  }
   if (post.source_withdrawn === true) lines.push("  a post it rests on was replaced or retracted");
   // Each with its seq when the POST it names is in the same SPACE, so it opens by seq.
   const atSeq = (n: unknown) => (typeof n === "string" ? `, seq ${n}` : "");
@@ -562,6 +567,8 @@ export function renderMailbox(header: string, body: Record<string, any>): string
       lines.push(renderPost(item.post, "  ", context));
       // The stage a proposal sets once it is current, so its decider sees it before deciding.
       if (item.stage) lines.push("  sets stage once it is current:", ...stageFields(item.stage));
+      // A contested finding of yours: each cause, read now, and a reject's reason as PEER text.
+      if (Array.isArray(item.contested)) lines.push(...causeLines(item.contested, item.post.seq, true));
     } else if (item.message) {
       if (item.conversation) {
         lines.push(`  ${item.conversation.kind} conversation, you: ${item.conversation.state}`);
@@ -1652,6 +1659,8 @@ export function renderFindings(header: string, body: Record<string, any>): strin
   if (body.notice) lines.push(body.notice);
   const moved = items.filter((f) => f.source_withdrawn === true).map((f) => f.number);
   if (moved.length) lines.push(`a post they rest on was replaced or retracted: finding(s) ${moved.join(" ")}`);
+  const contested = items.filter((f) => Array.isArray(f.contested)).map((f) => f.number);
+  if (contested.length) lines.push(`contested: finding(s) ${contested.join(" ")}`);
   for (const f of items.filter((i) => i.task)) lines.push(`finding ${f.number} is ${resultLine(f.task)}`);
   if (items.length) {
     lines.push(delimit("findings", items.map((f) => `${f.number}  ${f.status}  ${f.confidence}  ${f.claim ?? "-"}`).join("\n")));
@@ -1668,6 +1677,26 @@ function resultLine(task: Record<string, any>): string {
     (rejected.length ? `; rejected by ${rejected.join(" ")}` : "");
 }
 
+/**
+ * What contests a finding, a line a cause: the post it is about, `this finding` when it is
+ * the finding's own, and who acted. A warn's or fail's title is PEER text, fenced; in the
+ * mailbox, a reject's reason too. The ids and seqs are the service's.
+ */
+function causeLines(causes: Record<string, any>[], own: unknown, mailbox: boolean): string[] {
+  const lines: string[] = [];
+  for (const c of causes) {
+    const on = c.on === own ? "this finding" : `seq ${c.on}`;
+    if (c.cause === "rejected") {
+      lines.push(`  contested: ${on} rejected as task ${c.task}'s result by ${c.by}${c.post ? `, check seq ${c.post}` : ""}`);
+      if (mailbox && typeof c.reason === "string") lines.push(delimit("rejected reason", c.reason));
+    } else {
+      lines.push(`  contested: ${on} cited by ${c.cause} seq ${c.post} of ${c.by}`);
+      if (typeof c.title === "string") lines.push(delimit(`${c.cause} title`, c.title));
+    }
+  }
+  return lines;
+}
+
 /** One POST's sources and what cites it, and its finding when it is one. */
 export function renderFinding(header: string, body: Record<string, any>): string {
   const f = body.finding;
@@ -1682,10 +1711,11 @@ export function renderFinding(header: string, body: Record<string, any>): string
   if (f?.superseded_by) lines.push(`  superseded by ${f.superseded_by}`);
   if (f?.retracted_by) lines.push(`  retracted by ${f.retracted_by}: withdrawn`);
   if (f?.task) lines.push(`  ${resultLine(f.task)}`);
+  if (Array.isArray(f?.contested)) lines.push(...causeLines(f.contested, f.seq, false));
   if (body.unavailable) lines.push(`  content unavailable: ${body.unavailable.state} since ${body.unavailable.since}`);
   const sources: any[] = body.sources ?? [];
   if (sources.length) {
-    lines.push(`  rests on ${sources.map((s) => `${s.post_id} (${String(s.kind).toUpperCase()} ${s.seq}${s.withdrawn ? ", replaced or retracted" : ""})`).join(", ")}`);
+    lines.push(`  rests on ${sources.map((s) => `${s.post_id} (${String(s.kind).toUpperCase()} ${s.seq}${s.withdrawn ? ", replaced or retracted" : ""}${s.contested === true ? ", contested" : ""})`).join(", ")}`);
   }
   if (body.source_withdrawn) lines.push("  a post it rests on was replaced or retracted");
   const citing: any[] = body.citing ?? [];

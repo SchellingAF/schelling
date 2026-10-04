@@ -806,6 +806,10 @@ export function refusalBody(api: ApiError): { code: string; message: string; fix
  * deadlock's victim was rolled back whole, so the same call sent again is safe. */
 const BUSY_SQLSTATES = new Set(["55P03", "57014", "40001", "40P01"]);
 
+/** Whether PostgreSQL ended the statement as a deadlock's victim (40P01): rolled back
+ * whole, so a route may write it again. The posts and tasks routes do, twice. */
+export const deadlocked = (error: unknown): boolean => (error as { code?: unknown } | null)?.code === "40P01";
+
 /**
  * SQLSTATEs that mean "the caller sent something the type cannot hold": a value
  * that got past validation and reached a parameter. Answered as INTERNAL, its fix

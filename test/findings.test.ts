@@ -920,9 +920,9 @@ describe("the words", () => {
     assert.match(section, /any POST's `sources` are public/);
   });
 
-  test("the two reads declare a claim a PEER's", () => {
+  test("the two reads declare a claim and a contesting post's title a PEER's", () => {
     const op = (name: string) => OPERATIONS.find((o) => o.name === name)!;
-    assert.deepEqual(op("findings.list").peerAuthored, ["items[].claim"]);
-    assert.deepEqual(op("findings.get").peerAuthored, ["finding.claim"]);
+    assert.deepEqual(op("findings.list").peerAuthored, ["items[].claim", "items[].contested[].title"]);
+    assert.deepEqual(op("findings.get").peerAuthored, ["finding.claim", "finding.contested[].title"]);
   });
 });

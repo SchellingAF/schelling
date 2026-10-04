@@ -9,7 +9,7 @@ import { Hono, type Context } from "hono";
 import type { PendingQuery, Sql } from "postgres";
 import type { Config } from "../config.ts";
 import type { Db } from "../db/sql.ts";
-import { ApiError, renderableDetail, toApiError } from "../db/errors.ts";
+import { ApiError, deadlocked, renderableDetail, toApiError } from "../db/errors.ts";
 import { toHex } from "../domain/keys.ts";
 import { checkAssertion, importPasskeyKey, isPasskeyAlgorithm } from "../domain/passkeys.ts";
 import { objectIdOf, passkeyChallengeOf, readPostObject, type PostFields } from "../domain/objects.ts";
@@ -736,10 +736,6 @@ type Item = {
 /** What may sit beside posts, at the top of a call that sends several POSTS. */
 const BATCH_FIELDS = ["posts", "idempotency_key", "dry_run"];
 
-/** Whether PostgreSQL ended this write as a deadlock's victim: rolled back whole, and safe
- * to write again. */
-const deadlocked = (error: unknown) => (error as { code?: unknown } | null)?.code === "40P01";
-
 /**
  * task_done()'s refusal of an upkeep task's post, as a POST carrying `task` meets it. That
  * POST is the caller's own, in this SPACE, written now, so only its kind can be wrong; the
@@ -1168,7 +1164,12 @@ export function mountPosts(app: Hono<Env>, config: Config, db: Db, service: Serv
     // task the POST cannot change refuses it, and both are rolled back. A check refused
     // after a reject reopened the task is answered, not raised, with its notice: thrown
     // here, so the notice rolls back with the POST. A replayed POST changes no task again.
-    type Wrote = { receipt: Record<string, unknown>; attached: unknown[]; task: Record<string, unknown> | null; delivered: unknown };
+    // A member's warn or fail that cites posts may contest findings, whose authors are told
+    // in the same transaction, after its task part (contest_notices(),
+    // migrations/0137_contested_findings.sql).
+    const objects = (post: PostInput) => (post.kind === "warn" || post.kind === "fail") && sourcesOf(post).length > 0;
+    // contested is what contest_notices() delivered, kept apart from the receipt's own.
+    type Wrote = { receipt: Record<string, unknown>; attached: unknown[]; task: Record<string, unknown> | null; delivered: unknown; contested: unknown };
     const writeItem = async (sql: typeof db.write, item: Item, i: number, done: Wrote[]): Promise<Wrote> => {
       if (item.replyKey !== null) item.post = { ...item.post, replyTo: String(done[item.replyKey]!.receipt.post_id) };
       const [row] = await appendPost(sql, item, i);
@@ -1180,7 +1181,15 @@ export function mountPosts(app: Hono<Env>, config: Config, db: Db, service: Serv
         const [list] = await attachFiles(sql, receipt.post_id, item.attachments, replayed);
         attached = list!.list;
       }
-      if (item.task === null || replayed) return { receipt, attached, task: null, delivered: null };
+      // After the task part, never before: a reject tells the findings it contests, free
+      // (task_check()), and this call then finds them told and charges nobody for them.
+      const contest = async () => {
+        if (replayed || !objects(item.post)) return null;
+        const [told] = await sql<{ delivered: unknown }[]>`
+          select schellingaf.contest_notices(${String(receipt.post_id)}::uuid, ${bearer.peerId}) as delivered`;
+        return told!.delivered;
+      };
+      if (item.task === null || replayed) return { receipt, attached, task: null, delivered: null, contested: await contest() };
       const { number, revision, check, reason } = item.task;
       // A finish without revision is refused TASK_CHANGED once the task changed after its
       // holder took it, as done is (migrations/0130_task_changes.sql).
@@ -1193,16 +1202,18 @@ export function mountPosts(app: Hono<Env>, config: Config, db: Db, service: Serv
                                           ${String(receipt.post_id)}::uuid, ${reason}, true) as out`;
       const { refused, detail, delivered, task } = out!.out;
       if (typeof refused === "string") throw new ApiError(refused, typeof detail === "string" ? { detail } : {});
-      return { receipt, attached, task: short(shown(task as Record<string, unknown>)), delivered };
+      return { receipt, attached, task: short(shown(task as Record<string, unknown>)), delivered, contested: await contest() };
     };
 
-    // A POST with neither attachments nor a task is the one statement it always was. Any
-    // other call is written in one transaction: every POST and its task, or nothing.
+    // A POST with neither attachments nor a task, and not a warn or fail citing posts, is
+    // the one statement it always was. Any other call is written in one transaction: every
+    // POST, its task and its contested notices, or nothing.
     //
     // Either is written again, up to twice, when PostgreSQL ends it as a deadlock's victim.
     // append_post locks one POST's mailboxes in ascending peer id, but a batch writes its
     // POSTS in order, so across POSTS it takes mailboxes in the order its items name them,
-    // and a POST's task part locks more after its POST's: two calls can wait on each other.
+    // and a POST's task part, or a warn's contested notices, locks more after its POST's:
+    // two calls, or a call and a reject on the tasks route, can wait on each other.
     // Locking every mailbox before the first POST would take them before append_post takes
     // the SPACE row and its buckets, an inversion of its own, so the victim is retried. It
     // rolled back whole, and nothing it spent outside the write is spent again or lost: the
@@ -1211,7 +1222,7 @@ export function mountPosts(app: Hono<Env>, config: Config, db: Db, service: Serv
     // pending files are attached inside the write; and nothing is told or charged until it
     // commits. So a retry answers what one clean run would. A third deadlock is BUSY.
     const writeOnce = async (): Promise<Wrote[]> => {
-      if (!batch && single.attachments.length === 0 && single.task === null) {
+      if (!batch && single.attachments.length === 0 && single.task === null && !objects(single.post)) {
         const [row] = await appendPost(db.write, single, 0);
         const receipt = row!.receipt;
         let attached: unknown[] = [];
@@ -1220,7 +1231,7 @@ export function mountPosts(app: Hono<Env>, config: Config, db: Db, service: Serv
           const [compared] = await attachFiles(db.write, receipt.post_id, [], true);
           attached = compared!.list;
         }
-        return [{ receipt, attached, task: null, delivered: null }];
+        return [{ receipt, attached, task: null, delivered: null, contested: null }];
       }
       return await db.write.begin(async (tx) => {
         const sql = tx as unknown as typeof db.write;
@@ -1308,10 +1319,11 @@ export function mountPosts(app: Hono<Env>, config: Config, db: Db, service: Serv
     recordHeads(c, [
       ...results.flatMap((w) => headsOf(name, w.receipt)),
       ...results.flatMap((w) => (Array.isArray(w.delivered) && w.delivered.length > 0 ? headsOf(null, { delivered: w.delivered }) : [])),
+      ...results.flatMap((w) => (Array.isArray(w.contested) && w.contested.length > 0 ? headsOf(null, { delivered: w.contested }) : [])),
     ], { replayed });
 
     const answers: Record<string, unknown>[] = [];
-    for (const [i, { receipt: written, attached }] of results.entries()) {
+    for (const [i, { receipt: written, attached, contested }] of results.entries()) {
       const item = items[i]!;
       const { post, sealed } = item;
       let receipt = written;
@@ -1358,12 +1370,17 @@ export function mountPosts(app: Hono<Env>, config: Config, db: Db, service: Serv
       // nothing, and a refused post never reached this line. An oracle space's own
       // notices (a proposal to decide, one out of date, a watched document changed)
       // are the service's, not the author's, and spend nobody's allowance. A citation
-      // is the author's, as a reply is.
-      const charged = Array.isArray(delivered)
-        ? (delivered as { recipient: string; reason?: string }[]).filter(
-            (d) => d.reason === undefined || d.reason === "to" || d.reason === "reply" || d.reason === "cited",
-          )
-        : [];
+      // is the author's, as a reply is, and so is each contested notice a warn or fail wrote:
+      // known only after the write, so nobody was quieted for it beforehand.
+      const contests = Array.isArray(contested) ? (contested as { recipient: string }[]) : [];
+      const charged = [
+        ...(Array.isArray(delivered)
+          ? (delivered as { recipient: string; reason?: string }[]).filter(
+              (d) => d.reason === undefined || d.reason === "to" || d.reason === "reply" || d.reason === "cited",
+            )
+          : []),
+        ...contests,
+      ];
       if (!replayed && charged.length > 0) {
         await charge(
           db,
@@ -1376,8 +1393,15 @@ export function mountPosts(app: Hono<Env>, config: Config, db: Db, service: Serv
       // Who was named and not told: a recipient whose allowance for notices is spent, and
       // one who blocks the messages of a KEY with no role here. Told is told by any notice
       // of this post, the service's own included: a cited author handed a proposal to
-      // decide, or the document it watches, has this post in its mailbox.
-      const told = new Set(Array.isArray(delivered) ? (delivered as { recipient: string }[]).map((d) => d.recipient) : []);
+      // decide, or the document it watches, has this post in its mailbox; one told that
+      // its finding is contested has that finding, whether this post's reject told it, free,
+      // or contest_notices() did.
+      const rejected = results[i]!.delivered;
+      const told = new Set([
+        ...(Array.isArray(delivered) ? (delivered as { recipient: string }[]) : []),
+        ...contests,
+        ...(Array.isArray(rejected) ? (rejected as { recipient: string; reason: string }[]).filter((d) => d.reason === "contested") : []),
+      ].map((d) => d.recipient));
       const scene = scenes[i];
       const notNotified = replayed || !scene ? [] : scene.reachable.filter((recipient) => !told.has(recipient));
       // Whether its title or a sentence ran long: see hintOf.
@@ -1539,7 +1563,7 @@ export function mountPosts(app: Hono<Env>, config: Config, db: Db, service: Serv
       // SPACE is read whole and sorted. On a space of 45,575 posts, 36.5 ms
       // against 0.9 ms, growing with the SPACE. This is the most-used read.
       const page = sql<PostRow[]>`
-        select ${postColumns(sql, rowDetail, ndjson || proofAsked, !ndjson)}
+        select ${postColumns(sql, rowDetail, { proof: ndjson || proofAsked, names: !ndjson })}
          where p.space_id = ${space.space_id}::uuid
            ${order === "desc" ? sql`` : sql`and p.seq > ${after.toString()}::bigint`}
            ${kindClause(sql, kinds)}
@@ -1719,11 +1743,11 @@ export function mountPosts(app: Hono<Env>, config: Config, db: Db, service: Serv
     const rows = await db.readTx(me, async (sql) =>
       bySeq
         ? sql<PostRow[]>`
-            select ${postColumns(sql, detail, proofAsked, true)}
+            select ${postColumns(sql, detail, { proof: proofAsked, names: true })}
              where p.space_id = (select s.space_id from schellingaf.spaces s where s.name = ${space!})
                and p.seq = any(${asked}::bigint[])`
         : sql<PostRow[]>`
-            select ${postColumns(sql, detail, proofAsked, true)}
+            select ${postColumns(sql, detail, { proof: proofAsked, names: true })}
              where p.post_id = any(${asked}::uuid[])`,
     );
 
@@ -1800,7 +1824,7 @@ export function mountPosts(app: Hono<Env>, config: Config, db: Db, service: Serv
 
     const row = await db.readTx(me, async (sql) => {
       const [post] = await sql<PostRow[]>`
-        select ${postColumns(sql, "full", proof, true)}
+        select ${postColumns(sql, "full", { proof, names: true })}
          where p.post_id = ${id}::uuid`;
       if (!post) return null;
       // How many replied, and how many documents cite it, so a reader asks which only

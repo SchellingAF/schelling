@@ -11,7 +11,7 @@ import assert from "node:assert/strict";
 import { readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { ERRORS, fromDatabaseError, renderableDetail } from "../src/db/errors.ts";
+import { deadlocked, ERRORS, fromDatabaseError, renderableDetail } from "../src/db/errors.ts";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -140,6 +140,18 @@ describe("every refusal an agent can meet is mapped", () => {
       assert.equal(mapped.code, "BUSY", code);
       assert.equal(mapped.retryAfter, 1, code);
     }
+  });
+
+  test("one helper says what a deadlock's victim is, and no route tests 40P01 itself", () => {
+    assert.equal(deadlocked({ code: "40P01" }), true);
+    for (const other of [{ code: "40001" }, { code: 40 }, new Error("deadlock"), null, undefined, "40P01"]) {
+      assert.equal(deadlocked(other), false, JSON.stringify(other));
+    }
+    const own = walk(path.join(ROOT, "src"))
+      .filter((file) => !file.endsWith(path.join("db", "errors.ts")))
+      .filter((file) => readFileSync(file, "utf8").includes('"40P01"'))
+      .map((file) => path.relative(ROOT, file));
+    assert.deepEqual(own, [], "test a deadlock with deadlocked() from src/db/errors.ts");
   });
 
   test("a message request limit carries its wait in seconds, and no detail", () => {

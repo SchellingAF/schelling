@@ -18,6 +18,7 @@ import { AuthorNames, authorNamesField, boundedNumber, budgetCut, cost, cursor, 
 import { messageColumns, messageCost, renderMessage, type MessageRow } from "./messages.ts";
 import { floorPlace, requireBearer, type Env } from "./app.ts";
 import { mailboxStream, readWaiting, waitSeconds } from "./wait.ts";
+import { contestedOf } from "./contested.ts";
 
 type Delivery = {
   mailbox_seq: string;
@@ -160,7 +161,7 @@ export function mountMailbox(app: Hono<Env>, db: Db): void {
       const postIds = idsOf("post_id");
       const posts = postIds.length
         ? await sql<PostRow[]>`
-            select ${postColumns(sql, detail, false, true)}
+            select ${postColumns(sql, detail, { names: true })}
              where p.post_id = any(${postIds}::uuid[])`
         : [];
 
@@ -171,6 +172,18 @@ export function mountMailbox(app: Hono<Env>, db: Db): void {
         ? await sql<{ post_id: string; stage_word: string; stage_note: string | null }[]>`
             select v.post_id::text, v.stage_word, v.stage_note from schellingaf.oracle_versions v
              where v.post_id = any(${proposed}::uuid[]) and v.stage_word is not null`
+        : [];
+
+      // What contests a finding of the caller's, read now, for each contested notice on the
+      // page: a reject's reason included. Asked only when the page holds one, by the
+      // findings' primary key; a finding whose words are unavailable reads none.
+      const contestedIds = deliveries.filter((d) => d.reason === "contested" && d.post_id !== null).map((d) => d.post_id!);
+      const contests = contestedIds.length
+        ? await sql<{ post_id: string; contested: unknown[] | null }[]>`
+            select f.post_id::text, ${contestedOf(sql, "f.post_id", true)} as contested
+              from schellingaf.findings f
+              join schellingaf.visible_posts p on p.post_id = f.post_id
+             where f.post_id = any(${contestedIds}::uuid[])`
         : [];
 
       const requestIds = idsOf("request_id");
@@ -245,7 +258,7 @@ export function mountMailbox(app: Hono<Env>, db: Db): void {
                            as x(task_id, actor)) w`
         : [];
 
-      return { head: head?.head_seq ?? "0", deliveries, posts, stages, requests, messages, conversations, offers, tasks, checks, changes };
+      return { head: head?.head_seq ?? "0", deliveries, posts, stages, contests, requests, messages, conversations, offers, tasks, checks, changes };
     });
 
     const result = waitFor > 0
@@ -263,6 +276,7 @@ export function mountMailbox(app: Hono<Env>, db: Db): void {
 
     const postById = new Map(result.posts.map((p) => [p.post_id, p]));
     const stageById = new Map(result.stages.map((v) => [v.post_id, { word: v.stage_word, note: v.stage_note }]));
+    const causesById = new Map(result.contests.filter((x) => Array.isArray(x.contested)).map((x) => [x.post_id, x.contested!]));
     const requestById = new Map(result.requests.map((r) => [r.request_id, r]));
     const messageById = new Map(result.messages.map((m) => [m.message_id, m]));
     const conversationById = new Map(result.conversations.map((c) => [c.conversation_id, c]));
@@ -296,9 +310,12 @@ export function mountMailbox(app: Hono<Env>, db: Db): void {
       // A proposal's stage counts by the bytes it adds.
       const stage = post && d.reason === "proposal" ? stageById.get(post.post_id) : undefined;
       const author = post ? toHex(post.author_id) : null;
+      // A contested finding's causes, beside the post, while any holds; counted by their bytes.
+      const causes = post && d.reason === "contested" ? causesById.get(post.post_id) : undefined;
       const price = post
-        ? cost(post, detail) + (stage ? Math.ceil(Buffer.byteLength(JSON.stringify(stage), "utf8") / 3) : 0) +
-          Math.ceil(names.cost(author!, post.author_name) / 3)
+        ? cost(post, detail) + (stage ? Math.ceil(Buffer.byteLength(JSON.stringify(stage), "utf8") / 3) : 0)
+          + (causes ? Math.ceil(Buffer.byteLength(JSON.stringify(causes), "utf8") / 3) : 0)
+          + Math.ceil(names.cost(author!, post.author_name) / 3)
         : request || offer
           ? REQUEST_COST
           : message
@@ -313,6 +330,7 @@ export function mountMailbox(app: Hono<Env>, db: Db): void {
         envelope.post = render(post, detail);
         // A proposal's stage, beside the post, while the post is shown.
         if (stage && !(envelope.post as { unavailable?: unknown }).unavailable) envelope.stage = stage;
+        if (causes) envelope.contested = causes;
       } else if (message) {
         envelope.message = renderMessage(message, detail);
         const conversation = conversationById.get(message.conversation_id);

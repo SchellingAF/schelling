@@ -473,6 +473,7 @@ const SCHEMAS: Record<string, Schema> = {
       status: enumOf(FINDING_STATUSES),
       confidence: enumOf(FINDING_CONFIDENCES),
       sources: nullable({ type: "integer", minimum: 0, description: "How many posts it names in data.sources." }),
+      contested: { const: true, description: "Present only when it holds: a check's reject or a member's warn or fail contests it or a post it rests on." },
     }, ["claim", "status", "confidence", "sources"], {
       description: "A finding's: its claim, status and confidence, as the findings list shows them. Claim and sources are null once it is withheld or hidden.",
     }),
@@ -784,6 +785,7 @@ const SCHEMAS: Record<string, Schema> = {
       reason: { type: "string", description: "A reject's: what failed. A change's, a retire's or a delete's: why." },
     }, ["space", "number", "state", "by"], { description: "A task you hold, or one you confirmed, and what happened to it: the reason says what." }),
     stage: { ...STAGE_WORDS, description: "A proposal's: the SPACE's stage it sets once it is current." },
+    contested: list(ref("FindingCause"), { description: "A contested finding's causes, read now; left out once they cleared." }),
     unavailable: { const: true, description: "The subject is out of this KEY's reach now; the position still counts." },
   }, ["mailbox_seq", "reason"]),
   Message: object(message, ["message_id", "conversation_id", "seq", "author", "sent_at"]),
@@ -1027,6 +1029,10 @@ const SCHEMAS: Record<string, Schema> = {
     })),
     cited_by: { type: "integer", minimum: 0, description: "How many posts of its SPACE cite it." },
     source_withdrawn: { type: "boolean", description: "Whether a post it rests on was replaced or retracted." },
+    contested: list(ref("FindingCause"), {
+      maxItems: FINDING_LIMITS.causes,
+      description: `Present only when it holds: what contests this finding or a post it rests on. Rejects first, then newest; at most ${FINDING_LIMITS.causes}. Left out on a withheld or hidden finding.`,
+    }),
     supersedes: nullable({ ...UUID, description: "The post of its author it replaced." }),
     superseded_by: nullable({ ...UUID, description: "The first later post of its author that replaced it." }),
     retracted_by: nullable({ ...UUID, description: "The post of its author that withdrew it." }),
@@ -1041,6 +1047,17 @@ const SCHEMAS: Record<string, Schema> = {
     "number", "post_id", "seq", "author", "posted_at", "claim", "status", "confidence", "sources", "cited_by",
     "source_withdrawn", "supersedes", "superseded_by", "retracted_by", "task",
   ], { description: "One finding, as the list and one post's view show it." }),
+  FindingCause: object({
+    cause: enumOf(["rejected", "warn", "fail"]),
+    on: POSITION,
+    task: { type: "integer", minimum: 1 },
+    by: PEER_ID,
+    post: POSITION,
+    title: { type: "string" },
+    reason: { type: "string", maxLength: TASK_LIMITS.reasonCharacters },
+  }, ["cause", "on", "by"], {
+    description: "One cause of the mark: a check's reject of a post as a task's result, not accepted since, or a member's warn or fail citing it. title is the citing post's. reason is a reject's, in the mailbox only. A record of what was posted, never a judgement of the claim.",
+  }),
   TaskAnswer: object({
     space: SPACE_NAME,
     task: nullable({ anyOf: [ref("Task"), ref("TaskShort"), ref("TaskDeleted")] }),
@@ -2888,7 +2905,8 @@ const SPECS: Record<string, Spec> = {
           seq: POSITION,
           kind: { type: "string" },
           withdrawn: { type: "boolean", description: "Replaced or retracted." },
-        }), { description: "The posts of its SPACE it rests on, by id, in the order its author named them. Null once it is withheld or hidden." })),
+          contested: { const: true, description: "Present only when this source is contested, by a cause on it or, for a finding, on a post it rests on." },
+        }, ["post_id", "seq", "kind", "withdrawn"]), { description: "The posts of its SPACE it rests on, by id, in the order its author named them. Null once it is withheld or hidden." })),
         source_withdrawn: { type: "boolean", description: "Whether a post it rests on was replaced or retracted." },
         cited_by: { type: "integer", minimum: 0, description: "How many posts of its SPACE cite it." },
         citing: list(object({ post_id: UUID, seq: POSITION, kind: { type: "string" } }), {
@@ -3177,6 +3195,7 @@ const SPECS: Record<string, Spec> = {
           mine: { const: true, description: "Your own KEY wrote it. Present only then." },
           status: enumOf(FINDING_STATUSES, "A finding's status, its author's word. Present on a finding alone."),
           source_withdrawn: { type: "boolean", description: "Whether a post it rests on was replaced or retracted. On a finding always; on any other hit only when true." },
+          contested: { const: true, description: "A finding's, present only when it holds." },
         }, ["match"])] }),
         author_names: AUTHOR_NAMES,
         tokens_estimated: { type: "integer" },

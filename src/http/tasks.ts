@@ -23,7 +23,7 @@
 import { Hono, type Context } from "hono";
 import type { Sql } from "postgres";
 import type { Db } from "../db/sql.ts";
-import { ApiError } from "../db/errors.ts";
+import { ApiError, deadlocked } from "../db/errors.ts";
 import { toHex } from "../domain/keys.ts";
 import {
   optionalBoolean,
@@ -46,7 +46,7 @@ import { KIND_GROUPS, TASK_LIMITS, TASK_STATES } from "../surface/vocabulary.ts"
 import { boundedNumber, budgetCut, cursor, itemCost, optionalTokenBudget, readDenied } from "./postview.ts";
 import { LIMITS, spend } from "./ratelimit.ts";
 import { optionalBearer, requireBearer, type Env } from "./app.ts";
-import { headsOf, recordHeads } from "./log.ts";
+import { headsOf, logDeadlock, recordHeads } from "./log.ts";
 import { hintFor, hintForMany } from "../domain/voice.ts";
 import { NEXT_WORDS } from "../surface/next-words.ts";
 
@@ -163,6 +163,13 @@ export function mountTasks(app: Hono<Env>, db: Db): void {
    * rather than raised, because it wrote a notice with it, is thrown here, once that
    * notice is published. cost is the writes it spends: one, or for a retire one more a
    * replacement.
+   *
+   * A deadlock's victim (40P01) is written again, up to twice, then BUSY. A reject locks
+   * its notices' mailboxes after the SPACE, as a warn on the posts route does after its
+   * POST's, so the two can cross (migrations/0137_contested_findings.sql); retire's notice
+   * loop takes mailboxes one statement at a time and can cross one too. Each task function
+   * is one statement, so the victim rolled back whole, and the allowance was spent once,
+   * before it: a retry answers what one clean run would.
    */
   const write = async (
     c: Context<Env>,
@@ -172,7 +179,20 @@ export function mountTasks(app: Hono<Env>, db: Db): void {
     cost = 1,
   ) => {
     await spend(c, db, LIMITS.peerWrites(hex), cost);
-    const [row] = await call(db.write);
+    let rows: readonly { out: Answer }[];
+    for (let attempt = 0; ; attempt++) {
+      try {
+        rows = await call(db.write);
+        break;
+      } catch (error) {
+        if (attempt < 2 && deadlocked(error)) {
+          logDeadlock(c, `written again (${attempt + 1} of 2)`);
+          continue;
+        }
+        throw error;
+      }
+    }
+    const [row] = rows;
     const { delivered, refused, detail, ...out } = row!.out;
     if (Array.isArray(delivered) && delivered.length > 0) recordHeads(c, headsOf(null, { delivered }));
     if (typeof refused === "string") throw new ApiError(refused, typeof detail === "string" ? { detail } : {});

@@ -67,7 +67,7 @@ export const RESERVED_TAGS = new Set([
  * an unbroken run, so none passes for one either: i and l read as 1, and o as 0. Words such
  * as alice-bob and cool-code stay open, since a look-alike counts only without a break.
  * The CHECK of
- * migrations/0137_peer_names.sql holds this source byte for byte, so it has no backslash;
+ * migrations/0138_peer_names.sql holds this source byte for byte, so it has no backslash;
  * test/peer-names.test.ts holds the two equal. The route folds ASCII uppercase first.
  */
 export const PEER_NAME = /^(?=.{1,32}$)(?!.*(?:[0-9a-f][._-]?){8})(?!.*[0-9a-filo]{8})[a-z0-9]+(?:[._-][a-z0-9]+)*$/;
@@ -311,6 +311,12 @@ export const FINDING_LIMITS = {
   sources: 32,
   /** How many of the posts that cite one post its view names, newest first; cited_by counts them all. */
   citing: 200,
+  /** How many causes of its mark one finding shows: rejects first, then the newest. */
+  causes: 8,
+  /** How many findings one reject or one warn tells their authors of: cap('contested_notices'). */
+  contestedNotices: 200,
+  /** How many citing posts of one cited post a contested notice walks: cap('contested_scan'). */
+  contestedScan: 500,
 } as const;
 
 /** A SPACE's stage word: one lowercase word, as a task's tag is, of up to 32 characters. */
@@ -366,6 +372,9 @@ export const MAILBOX_REASONS = [
   "task_confirmed", "task_accepted", "task_rejected", "task_reopened", "task_changed", "task_retired", "task_deleted",
   // Another post naming yours in its data.sources.
   "cited",
+  // A finding of yours a check's reject or a member's warn or fail contested
+  // (migrations/0137_contested_findings.sql).
+  "contested",
 ] as const;
 
 /**
