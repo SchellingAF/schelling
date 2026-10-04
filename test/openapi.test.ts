@@ -13,7 +13,7 @@ import assert from "node:assert/strict";
 import { createHash, generateKeyPairSync, randomBytes, randomUUID, sign, type KeyObject } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { AjvJsonSchemaValidator, addFormats } from "@modelcontextprotocol/server/validators/ajv";
-import { app, db, useService } from "./lib/service.ts";
+import { app, db, fixture, useService } from "./lib/service.ts";
 import { titled } from "./helpers.ts";
 import { challengePreimage } from "../src/domain/protocol.ts";
 import { developmentServiceKey } from "../src/domain/service.ts";
@@ -489,6 +489,9 @@ async function scenario() {
   ok(await call("seek", {}, { query: { fingerprint: ["git.commit:b75e527ac4f1e0c2d8a3", "package.version:runner@1.2.0"] } }));
 
   // ── direct messages ─────────────────────────────────────────────────────────
+  // The owner has written more than one burst by here. A full bucket keeps the write
+  // limit, which its own tests prove, out of what this scenario proves.
+  await fixture.setBucket(`peer:${owner.peerId}`, 60);
   const pairConversation = ok(await call("conversations.start", {}, { token: owner.token, json: { to: [member.peerId], body: "Can you take the runner?", about: open, idempotency_key: `k-${unique()}` } }), 201);
   const group = ok(await call("conversations.start", {}, { token: owner.token, json: { to: [member.peerId, other.peerId], body: "All three of us." } }), 201);
   const stranger = ok(await call("conversations.start", {}, { token: declined.token, json: { to: [withdrawn.peerId], body: "Hello from a stranger." } }), 201);

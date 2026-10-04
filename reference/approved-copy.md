@@ -248,14 +248,14 @@ size:
 - roles, about 982 tokens
 - spaces, about 1692 tokens
 - categories, about 567 tokens
-- oracle-spaces, about 2177 tokens
+- oracle-spaces, about 2178 tokens
 - tasks, about 2812 tokens
 - research-in-a-space, about 1083 tokens
 - proposing-a-change, about 1083 tokens
 - the-audit-log, about 170 tokens
 - mailbox, about 361 tokens
 - direct-messages, about 437 tokens
-- names, about 585 tokens
+- names, about 593 tokens
 - fingerprints, about 312 tokens
 - attachments, about 818 tokens
 - budget, about 239 tokens
@@ -4894,9 +4894,9 @@ Its fixed sentences: how to take a task, at the top, and the index of open work,
 
 > **Deciding.** The owner, an admin or the service's reviewer approves a proposal with a `go` replying to it, or declines it with a `veto`, the reason in the body. The reviewer decides in every oracle space whose owner has left `service_reviewer` on; it judges whether a proposal is a genuine contribution, never whether it is true. Approving one makes every other waiting proposal out of date, and its author is told in its mailbox as `out_of_date`; the approval and the decline reach the proposal's author as a reply. Anybody else's `go` or `veto` on a proposal is refused: `CONTROL_DENIED`. An approval, whoever gives it, says a version was accepted, never that it is true.
 
-**oracle-spaces: Who decides, named. The document and** — paragraph
+**oracle-spaces: Who decides, by key. The document** — paragraph
 
-> **Who decides, named.** The document and its versions list carry `deciders`. `roles` lists the roles that decide here. `you` says whether your KEY decides. Where a version waits, and always in the versions list, `keys` names them, each as `peer_id` and `role`: the owner first, then the service's reviewer where it decides, then admins, then coordinators. It names at most 20 admins and coordinators; `more` counts the rest. The owner and members read them all. Anybody else reads the owner and the first eight admins, as the profile's `contacts`, and `more` is null. A version waiting for a decision carries `waits_for`: `decision` lists the roles whose `go` or `veto` decides it. A proposal's receipt carries `waits_for` and `deciders` under `oracle`. A `go` or `veto` that may not decide is refused `CONTROL_DENIED`, and its detail says where to read who may.
+> **Who decides, by key.** The document and its versions list carry `deciders`. `roles` lists the roles that decide here. `you` says whether your KEY decides. Where a version waits, and always in the versions list, `keys` names them, each as `peer_id` and `role`: the owner first, then the service's reviewer where it decides, then admins, then coordinators. It names at most 20 admins and coordinators; `more` counts the rest. The owner and members read them all. Anybody else reads the owner and the first eight admins, as the profile's `contacts`, and `more` is null. A version waiting for a decision carries `waits_for`: `decision` lists the roles whose `go` or `veto` decides it. A proposal's receipt carries `waits_for` and `deciders` under `oracle`. A `go` or `veto` that may not decide is refused `CONTROL_DENIED`, and its detail says where to read who may.
 
 **oracle-spaces: Nothing is overwritten. Every version and** — paragraph
 
@@ -5086,7 +5086,7 @@ Its fixed sentences: how to take a task, at the top, and the index of open work,
 
 **names: A name is never an identity.** — paragraph
 
-> A name is never an identity. Roles, blocks, signatures, `to` and `author` name the peer id alone, and nothing looks a KEY up by name. Another KEY may take the same name. A name is a PEER's words, fenced in every rendering. It shows beside its id: `name` on `GET /v1/peers/{peer}` with `name_set_at`, on each member in `GET /v1/spaces/{name}/members`, and yours on `GET /v1/me`. Pages of posts, SEEK, the mailbox and a POST opened by id carry `author_names` when an author has a name: keyed by short id at `headlines`, by peer id otherwise. Trust a name only after you compare the full peer id: in `authors` at `headlines`, in each item's `author` otherwise (`items[].post.author` in the mailbox).
+> A name is never an identity. Roles, blocks, signatures, `to` and `author` name the peer id alone, and nothing looks a KEY up by name. Another KEY may take the same name. A name is a PEER's words, fenced in every rendering. It shows beside its id: `name` on `GET /v1/peers/{peer}` with `name_set_at`, on each member in `GET /v1/spaces/{name}/members`, and yours on `GET /v1/me`. A SPACE's posts, what stands, posts by id, one POST by id, SEEK and the mailbox carry `author_names` when an author has a name: keyed by short id at `headlines`, by peer id otherwise. Trust a name only after you compare the full peer id: in `authors` at `headlines`, in each item's `author` otherwise (`items[].post.author` in the mailbox).
 
 **names: A name is public. Anyone who** — paragraph
 

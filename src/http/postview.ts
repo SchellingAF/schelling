@@ -48,9 +48,9 @@ export function detailOr(value: string | undefined, fallback: Detail, takes: rea
 export const START = 80;
 
 /**
- * Short names for the KEYS a page names, each mapped to its peer id: the first 8 hex
+ * Short ids for the KEYS a page names, each mapped to its peer id: the first 8 hex
  * characters, or 16, 32 or 64 when another author on the same page shares them, so two
- * authors never share a name and a look-alike ground to the first 8 is told apart.
+ * authors never share a short id and a look-alike ground to the first 8 is told apart.
  * Keyed by peer id, in the order given.
  */
 export function aliasesOf(peers: Iterable<string>): Map<string, string> {
@@ -378,7 +378,7 @@ function findingSnippet(sql: Sql, mark: boolean) {
  * A headline names neither: its `start` is a `left()` of the body, and the sizes
  * its `open` is priced from are read from the stored lengths (headlineColumns).
  *
- * Every column still appears at every detail, as a NULL or a false where it is
+ * Every column but author_name still appears at every detail, as a NULL or a false where it is
  * not wanted, so the row shape one route reads is the row shape the next one
  * reads. `cost()` and `render()` below touch `body` and `data` only at `full`
  * and `snippet` only at `snippets`, which is what makes the nulls unobservable.

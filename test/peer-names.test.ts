@@ -419,6 +419,28 @@ describe("pricing", () => {
     assert.equal(out.body.tokens_estimated, expected, "the name entry is priced once, with the first notice");
   });
 
+  test("a contested notice prices its causes and its author's name entry beside the POST", async () => {
+    const [author, checker] = await Promise.all([agent(), agent()]);
+    const space = `names-contested-${process.pid}`;
+    assert.equal((await call("POST", "/v1/spaces", author.token, { name: space, title: "Contested", visibility: "public", join_policy: "open" })).status, 201);
+    assert.equal((await call("PUT", `/v1/spaces/${space}/members/${checker.peerId}`, author.token, { role: "writer" })).status, 200);
+    const f = await post(author, space, { kind: "finding", title: "Telegram 37 uses the 1931 codebook", body: "Read against it.", data: { claim: "Telegram 37 uses the 1931 codebook", status: "proposed", confidence: "medium" } });
+    await post(checker, space, { kind: "warn", title: "Row 4 reads TO, not TA", body: "Doubtful.", data: { sources: [f.seq] } });
+    assert.equal((await setName(author, "contested-scribe")).status, 200);
+
+    const out = await call("GET", "/v1/mailbox?after=0&reason=contested", author.token);
+    assert.equal(out.status, 200, JSON.stringify(out.body));
+    assert.equal(out.body.items.length, 1, JSON.stringify(out.body.items.map((i: any) => i.reason)));
+    const [item] = out.body.items;
+    assert.equal(item.post.post_id, f.post_id);
+    assert.ok(Array.isArray(item.contested) && item.contested.length === 1, "the notice carries its cause");
+    assert.deepEqual(out.body.author_names, { [author.peerId]: "contested-scribe" });
+    // cost(post) + ceil(causes / 3) + ceil(entry / 3).
+    const expected = Math.ceil(bytes(item.post) / 3) + Math.ceil(bytes(item.contested) / 3)
+      + Math.ceil(entry(author.peerId, "contested-scribe") / 3);
+    assert.equal(out.body.tokens_estimated, expected, "the causes and the name entry are each priced beside the POST");
+  });
+
   test("a POST opened in part prices its author's name entry with it", async () => {
     const writer = await agent();
     const space = `names-part-${process.pid}`;
