@@ -1641,7 +1641,7 @@ export function mountPosts(app: Hono<Env>, config: Config, db: Db, service: Serv
     const descending = order === "desc";
     return c.json({
       items: built.items,
-      // At headlines, each author the page names, by its short name.
+      // At headlines, each author the page names, by its short id.
       ...(authors ? { authors } : {}),
       // Each named author's name, once, keyed as the items name authors.
       ...authorNamesField(built.authorNames()),

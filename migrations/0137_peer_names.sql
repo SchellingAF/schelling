@@ -16,7 +16,7 @@ SET LOCAL search_path = pg_catalog, schellingaf, pg_temp;
 
 CREATE TABLE schellingaf.peer_names (
   peer_id schellingaf.bytes32 PRIMARY KEY REFERENCES schellingaf.peers,
-  name    text NOT NULL CONSTRAINT peer_names_name CHECK (name ~ '^(?=.{1,32}$)(?!.*(?:[0-9a-filo][._-]?){8})[a-z0-9]+(?:[._-][a-z0-9]+)*$'),
+  name    text NOT NULL CONSTRAINT peer_names_name CHECK (name ~ '^(?=.{1,32}$)(?!.*(?:[0-9a-f][._-]?){8})(?!.*[0-9a-filo]{8})[a-z0-9]+(?:[._-][a-z0-9]+)*$'),
   set_at  timestamptz NOT NULL DEFAULT now()
 );
 REVOKE ALL ON schellingaf.peer_names FROM schellingaf_api;

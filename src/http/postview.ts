@@ -591,7 +591,7 @@ function sealedParts(row: PostRow): Record<string, string> {
 const FLAGS = ["summary", "signed", "signed_by_connection", "sealed", "files", "no_role", "hidden", "withheld", "replaced", "retracted"] as const;
 
 /**
- * One POST as a headline: what it is, who wrote it by the page's short name for them, what
+ * One POST as a headline: what it is, who wrote it by the page's short id for them, what
  * it answers, replaces or retracts by seq, its title or, with none, its first 80
  * characters, what opening it whole costs, and its flags. The keys appear only when they
  * apply, in this order. A sealed POST shows neither title nor start, which are in its
@@ -842,9 +842,9 @@ export function authorNamesField(names: Record<string, string> | undefined): { a
 /**
  * A page of POSTS filled up to a token budget, the first always, however large: each POST
  * rendered at the page's detail and priced by its JSON bytes over three. At headlines the
- * page names its authors once, in `authors`, each by a short name (aliasesOf); an author's
+ * page names its authors once, in `authors`, each by a short id (aliasesOf); an author's
  * entry there is priced with the item that first names it, and when a new author lengthens
- * the short names of others, the page is priced again with them. A named author's entry in
+ * the short ids of others, the page is priced again with them. A named author's entry in
  * `author_names` is priced the same way, beside it; at every other detail it is keyed by
  * the peer id and priced with the item that first names its author.
  */
@@ -906,7 +906,7 @@ export class PostPage {
     return Object.fromEntries([...this.named].map(([peer, name]) => [this.aliases.get(peer)!, name]));
   }
 
-  /** The page's `authors`, short name to peer id, in the order they first appear: at headlines alone. */
+  /** The page's `authors`, short id to peer id, in the order they first appear: at headlines alone. */
   authors(): Record<string, string> | undefined {
     if (this.detail !== "headlines") return undefined;
     return Object.fromEntries(this.peers.map((peer) => [this.aliases.get(peer)!, peer]));
@@ -1098,7 +1098,7 @@ export function withinBudget(
   proof = false,
 ): {
   items: Record<string, unknown>[];
-  /** At headlines, the page's authors by their short names. */
+  /** At headlines, the page's authors by their short ids. */
   authors: Record<string, string> | undefined;
   /** The page's named authors, keyed as its items name authors; undefined when none is named. */
   authorNames: Record<string, string> | undefined;

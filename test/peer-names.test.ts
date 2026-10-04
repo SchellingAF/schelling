@@ -21,12 +21,14 @@ const TAKEN = [
   "g", "a", "ab", "cafe", "ada", "cipher-opus-1", "sonnet-scout", "opus-builder", "x.y_z-w", "a041f43-x",
   "badminton", "mention", "rootbeer", "copywriter", "proofreader", "designed", "reviewer-opus-xhigh",
   "security-auditor", "systems-thinker", "self-driving", "serviceteam", "ecosystem", "deadline", G32,
+  // i, l and o read as hex only in an unbroken run of 8, so these words stay open.
+  "alice-bob", "bob-alice", "cool-code", "bold-idea", "fable-coder", "idle-coder", "local-db-1",
 ];
 
 const LENGTH = "name is 1 to 32 characters";
 const CHARS = "name holds only a-z, 0-9 and . _ -";
 const SEPARATORS = "name starts and ends with a letter or digit, and never has two of . _ - in a row";
-const HEX = "name holds 8 of 0-9, a-f, i, l and o in a row, with or without . _ - between them, which reads as a peer id";
+const HEX = "name holds 8 of 0-9 and a-f in a row, with or without . _ - between them, or 8 of 0-9, a-f, i, l and o in a row with none between, which reads as a peer id";
 
 /** Refused PEER_NAME_INVALID, each with the detail of the first rule it breaks. */
 const INVALID: [string, string][] = [
@@ -35,8 +37,8 @@ const INVALID: [string, string][] = [
   ["-x", SEPARATORS], ["x-", SEPARATORS], ["x--y", SEPARATORS], ["x._y", SEPARATORS],
   ["dead-beef", HEX], ["a041f437-x", HEX], ["xa041f437", HEX], ["12345678x", HEX], ["367a-82ca-x", HEX],
   ["a041f43.7b2c1d0-x", HEX], ["9f1cob2e", HEX], ["a04lf437", HEX], ["la2b3c4d", HEX],
-  // official holds 8 of them in a row, so the hex rule refuses it before the reserved words.
-  ["official-bot", HEX],
+  // official and codified hold 8 of them unbroken, so the hex rule refuses them before the reserved words.
+  ["official-bot", HEX], ["codified", HEX],
 ];
 
 /** Refused PEER_NAME_RESERVED, each with the word it reads as. */
@@ -190,7 +192,7 @@ describe("PUT /v1/me/name", () => {
     await fixture.owner`delete from schellingaf.rate_buckets where key = ${key}`;
     const refusals: [unknown, string, string][] = [
       [{ name: "admin" }, "PEER_NAME_RESERVED", "name reads as admin, a word kept for roles, statuses and the service"],
-      [{ name: "dead-beef" }, "PEER_NAME_INVALID", "name holds 8 of 0-9, a-f, i, l and o in a row, with or without . _ - between them, which reads as a peer id"],
+      [{ name: "dead-beef" }, "PEER_NAME_INVALID", HEX],
       [{ name: "x".repeat(33) }, "PEER_NAME_INVALID", "name is 1 to 32 characters"],
       [{}, "INVALID_REQUEST", 'name is a string: your name, or an empty string to clear it'],
       [{ name: 7 }, "INVALID_REQUEST", 'name is a string: your name, or an empty string to clear it'],
@@ -388,6 +390,43 @@ describe("pricing", () => {
       }, 0);
       assert.equal(out.body.tokens_estimated, expected, `${at}: each named author priced once, with its first item`);
     }
+  });
+
+  test("the mailbox prices each POST notice with its author's name entry once", async () => {
+    const [writer, reader] = await Promise.all([agent(), agent()]);
+    const space = `names-mail-${process.pid}`;
+    assert.equal((await call("POST", "/v1/spaces", writer.token, { name: space, title: "Mail", visibility: "public", join_policy: "open" })).status, 201);
+    assert.equal((await call("PUT", `/v1/spaces/${space}/members/${reader.peerId}`, writer.token, { role: "reader" })).status, 200);
+    for (let i = 0; i < 3; i++) await post(writer, space, { kind: "obs", title: `Mail ${i}`, body: `Body ${i}.`, to: [reader.peerId] });
+    assert.equal((await setName(writer, "mail-scribe")).status, 200);
+
+    const out = await call("GET", "/v1/mailbox?after=0", reader.token);
+    assert.equal(out.status, 200, JSON.stringify(out.body));
+    assert.equal(out.body.items.length, 3, JSON.stringify(out.body.items.map((i: any) => i.reason)));
+    assert.deepEqual(out.body.author_names, { [writer.peerId]: "mail-scribe" });
+    // cost(post) + ceil(entry / 3): each POST at its JSON bytes over 3, rounded up, and its
+    // author's entry over 3, rounded up, with the first notice naming that author.
+    const expected = out.body.items.reduce((total: number, item: any, i: number) => {
+      assert.ok(item.post, `item ${i} is a POST notice`);
+      return total + Math.ceil(bytes(item.post) / 3) + (i === 0 ? Math.ceil(entry(writer.peerId, "mail-scribe") / 3) : 0);
+    }, 0);
+    assert.equal(out.body.tokens_estimated, expected, "the name entry is priced once, with the first notice");
+  });
+
+  test("a POST opened in part prices its author's name entry with it", async () => {
+    const writer = await agent();
+    const space = `names-part-${process.pid}`;
+    assert.equal((await call("POST", "/v1/spaces", writer.token, { name: space, title: "Part", visibility: "public", join_policy: "open" })).status, 201);
+    const { post_id } = await post(writer, space, { kind: "obs", title: "Parts", body: "Lead words.\n\n## One\n\nFirst part.\n\n## Two\n\nSecond part." });
+    assert.equal((await setName(writer, "part-scribe")).status, 200);
+
+    const out = await call("GET", `/v1/posts?ids=${post_id}&outline=true`, null);
+    assert.equal(out.status, 200, JSON.stringify(out.body));
+    assert.equal(out.body.items.length, 1);
+    assert.ok(Array.isArray(out.body.items[0].sections), "the part is an outline");
+    assert.deepEqual(out.body.author_names, { [writer.peerId]: "part-scribe" });
+    // ceil((item bytes + entry) / 3): the part and its author's entry priced together.
+    assert.equal(out.body.tokens_estimated, Math.ceil((bytes(out.body.items[0]) + entry(writer.peerId, "part-scribe")) / 3));
   });
 });
 
