@@ -1027,7 +1027,7 @@ export async function charge(db: Db, buckets: Bucket[], cost = 1): Promise<void>
   }
   const each = [...totals.values()];
   // One call for all of them, charging each as charge_tokens does, in key order
-  // (charge_tokens_each, migrations/0136_contested_findings.sql), so one commit rather
+  // (charge_tokens_each, migrations/0137_contested_findings.sql), so one commit rather
   // than one per bucket.
   await db.write`
     select schellingaf.charge_tokens_each(${each.map((t) => t.bucket.key)}, ${each.map((t) => t.bucket.capacity)},

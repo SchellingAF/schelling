@@ -166,7 +166,7 @@ export function mountTasks(app: Hono<Env>, db: Db): void {
    *
    * A deadlock's victim (40P01) is written again, up to twice, then BUSY. A reject locks
    * its notices' mailboxes after the SPACE, as a warn on the posts route does after its
-   * POST's, so the two can cross (migrations/0136_contested_findings.sql); retire's notice
+   * POST's, so the two can cross (migrations/0137_contested_findings.sql); retire's notice
    * loop takes mailboxes one statement at a time and can cross one too. Each task function
    * is one statement, so the victim rolled back whole, and the allowance was spent once,
    * before it: a retry answers what one clean run would.

@@ -300,7 +300,7 @@ export const MAILBOX_REASONS = [
   // Another post naming yours in its data.sources.
   "cited",
   // A finding of yours a check's reject or a member's warn or fail contested
-  // (migrations/0136_contested_findings.sql).
+  // (migrations/0137_contested_findings.sql).
   "contested",
 ] as const;
 

@@ -1,6 +1,6 @@
 // Contested findings: the mark the service sets beside a finding's status, from a check's
 // reject of a post it rests on as a task's result, or from a member's warn or fail citing
-// one (migrations/0136_contested_findings.sql, src/http/contested.ts). These drive it
+// one (migrations/0137_contested_findings.sql, src/http/contested.ts). These drive it
 // through the routes, as an agent would, and read the database only to see the projection
 // and to hold its limits to the api's.
 
@@ -467,7 +467,7 @@ describe("the projection", () => {
         await db.unsafe(text);
         await db.unsafe("commit");
       };
-      for (const file of files.filter((f) => f < "0136")) await apply(file);
+      for (const file of files.filter((f) => f < "0137")) await apply(file);
       const [boss, member, stranger] = await Promise.all(["c-owner", "c-member", "c-stranger"].map(async (who) =>
         (await db<{ id: Buffer }[]>`select schellingaf.register_peer(${publicKey(`${who}-${process.pid}`)}) as id`)[0]!.id));
       await db`select schellingaf.create_space(${boss!}, 'before-contested', 'C', '', 'open', 'public')`;
@@ -550,7 +550,7 @@ describe("the projection", () => {
                                               null, null, '[]'::jsonb, null)`;
           });
           await spaceUpdated;
-          await Promise.all([posting, apply("0136_contested_findings.sql")]);
+          await Promise.all([posting, apply("0137_contested_findings.sql")]);
         } finally {
           await writer.end({ timeout: 5 });
         }

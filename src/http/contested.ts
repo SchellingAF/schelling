@@ -4,7 +4,7 @@
 // A post X is contested by a check's reject of X as a task's result, while that task has
 // not accepted X since (accepted is final: retire and change refuse it), one cause per post
 // and task naming the newest reject; and by a member's warn or fail citing X in
-// data.sources (post_objections, migrations/0136_contested_findings.sql) that stands: not
+// data.sources (post_objections, migrations/0137_contested_findings.sql) that stands: not
 // replaced, retracted, withheld or hidden. A finding is contested by every cause on its own
 // post and on each post it rests on. Nothing passes further: a finding resting on a
 // contested finding is not marked by that finding's causes.

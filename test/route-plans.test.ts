@@ -220,7 +220,7 @@ before(async () => {
   }
   // A hundred members' warns citing the post every finding of planned-space rests on,
   // inserted as posts so the trigger writes post_objections, so what contests a finding
-  // is planned against a source a hundred warns cite (migrations/0136_contested_findings.sql).
+  // is planned against a source a hundred warns cite (migrations/0137_contested_findings.sql).
   await fixture.owner`
     insert into schellingaf.posts (space_id, seq, admitted_revision, author_id, kind, title, body, data, content_hash)
     select s.space_id, 900000 + g, 1,
@@ -930,7 +930,7 @@ describe("a contest's notices find whom to tell through an index", () => {
   // citing it inserted as a post, so the trigger wrote its objection and nobody was told.
   // task_check()'s reject and contest_notices() run as the routes call them, each inside a
   // transaction rolled back, with auto_explain logging every statement under the generic
-  // plan (migrations/0136_contested_findings.sql).
+  // plan (migrations/0137_contested_findings.sql).
   let doer: Agent, checker: Agent, warner: Agent, other: Agent;
   let warnId = "";
   before(async () => {

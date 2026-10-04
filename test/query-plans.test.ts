@@ -179,9 +179,33 @@ describe("the plans inside the seek functions", () => {
     return found.Plan;
   }
 
-  test("a fingerprint seek is one range probe per caller SPACE", async () => {
+  /**
+   * A kind or an author kept before the cut reaches posts one row at a time, by its
+   * primary key: never a scan of posts, and never a hashed set of them, which would read
+   * other SPACES' posts and make a SEEK's cost depend on them.
+   */
+  function postsByKeyOnly(nodes: PlanNode[], what: string): void {
+    const posts = nodes.filter((n) => n["Relation Name"] === "posts");
+    const shown = JSON.stringify(posts, [...FIELDS, "Parent Relationship"], 1);
+    assert.ok(posts.length > 0, `${what}: the filter never reached posts`);
+    assert.ok(
+      posts.every((n) => n["Index Name"] === "posts_pkey" && /Index/.test(n["Node Type"]) && n["Parent Relationship"] === "SubPlan"),
+      `${what}: posts read other than one row by its key:\n${shown}`,
+    );
+    // A filter may hash a small set of its own (a category's SPACES), never posts.
+    const hashed = new Set(nodes.flatMap((n) => [...String(n["Filter"] ?? "").matchAll(/hashed (SubPlan \d+)/g)].map((m) => m[1])));
+    assert.ok(!posts.some((n) => hashed.has(n["Subplan Name"])), `${what}: posts were hashed as a set:\n${shown}`);
+  }
+
+  // With no filter, and with a kind and an author, which 0136 keeps before the cut.
+  const FILTERS: [string, string[] | null, string | null][] = [
+    ["no filter", null, null],
+    ["a kind and an author", ["result", "warn"], "00".repeat(32)],
+  ];
+
+  for (const [what, kinds, author] of FILTERS) test(`a fingerprint seek is one range probe per caller SPACE, ${what}`, async () => {
     const [target] = await fixture.owner<{ value: string }[]>`
-      select value from schellingaf.post_fingerprints limit 1`;
+      select value from schellingaf.post_fingerprints where scheme = 'git.commit' limit 1`;
     const value = target!.value;
     // The real seek_fingerprint, for the KEY in two hundred SPACES, as an exact
     // SEEK. It pins its own plan to the generic one; "what a seek costs when the
@@ -191,8 +215,9 @@ describe("the plans inside the seek functions", () => {
       select post_id::text from schellingaf.seek_fingerprint(
         ${"git.commit"}, ${value}, ${value + "\u0001"}, ${null}::uuid, ${10},
         ${PUBLIC_PRINT_WINDOW}, ${PUBLIC_RESULTS_PER_SPACE}, ${PUBLIC_RESULTS_PER_OWNER},
-        ${null}::text, ${null}::boolean)`);
+        ${null}::text, ${null}::boolean, ${kinds}::text[], decode(${author}::text, 'hex'))`);
     const nodes = nodesOf(plan);
+    if (kinds !== null) postsByKeyOnly(nodes, what);
     const scans = nodes.filter((n) =>
       n["Actual Loops"] > 0 && (n["Relation Name"] === "post_fingerprints" || /fingerprints/.test(n["Index Name"] ?? "")));
     const shown = JSON.stringify(scans, FIELDS, 1);
@@ -205,6 +230,35 @@ describe("the plans inside the seek functions", () => {
     assert.doesNotMatch(probe?.["Filter"] ?? "", /space_id/, shown);
     const joins = nodes.map((n) => n["Join Filter"]).filter((f) => f !== undefined);
     assert.ok(!joins.some((f) => /\bsid\b/.test(f)), `the caller's SPACE is a join filter: ${joins.join("; ")}`);
+  });
+
+  for (const [what, kinds] of FILTERS) test(`a fingerprint seek checks its rows newest first, only until the page is full, ${what}`, async () => {
+    // Every post of plan-space-1 carries one value of a scheme of this test's own, and every
+    // one is the reader's obs, so the checks keep each row they look at. They must run on
+    // about p_limit rows, not on the SPACE's whole range: 0136 sorts the range from the index
+    // alone and checks its rows above the sort, outside the subquery. Checks moved inside it
+    // run on every row, and the cost of a SEEK follows the size of the caller's SPACES.
+    await fixture.owner`
+      insert into schellingaf.post_fingerprints (post_id, space_id, scheme, value)
+      select p.post_id, p.space_id, 'lazy.check', 'one-value'
+        from schellingaf.posts p join schellingaf.spaces s on s.space_id = p.space_id
+       where s.name = 'plan-space-1'
+      on conflict do nothing`;
+    const [held] = await fixture.owner<{ n: number }[]>`
+      select count(*)::int as n from schellingaf.post_fingerprints f
+       where f.scheme = 'lazy.check' and f.value = 'one-value'`;
+    assert.ok(held!.n >= 100, `only ${held!.n} rows carry the value`);
+    const plan = await planInside(readerHex, /^\s*WITH mine AS/, "auto", (tx) => tx`
+      select post_id::text from schellingaf.seek_fingerprint(
+        ${"lazy.check"}, ${"one-value"}, ${"one-value\u0001"}, ${null}::uuid, ${10},
+        ${PUBLIC_PRINT_WINDOW}, ${PUBLIC_RESULTS_PER_SPACE}, ${PUBLIC_RESULTS_PER_OWNER},
+        ${null}::text, ${null}::boolean, ${kinds === null ? null : ["obs"]}::text[],
+        decode(${kinds === null ? null : readerHex}::text, 'hex'))`);
+    const checks = nodesOf(plan).filter((n) =>
+      n["Parent Relationship"] === "SubPlan" && ["posts", "withheld", "space_hidden"].includes(n["Relation Name"]));
+    const shown = JSON.stringify(checks, [...FIELDS, "Relation Name"], 1);
+    assert.ok(checks.some((n) => n["Actual Loops"] > 0), `${what}: no check ran:\n${shown}`);
+    assert.ok(checks.every((n) => n["Actual Loops"] <= 20), `${what}: the checks ran on rows past the page, of ${held!.n}:\n${shown}`);
   });
 
   test("a text seek carries both the SPACE and the query into the index condition", async () => {
@@ -222,16 +276,17 @@ describe("the plans inside the seek functions", () => {
     // This corpus is past the turn even with its pending list nearly full, as
     // writing it leaves it, so a walk here is a change in the function, not in the
     // table.
-    for (const mode of ["force_custom_plan", "force_generic_plan"]) {
+    for (const mode of ["force_custom_plan", "force_generic_plan"]) for (const [what, kinds, author] of FILTERS) {
       const plan = await planInside(memberHex, /^\s*WITH q AS/, mode, (tx) => tx`
         select post_id::text, score from schellingaf.seek_text(
           ${"quetzalcoatl"}, ${null}::uuid, ${CANDIDATES_PER_SPACE}, ${CANDIDATES_TOTAL}, ${PUBLIC_CANDIDATES},
           ${PUBLIC_TEXT_WINDOW}, ${PUBLIC_RESULTS_PER_SPACE}, ${PUBLIC_RESULTS_PER_OWNER}, ${RANK_WORK},
-          ${null}::text, ${null}::uuid[], ${null}::boolean)
+          ${null}::text, ${null}::uuid[], ${null}::boolean, ${kinds}::text[], decode(${author}::text, 'hex'))
          order by score desc, post_id desc limit 21`);
       const scans = nodesOf(plan).filter((n) =>
         n["Actual Loops"] > 0 && (n["Relation Name"] === "post_search" || /^post_search/.test(n["Index Name"] ?? "")));
       const shown = JSON.stringify(scans, FIELDS, 1);
+      if (kinds !== null) postsByKeyOnly(nodesOf(plan), `${mode}, ${what}`);
       assert.ok(!scans.some((n) => n["Node Type"] === "Seq Scan"), `${mode}: the function walks post_search:\n${shown}`);
       assert.ok(!scans.some((n) => n["Index Name"] === "post_search_pkey"), `${mode}:\n${shown}`);
       // btree_gin is what allows space_id to sit in the same index condition as
@@ -247,6 +302,35 @@ describe("the plans inside the seek functions", () => {
       // was never allowed to look at. A walk here discards a hundred thousand.
       const discarded = scans.reduce((sum, n) => sum + (n["Rows Removed by Filter"] ?? 0), 0);
       assert.ok(discarded < 100, `${mode}: the scans discarded ${discarded} rows they should never have visited:\n${shown}`);
+    }
+  });
+
+  test("a text seek probes withheld and hidden posts one at a time, never reading them whole", async () => {
+    // Found by the review of proposal-seek-filter-before-cut: as NOT EXISTS, seek_text's
+    // checks of the public rows and of its answer could read space_hidden whole, so a SEEK's
+    // cost followed posts hidden in SPACES the caller cannot read. Five thousand hidden posts
+    // in the reader's SPACES, which the member cannot read; the member searches a word all
+    // of its own five hundred posts hold.
+    await fixture.owner`
+      insert into schellingaf.space_hidden (post_id, space_id, hidden_by, revision)
+      select p.post_id, p.space_id, decode(${readerHex}, 'hex'), 1
+        from schellingaf.posts p join schellingaf.spaces s on s.space_id = p.space_id
+       where s.name <> 'plan-space-1'
+       limit 5000
+      on conflict do nothing`;
+    await fixture.owner`analyze schellingaf.space_hidden`;
+    for (const mode of ["force_custom_plan", "force_generic_plan"]) {
+      const plan = await planInside(memberHex, /^\s*WITH q AS/, mode, (tx) => tx`
+        select post_id::text, score from schellingaf.seek_text(
+          ${"ECONNREFUSED"}, ${null}::uuid, ${CANDIDATES_PER_SPACE}, ${CANDIDATES_TOTAL}, ${PUBLIC_CANDIDATES},
+          ${PUBLIC_TEXT_WINDOW}, ${PUBLIC_RESULTS_PER_SPACE}, ${PUBLIC_RESULTS_PER_OWNER}, ${RANK_WORK},
+          ${null}::text, ${null}::uuid[], ${null}::boolean)`);
+      const nodes = nodesOf(plan);
+      const checks = nodes.filter((n) => ["space_hidden", "withheld"].includes(n["Relation Name"]));
+      const shown = JSON.stringify(checks, [...FIELDS, "Relation Name", "Parent Relationship"], 1);
+      assert.ok(checks.some((n) => n["Actual Loops"] > 0), `${mode}: no check ran:\n${shown}`);
+      assert.ok(checks.every((n) => /Index/.test(n["Node Type"]) && n["Parent Relationship"] === "SubPlan"),
+        `${mode}: withheld or hidden posts read other than one by its key:\n${shown}`);
     }
   });
 });

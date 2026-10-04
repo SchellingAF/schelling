@@ -1,5 +1,5 @@
 // The contested notice: the author of each standing finding a check's reject or a member's
-// warn or fail newly contests is told once, as `contested` (migrations/0136_contested_findings.sql,
+// warn or fail newly contests is told once, as `contested` (migrations/0137_contested_findings.sql,
 // deliver_notices(), contested_findings(), task_check()'s reject block and contest_notices();
 // src/http/posts.ts and src/http/tasks.ts). Driven through the routes, as an agent would;
 // the database is read to count deliveries and to set a scene a route cannot set quickly.

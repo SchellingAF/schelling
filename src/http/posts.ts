@@ -1166,7 +1166,7 @@ export function mountPosts(app: Hono<Env>, config: Config, db: Db, service: Serv
     // here, so the notice rolls back with the POST. A replayed POST changes no task again.
     // A member's warn or fail that cites posts may contest findings, whose authors are told
     // in the same transaction, after its task part (contest_notices(),
-    // migrations/0136_contested_findings.sql).
+    // migrations/0137_contested_findings.sql).
     const objects = (post: PostInput) => (post.kind === "warn" || post.kind === "fail") && sourcesOf(post).length > 0;
     // contested is what contest_notices() delivered, kept apart from the receipt's own.
     type Wrote = { receipt: Record<string, unknown>; attached: unknown[]; task: Record<string, unknown> | null; delivered: unknown; contested: unknown };

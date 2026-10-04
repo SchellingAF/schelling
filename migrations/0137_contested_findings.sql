@@ -120,7 +120,7 @@ BEGIN
     INSERT INTO post_sources (post_id, source_id, space_id, ord)
     SELECT NEW.post_id, u.id, NEW.space_id, u.i
       FROM unnest(v_ids) WITH ORDINALITY AS u(id, i);
-    -- 0136: a member's warn or fail objects to each post of another author it cites.
+    -- 0137: a member's warn or fail objects to each post of another author it cites.
     IF NEW.kind IN ('warn', 'fail') AND NOT NEW.no_role THEN
       INSERT INTO post_objections (source_id, post_id, space_id)
       SELECT u.id, NEW.post_id, NEW.space_id
@@ -290,7 +290,7 @@ $$;
 -- S2: a reject tells the findings it contests
 -- ─────────────────────────────────────────────────────────────────────────────
 
--- As 0134_task_upkeep.sql made it, with one change, the block marked 0136 in the reject
+-- As 0134_task_upkeep.sql made it, with one change, the block marked 0137 in the reject
 -- branch: the notice to the holder and the voided confirmers is written in the same
 -- deliver_notices() call as a contested notice to each finding's author. v_cycle is the
 -- checked cycle there: it is read before the update moves the task to the next one.
@@ -393,7 +393,7 @@ BEGIN
             UNION
             SELECT c.peer_id FROM task_checks c
              WHERE c.task_id = t.task_id AND c.cycle = v_cycle AND c.verdict = 'confirm') q;
-    -- 0136 BEGIN contested: the same delivery tells the author of each standing finding
+    -- 0137 BEGIN contested: the same delivery tells the author of each standing finding
     -- that is this result or rests on it, once a finding. The result is read from the check
     -- just made, which kept it before the update above cleared it. clock_timestamp(), taken
     -- under the SPACE lock, never now(): a finding written while this call waited for that
@@ -408,7 +408,7 @@ BEGIN
       FROM task_checks k
       LEFT JOIN LATERAL contested_findings(s.space_id, ARRAY[k.result_post_id], p_actor, clock_timestamp()) c ON true
      WHERE k.task_id = t.task_id AND k.cycle = v_cycle AND k.peer_id = p_actor;
-    -- 0136 END contested
+    -- 0137 END contested
   END IF;
 
   RETURN jsonb_build_object('space', s.name, 'task', task_item(t, s.task_confirmations), 'changed', true)
