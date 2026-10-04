@@ -923,6 +923,114 @@ describe("a file's fetch and attach_files() find their rows through an index", (
   });
 });
 
+describe("a contest's notices find whom to tell through an index", () => {
+  // A source with five thousand posts citing it, none a finding and half of them a
+  // member's warns, so post_objections is large enough that a scan of it shows; one finding
+  // of another KEY's resting on it; the source a task's rejected-to-be result; and a warn
+  // citing it inserted as a post, so the trigger wrote its objection and nobody was told.
+  // task_check()'s reject and contest_notices() run as the routes call them, each inside a
+  // transaction rolled back, with auto_explain logging every statement under the generic
+  // plan (migrations/0136_contested_findings.sql).
+  let doer: Agent, checker: Agent, warner: Agent, other: Agent;
+  let warnId = "";
+  before(async () => {
+    [doer, checker, warner, other] = [await agent(), await agent(), await agent(), await agent()];
+    const made = await call("POST", "/v1/spaces", owner, { name: "contesting-space", title: "Contesting" });
+    assert.equal(made.status, 201, JSON.stringify(made.body));
+    const once = await call("PATCH", "/v1/spaces/contesting-space", owner, { task_confirmations: 1 });
+    assert.equal(once.status, 200, JSON.stringify(once.body));
+    for (const who of [doer, checker, warner, other]) {
+      const put = await call("PUT", `/v1/spaces/contesting-space/members/${who.peerId}`, owner, { role: "writer" });
+      assert.equal(put.status, 200, JSON.stringify(put.body));
+    }
+    const added = await call("POST", "/v1/spaces/contesting-space/tasks", owner, { title: "Read row 4" });
+    assert.equal(added.status, 201, JSON.stringify(added.body));
+    const result = await call("POST", "/v1/spaces/contesting-space/posts", doer, { kind: "result", body: "Row 4 reads TA." });
+    assert.equal(result.status, 201, JSON.stringify(result.body));
+    assert.equal((await call("POST", "/v1/spaces/contesting-space/tasks/next", doer, { number: 1 })).status, 200);
+    const finished = await call("POST", "/v1/spaces/contesting-space/tasks/1/done", doer, { post_id: result.body.post_id });
+    assert.equal(finished.status, 200, JSON.stringify(finished.body));
+    const finding = await call("POST", "/v1/spaces/contesting-space/posts", other, {
+      kind: "finding", body: "Read against the codebook.",
+      data: { claim: "Row 4 reads TA", status: "proposed", confidence: "medium", sources: [result.body.seq] },
+    });
+    assert.equal(finding.status, 201, JSON.stringify(finding.body));
+    await fixture.owner`
+      insert into schellingaf.posts (space_id, seq, admitted_revision, author_id, kind, title, body, data, content_hash)
+      select s.space_id, 500000 + g, 1, case when g % 2 = 0 then decode(${warner.peerId}, 'hex') else s.owner_id end,
+             case when g % 2 = 0 then 'warn' else 'obs' end, 'cites ' || g, 'cites',
+             jsonb_build_object('sources', jsonb_build_array(${result.body.post_id}::text)), sha256(('contesting' || g)::bytea)
+        from schellingaf.spaces s, generate_series(1, 5000) g
+       where s.name = 'contesting-space'
+       order by g`;
+    const [warned] = await fixture.owner<{ post_id: string }[]>`
+      insert into schellingaf.posts (space_id, seq, admitted_revision, author_id, kind, title, body, data, content_hash)
+      select s.space_id, 600000, 1, decode(${warner.peerId}, 'hex'), 'warn', 'Row 4 reads TO', 'doubt',
+             jsonb_build_object('sources', jsonb_build_array(${result.body.post_id}::text)), sha256('contesting warn'::bytea)
+        from schellingaf.spaces s where s.name = 'contesting-space'
+      returning post_id::text`;
+    warnId = warned!.post_id;
+    await fixture.owner`vacuum analyze`;
+  });
+
+  type PlanNode = { [field: string]: any; Plans?: PlanNode[] };
+  const nodesOf = (plan: PlanNode): PlanNode[] => [plan, ...(plan.Plans ?? []).flatMap(nodesOf)];
+  /** Every statement `run` makes the database execute, planned generically, rolled back. */
+  async function plansOf(run: (tx: postgres.TransactionSql) => Promise<unknown>) {
+    const logged: string[] = [];
+    const su = postgres({ ...SUPERUSER, database: fixture.name, onnotice: (n) => logged.push(n.message ?? "") });
+    try {
+      await su`load 'auto_explain'`;
+      for (const setting of ["log_min_duration = 0", "log_nested_statements = on", "log_format = json", "log_level = notice"]) {
+        await su.unsafe(`set auto_explain.${setting}`);
+      }
+      await su
+        .begin(async (tx) => {
+          await tx.unsafe("set local role schellingaf_api");
+          await tx.unsafe("set local plan_cache_mode = force_generic_plan");
+          await run(tx);
+          throw new Error("roll back");
+        })
+        .catch((error: Error) => {
+          if (error.message !== "roll back") throw error;
+        });
+    } finally {
+      await su.end({ timeout: 5 });
+    }
+    return logged
+      .filter((m) => m.includes("{"))
+      .map((m) => JSON.parse(m.slice(m.indexOf("{"))) as { "Query Text": string; Plan: PlanNode });
+  }
+  /** The statements of the notice's own SQL, and what each scans. */
+  function check(plans: { "Query Text": string; Plan: PlanNode }[], label: string) {
+    const ours = plans.filter((p) => /contested_scan|deliver_notices\(|post_objections|mailbox_deliveries/.test(p["Query Text"]));
+    const walk = ours.find((p) => p["Query Text"].includes("contested_scan"));
+    assert.ok(walk, `${label}: contested_findings() was not run`);
+    const used = new Set(nodesOf(walk!.Plan).map((n) => n["Index Name"]).filter(Boolean));
+    for (const index of ["post_sources_cited_idx", "findings_pkey"]) {
+      assert.ok(used.has(index), `${label}: contested_findings() did not use ${index}: ${[...used].join(", ")}`);
+    }
+    const scans = ours.flatMap((p) =>
+      nodesOf(p.Plan)
+        .filter((n) => n["Node Type"] === "Seq Scan" && /^(post_sources|findings|mailbox_deliveries|task_checks|post_objections)$/.test(n["Relation Name"]))
+        .map((n) => `${n["Relation Name"]} in: ${p["Query Text"].replace(/\s+/g, " ").slice(0, 200)}`));
+    assert.deepEqual(scans, [], label);
+  }
+
+  test("a reject through task_check() walks the citers of its result backward and probes findings by key", async () => {
+    const plans = await plansOf((tx) => tx`
+      select schellingaf.task_check('contesting-space', decode(${checker.peerId}, 'hex'), 1, 'reject', null, 'Row 4 reads TO.', true)`);
+    assert.ok(plans.some((p) => /deliver_notices\(s\.space_id, p_actor/.test(p["Query Text"])), "the reject block was not run");
+    check(plans, "reject");
+  });
+
+  test("a warn through contest_notices() reads its objections and walks the citers backward", async () => {
+    const plans = await plansOf((tx) => tx`select schellingaf.contest_notices(${warnId}::uuid, decode(${warner.peerId}, 'hex'))`);
+    assert.ok(plans.some((p) => p["Query Text"].includes("post_objections o")), "contest_notices() read no objections");
+    check(plans, "warn");
+  });
+});
+
 describe("your own dossiers and one section of many documents find their rows through an index", () => {
   // A SPACE of dossiers at the scale the privacy check measured: five thousand of the
   // owner's and two thousand of another KEY's, so a read that walked the owner's dossiers,

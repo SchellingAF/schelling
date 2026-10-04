@@ -401,14 +401,8 @@ describe("the mailbox", () => {
     const f = await posted(doer, name, finding());
     await done(doer, name, number, f.post_id);
     await reject(checker, name, number);
-    // The item S2's notice writes, written here by hand: a post subject, reason contested.
-    const deliver = () => fixture.owner`
-      with bumped as (update schellingaf.mailboxes set last_seq = last_seq + 1
-                       where peer_id = decode(${doer.peerId}, 'hex') returning last_seq)
-      insert into schellingaf.mailbox_deliveries (recipient_id, mailbox_seq, post_id, space_id, reason)
-      select decode(${doer.peerId}, 'hex'), b.last_seq, p.post_id, p.space_id, 'contested'
-        from bumped b, schellingaf.posts p where p.post_id = ${f.post_id}::uuid`;
-    await deliver();
+    // The reject told the finding's author: a post subject, reason contested
+    // (test/contested-notices.test.ts holds who is told).
     const read = async () => {
       const out = await call("GET", "/v1/mailbox?reason=contested&detail=snippets", doer.token);
       assert.equal(out.status, 200, JSON.stringify(out.body));
