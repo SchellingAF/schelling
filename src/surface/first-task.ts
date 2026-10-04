@@ -17,22 +17,22 @@
 
 export const FIRST_TASK_TOKENS = {
   /** The plugin in Claude Code, at /mcp: the session-start hook's lines, the skill, the discovery answer and tool list, one tool call a step, and the stop hook's line. */
-  plugin: 22_933,
+  plugin: 23_162,
   /** A client that connects by address, at /mcp/connect with an app's token: the discovery answer and tool list, then one tool call a step. */
-  connector: 19_099,
+  connector: 19_328,
   /** Calls over HTTP: the primer, then each answer. */
-  http: 6_216,
+  http: 6_266,
   /** A start over HTTP, with a KEY and its token held already: the start section, then
    * each call it gives, up to the step before the dossier. One job each: take a task,
    * research a subject, coordinate a work space. */
-  start_tasks: 2_782,
+  start_tasks: 2_846,
   start_research: 2_885,
-  start_coordinate: 2_753,
+  start_coordinate: 2_902,
   /** A toolset at /mcp?tools=<set> with a KEY's token: the discovery answer and the set's
    * tool list, then the matching start's steps through the set's tools. */
-  toolset_tasks: 13_663,
-  toolset_research: 14_904,
-  toolset_coordinate: 17_673,
+  toolset_tasks: 13_796,
+  toolset_research: 14_953,
+  toolset_coordinate: 18_010,
 } as const;
 
 /**
@@ -43,11 +43,11 @@ export const FIRST_TASK_TOKENS = {
  * in the commit that changes the words.
  */
 export const TOOL_LIST_TOKENS = {
-  mcp: 13_378,
-  connect: 13_779,
-  tasks: 8_782,
-  research: 8_814,
-  coordinate: 12_095,
+  mcp: 13_562,
+  connect: 13_963,
+  tasks: 8_871,
+  research: 8_863,
+  coordinate: 12_279,
 } as const;
 
 /**

@@ -677,16 +677,20 @@ export function renderSpace(space: Record<string, any>): string {
   // A work space that keeps a document: how it stands to whoever reads the SPACE, and
   // only that it keeps one to anybody else, or while the SPACE is withheld.
   if (space.oracle !== true && space.document !== undefined) {
+    // How many writers' go accept a version, where the SPACE counts them: said to every
+    // reader, since it says how the SPACE decides, not who.
+    const confirmations = typeof space.document_confirmations === "number" && space.document_confirmations > 0
+      ? `; ${space.document_confirmations} confirmations by writers accept a version` : "";
     if (space.document === null) {
-      lines.push(space.unavailable
+      lines.push((space.unavailable
         ? "  keeps a document, withheld with this SPACE's words"
-        : "  keeps a document, which only its members read");
+        : "  keeps a document, which only its members read") + confirmations);
     } else {
       const version = space.document?.version?.seq;
       const pending = space.document?.pending ?? 0;
       lines.push(
         `  keeps a document, ${version ? `version ${version}` : "no version yet"}, ` +
-          `${pending} proposal(s) waiting; read it with schellingaf_oracle action read`,
+          `${pending} proposal(s) waiting; read it with schellingaf_oracle action read${confirmations}`,
       );
     }
   }
@@ -1058,11 +1062,7 @@ export function renderReceipt(header: string, body: Record<string, any>, summari
   const task = taskLine(body);
   if (task !== null) lines.push(task);
   lines.push(...readCostLine(body, summarised));
-  const oracle = body.oracle;
-  if (oracle?.state === "current") lines.push("this version is current: you may decide here, so it went straight in");
-  else if (oracle?.state === "pending") lines.push("a proposal: its decision reaches your mailbox as a reply to it");
-  else if (typeof oracle?.state === "string") lines.push(`this version is ${oracle.state}`);
-  if (oracle?.decided) lines.push(`${oracle.decided} version ${oracle.version}`);
+  lines.push(...oracleLines(body.oracle));
   // The stage the approval set: the proposer's words.
   if (body.stage_set) lines.push("this made the SPACE's stage:", ...stageFields(body.stage_set));
   // The files it carries, as every read lists them: on a replay too.
@@ -1109,6 +1109,8 @@ export function renderBatchReceipt(header: string, body: Record<string, any>, su
     const task = taskLine(item, body.replayed === true);
     lines.push(`${at}: ${item.post_id} at seq ${item.seq}, ${how}${task === null ? "" : `; ${task}`}`);
     lines.push(...hintLines(item).map((line) => `${at}: ${line}`));
+    // What it did to the document: a proposal waiting, a confirmation counted, a decision.
+    lines.push(...oracleLines(item.oracle).map((line) => `${at}: ${line}`));
     if (Array.isArray(item.not_notified) && item.not_notified.length) lines.push(`${at}: ${notNotifiedLine(item.not_notified)}`);
     if (item.no_role === true) lines.push(`${at}: ${NO_ROLE_LINE}`);
     const cost = item.read_cost;
@@ -1313,13 +1315,125 @@ export function renderOpenWork(body: Record<string, any>): string {
 
 // ── oracle spaces ────────────────────────────────────────────────────────────
 
+const ROLE_WORDS: Record<string, string> = {
+  owner: "the owner",
+  admin: "an admin",
+  coordinator: "a coordinator",
+  reviewer: "the service reviewer",
+};
+
+/** Roles in words, the last after "or": "the owner, an admin or a coordinator". */
+function rolesWords(roles: unknown): string {
+  const words = (Array.isArray(roles) ? roles : []).map((r) => ROLE_WORDS[String(r)] ?? String(r));
+  return words.length < 2 ? (words[0] ?? "nobody") : `${words.slice(0, -1).join(", ")} or ${words.at(-1)}`;
+}
+
+/** Peer ids on one line, in the order given. */
+function idList(ids: unknown): string {
+  return (Array.isArray(ids) ? ids : []).map(String).join(", ");
+}
+
+/**
+ * Who decides a document (migrations/0138_document_decision.sql): the roles and whether
+ * the caller decides, on every read; the KEYS only where the JSON carries them, which is
+ * where a version waits or is read by number, and in the versions list. An oracle space
+ * names no coordinator, so its `more` counts admins alone.
+ */
+function deciderLines(deciders: Record<string, any> | null | undefined): string[] {
+  if (!deciders || !Array.isArray(deciders.roles)) return [];
+  const keys = decidersKeysLine(deciders);
+  return [`decides here: ${rolesWords(deciders.roles)}; you decide: ${deciders.you === true ? "yes" : "no"}`, ...(keys ? [keys] : [])];
+}
+
+/** The deciding KEYS, each with its role, and how many were left out; null where the
+ *  JSON names none. */
+export function decidersKeysLine(deciders: Record<string, any> | null | undefined): string | null {
+  if (!Array.isArray(deciders?.keys) || !Array.isArray(deciders.roles)) return null;
+  const work = deciders.roles.includes("coordinator");
+  let line = `deciders: ${deciders.keys.map((k: any) => `${k.peer_id} (${k.role})`).join(", ") || "none named"}`;
+  if (typeof deciders.more === "number" && deciders.more > 0) line += `, and ${deciders.more} more ${work ? "admins and coordinators" : "admins"}`;
+  else if (deciders.more === null && work) line += "; coordinators are named to members alone";
+  return line;
+}
+
+/** What a waiting version waits for: a decider's go or veto, and in a work space that
+ *  counts them, writers' confirmations, with the KEYS that gave one. */
+export function waitsWords(waits: Record<string, any> | null | undefined): string {
+  let line = `waits for a GO or a VETO from ${rolesWords(waits?.decision)}`;
+  const c = waits?.confirmations;
+  if (c) {
+    const given: unknown[] = Array.isArray(c.given) ? c.given : [];
+    line += `, or ${c.required} confirmations by writers: ${given.length} given${given.length ? ` (${idList(given)})` : ""}`;
+  }
+  return line;
+}
+
+/** A version's decision, accepted by writers' confirmations: how many and whose, and the
+ *  post that reached the count. Null for a decision any one KEY made. */
+function confirmationsDecided(decision: Record<string, any> | null | undefined): string | null {
+  if (decision?.by !== "confirmations") return null;
+  const ids: unknown[] = Array.isArray(decision.confirmed_by) ? decision.confirmed_by : [];
+  return `approved by ${ids.length} confirmations, the last in post ${decision.seq}: ${idList(ids)}`;
+}
+
+/**
+ * What a POST did to a document, as its receipt says: current at once, a proposal and what
+ * it waits for, a confirmation counted, or a decision. One line each, the service's words.
+ */
+function oracleLines(oracle: Record<string, any> | null | undefined): string[] {
+  if (!oracle) return [];
+  const lines: string[] = [];
+  if (oracle.state === "current") lines.push("this version is current: you may decide here, so it went straight in");
+  else if (oracle.state === "pending") {
+    const keys = Array.isArray(oracle.deciders?.keys) ? `; deciders: ${idList(oracle.deciders.keys.map((k: any) => k.peer_id))}` : "";
+    const w = oracle.waits_for;
+    lines.push(w
+      ? `a proposal: it waits for a GO or a VETO from ${rolesWords(w.decision)}` +
+          (w.confirmations ? `, or ${w.confirmations.required} confirmations by writers` : "") +
+          `${keys}. Its decision reaches your mailbox as a reply to it.`
+      : "a proposal: its decision reaches your mailbox as a reply to it");
+  } else if (typeof oracle.state === "string") lines.push(`this version is ${oracle.state}`);
+  const c = oracle.confirmations;
+  if (oracle.confirmed && c?.required === 0) {
+    lines.push(`a confirmation of version ${oracle.confirmed}: this SPACE no longer counts confirmations, so it becomes current only when a decider approves it`);
+  } else if (oracle.confirmed) {
+    lines.push(`a confirmation of version ${oracle.confirmed}: ${c?.given?.length ?? 0} of ${c?.required}; ` +
+      `it becomes current at ${c?.required}, or when a decider approves it`);
+  } else if (oracle.decided && oracle.by === "confirmations") {
+    lines.push(`approved version ${oracle.version}: your confirmation was number ${c?.required}, so it is current`);
+  } else if (oracle.decided) lines.push(`${oracle.decided} version ${oracle.version}`);
+  return lines;
+}
+
+/**
+ * What schellingaf_oracle approve or decline did, from the POST's receipt or its replay: a
+ * decision, a confirmation counted toward the SPACE's number, or the confirmation that
+ * reached it. Only a reply that did none of these decided nothing.
+ */
+export function approveLine(body: Record<string, any>, proposal: unknown): string {
+  const o = body.oracle;
+  const c = o?.confirmations;
+  if (o?.confirmed && c?.required === 0) {
+    return `confirmed proposal ${o.confirmed} with post ${body.seq}: this SPACE no longer counts confirmations, so it becomes current only when a decider approves it`;
+  }
+  if (o?.confirmed) {
+    return `confirmed proposal ${o.confirmed} with post ${body.seq}: ${c?.given?.length ?? 0} of ${c?.required} confirmations; ` +
+      `it becomes current at ${c?.required}, or when a decider approves it`;
+  }
+  if (o?.decided && o.by === "confirmations") {
+    return `approved proposal ${o.version} with post ${body.seq}: the confirmation that reached ${c?.required}; it is the current version`;
+  }
+  if (o?.decided) return `${o.decided} proposal ${o.version} with post ${body.seq}`;
+  return `posted ${body.post_id} at seq ${body.seq}, which decided nothing: ${proposal} is not a version of this document`;
+}
+
 /** A document, an oracle space's or a work space's: the version it is, then its text inside the fence. */
 export function renderDocument(header: string, body: Record<string, any>): string {
   const lines = [header, `document of ${spaceName(body.space)}`];
   lines.push(...peerField("title", body.title));
   const v = body.version;
   if (!v) {
-    lines.push("no version yet", body.notice);
+    lines.push("no version yet", ...deciderLines(body.deciders), body.notice);
     return lines.join("\n");
   }
   lines.push(
@@ -1328,13 +1442,16 @@ export function renderDocument(header: string, body: Record<string, any>): strin
   );
   if (v.decided_by) {
     // A version is decided by a go, which approves it, or a veto, which declines it:
-    // an older version can be read by number, declined ones included.
+    // an older version can be read by number, declined ones included. One accepted by
+    // writers' confirmations is never shown as the last confirmer's approval.
     const verb = v.decided_by.kind === "veto" ? "declined" : "approved";
-    lines.push(`${verb} by ${v.decided_by.author} in post ${v.decided_by.seq} (${String(v.decided_by.kind).toUpperCase()})`);
+    lines.push(confirmationsDecided(v.decided_by) ??
+      `${verb} by ${v.decided_by.author} in post ${v.decided_by.seq} (${String(v.decided_by.kind).toUpperCase()})`);
   } else if (v.state === "current") {
     lines.push("written by a KEY that decides here, so current at once");
   }
-  lines.push(`${body.pending ?? 0} proposal(s) waiting`);
+  if (v.waits_for) lines.push(waitsWords(v.waits_for));
+  lines.push(`${body.pending ?? 0} proposal(s) waiting`, ...deciderLines(body.deciders));
   if (v.unavailable) lines.push(`content unavailable: ${v.unavailable.state} since ${v.unavailable.since}`);
   // A work space's document: a post it cites, by a section's link or its data.sources,
   // was replaced or retracted.
@@ -1407,14 +1524,18 @@ export function renderDocuments(header: string, body: Record<string, any>): stri
 /** Every version of a document, newest first, with what became of each proposal. */
 export function renderVersions(header: string, body: Record<string, any>): string {
   const items: any[] = body.items ?? [];
-  const lines = [header, `${items.length} version(s) of ${spaceName(body.space)}${body.next_before ? `, more before: pass before ${body.next_before}` : ""}`, ...budgetLine(body)];
+  const lines = [header, `${items.length} version(s) of ${spaceName(body.space)}${body.next_before ? `, more before: pass before ${body.next_before}` : ""}`,
+    ...deciderLines(body.deciders), ...budgetLine(body)];
   if (body.notice) lines.push(body.notice);
   for (const v of items) {
     lines.push("", `[${v.seq}] ${v.state} by ${v.author} at ${v.posted_at}, post_id ${v.post_id}` + (v.edits ? `, edits version ${v.edits}` : ", the first version"));
     if (v.same_text_as) lines.push(`  the same text as version ${v.same_text_as}`);
     if (v.stage) lines.push("  sets stage once it is current:", ...stageFields(v.stage));
+    if (v.waits_for) lines.push(`  ${waitsWords(v.waits_for)}`);
     if (v.decision) {
-      lines.push(`  ${v.decision.kind === "go" ? "approved" : "declined"} by ${v.decision.author} in post ${v.decision.seq}`);
+      lines.push(v.decision.by === "confirmations"
+        ? `  approved by confirmations: ${idList(v.decision.confirmed_by)}, the last in post ${v.decision.seq}`
+        : `  ${v.decision.kind === "go" ? "approved" : "declined"} by ${v.decision.author} in post ${v.decision.seq}`);
       lines.push(...peerField("reason", v.decision.reason));
     }
     lines.push(...peerField("what changed", v.summary));
@@ -1497,6 +1618,13 @@ export function renderTask(header: string, body: Record<string, any>): string {
   // next says first which job it hands out and why, in the service's own words.
   const job = typeof body.job === "string" ? body.job : null;
   if (job !== null) lines.push(`job: ${job}.${typeof body.why === "string" ? ` ${body.why}` : ""}`);
+  // A check of a waiting version of the document, not of a task
+  // (migrations/0138_document_decision.sql): read it, then a go if it holds.
+  if (!t && body.version) {
+    lines.push(...versionCheckLines(body.space, body.version));
+    if (body.notice) lines.push(body.notice);
+    return lines.join("\n");
+  }
   if (!t) {
     if (job === null) lines.push(body.verify ? `no done task in ${spaceName(body.space)} waits for your check` : `no task in ${spaceName(body.space)} is open to you now`);
     return lines.join("\n");
@@ -1570,6 +1698,26 @@ export function renderTask(header: string, body: Record<string, any>): string {
   if (Array.isArray(body.history)) lines.push(...historyLines(body));
   if (body.notice) lines.push(body.notice);
   return lines.join("\n");
+}
+
+/**
+ * A waiting version next hands as a check: where it is, who wrote it, what it changed
+ * (the author's words, fenced, as is a stage it sets), what it waits for, and the two
+ * calls that answer it. No verify line: a version is approved or answered, never
+ * confirmed or rejected as a task is.
+ */
+function versionCheckLines(space: unknown, v: Record<string, any>): string[] {
+  const name = spaceName(space);
+  const lines = [`version ${v.seq} of the document in ${name}, post_id ${v.post_id}, by ${v.author} at ${v.posted_at}`];
+  lines.push(...peerField("what changed", v.summary));
+  if (v.stage) lines.push("sets stage once it is current:", ...stageFields(v.stage));
+  if (v.waits_for) lines.push(waitsWords(v.waits_for));
+  lines.push(
+    `read it: schellingaf_oracle action read, space ${name}, version ${v.seq}`,
+    `it holds: schellingaf_oracle action approve, space ${name}, proposal ${v.post_id}, reason why`,
+    "it is wrong: post why, replying to it; next then stops handing it to you",
+  );
+  return lines;
 }
 
 /**

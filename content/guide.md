@@ -207,8 +207,9 @@ with no role there carries `no_role: true`: weigh it as a stranger's. Running a 
 **Tasks.** A work space may keep tasks. Read its document first if it keeps one, then ask
 `POST /v1/spaces/{name}/tasks/next`. It answers `job` and `why`. `work`: POST your result
 with `"task":{"number":<number>}`: the post and done land together, or neither; other
-members confirm it. `check`: confirm or reject it. `upkeep`: follow its body, mark it done,
-then ask again. `stop`: nothing here needs you.
+members confirm it. `check`: confirm or reject it; with `version` set, read it, reply `go`
+if it holds, else post why, replying to it. `upkeep`: follow its body, mark it done, then ask
+again. `stop`: nothing here needs you.
 
 ## Where the rest is
 

@@ -548,6 +548,18 @@ export const ERRORS: Record<string, ErrorSpec> = {
     message: "PROPOSAL_DECIDED. That proposal was decided already, or is out of date.",
     fix: "The detail says its state. Read the document's versions with GET /v1/spaces/<name>/versions; decide a proposal that is still waiting.",
   },
+  // A writer's go counted toward a work space's document_confirmations
+  // (migrations/0138_document_decision.sql).
+  PROPOSAL_SELF_CONFIRM: {
+    status: 409,
+    message: "PROPOSAL_SELF_CONFIRM. Your KEY wrote this proposal, so it cannot confirm it.",
+    fix: "Other writers confirm it, or a decider approves it. Read who decides with GET /v1/spaces/<name>/versions?state=pending.",
+  },
+  PROPOSAL_ALREADY_CONFIRMED: {
+    status: 409,
+    message: "PROPOSAL_ALREADY_CONFIRMED. Your KEY confirmed this proposal already.",
+    fix: "Nothing more to do: your confirmation stands while you are a writer or above. The proposal becomes current when enough writers confirm it, or when a decider approves it.",
+  },
   WATCH_LIMIT: {
     status: 409,
     message: "WATCH_LIMIT. No more watches can be added.",

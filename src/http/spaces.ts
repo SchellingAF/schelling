@@ -58,6 +58,7 @@ import {
   STAGE_LIMITS,
   STAGE_WORD,
   TASK_LIMITS,
+  ORACLE_LIMITS,
 } from "../surface/vocabulary.ts";
 import {
   LIMITS, OWN, SHARED, charge, emptyOf, openPostsPerDay, refuseIfEmpty, refuseUnlessOwnCanPay, spend, publicKeyAgeHours,
@@ -291,6 +292,19 @@ export function refuseOpenUnlessPublicWork(joinPolicy: string, visibility: strin
   }
 }
 
+/** document_confirmations, absent or null for none sent: a whole number from 0 to 5,
+ *  ORACLE_LIMITS.confirmations, which the database's spaces_document_confirmations_range
+ *  holds too (migrations/0138_document_decision.sql). */
+function optionalDocumentConfirmations(input: Record<string, unknown>): number | null {
+  const value = input.document_confirmations;
+  if (value === undefined || value === null) return null;
+  const { min, max } = ORACLE_LIMITS.confirmations;
+  if (typeof value !== "number" || !Number.isInteger(value) || value < min || value > max) {
+    throw new ApiError("INVALID_REQUEST", { detail: `document_confirmations is a whole number from ${min} to ${max}` });
+  }
+  return value;
+}
+
 /** A document is for a public or private work space, as the database's
  *  spaces_document_is_work holds: refused here in set_space_document()'s words before
  *  anything is spent. */
@@ -467,6 +481,17 @@ export function mountSpaces(app: Hono<Env>, config: Config, db: Db, service: Ser
     // version sent with a work space gives it one unless document says false.
     const document = optionalBoolean(input.document, "document") ?? (sent("version") && !oracle);
     refuseDocumentUnlessWork(document, visibility, oracle);
+    // How many writers' go accept a version of its document: above 0 only with a document,
+    // refused here before anything is spent, on every path; 0 changes nothing.
+    const confirmations = optionalDocumentConfirmations(input) ?? 0;
+    if (confirmations > 0 && oracle) {
+      throw new ApiError("INVALID_REQUEST", {
+        detail: "document_confirmations is a setting of a work space document: an oracle space is decided by its owner, an admin or the service reviewer",
+      });
+    }
+    if (confirmations > 0 && !document) {
+      throw new ApiError("INVALID_REQUEST", { detail: "document_confirmations needs a document: send document true with it" });
+    }
     // A sealed SPACE comes with its first key, made on its owner's machine: the id its
     // software chose, since the key and the owner's lock both name it, generation 1's
     // commitment, and the owner's own lock (content/sealed.md, sections 2 and 3). It
@@ -566,7 +591,8 @@ export function mountSpaces(app: Hono<Env>, config: Config, db: Db, service: Ser
       return c.json({ ...receipt(c, null, row!.created), visibility, join_policy: joinPolicy, signed_only: signedOnly, categories }, 201);
     }
     const settled = { visibility, join_policy: joinPolicy, signed_only: signedOnly, categories,
-                      ...(oracle ? { oracle: true } : {}), ...(document ? { document: true } : {}) };
+                      ...(oracle ? { oracle: true } : {}), ...(document ? { document: true } : {}),
+                      ...(confirmations > 0 ? { document_confirmations: confirmations } : {}) };
     if (!ready && !document) {
       const [row] = await create(db.write);
       return c.json({ ...receipt(c, null, row!.created), ...settled }, 201);
@@ -609,6 +635,11 @@ export function mountSpaces(app: Hono<Env>, config: Config, db: Db, service: Ser
       if (document) {
         const [set] = await sql<{ set: { revision: string } }[]>`
           select schellingaf.set_space_document(${name}, ${me.peerId}, true) as set`;
+        revision = set!.set.revision;
+      }
+      if (confirmations > 0) {
+        const [set] = await sql<{ set: { revision: string } }[]>`
+          select schellingaf.set_document_settings(${name}, ${me.peerId}, ${confirmations}::int) as set`;
         revision = set!.set.revision;
       }
       const granted: Record<string, unknown>[] = [];
@@ -961,6 +992,7 @@ export function mountSpaces(app: Hono<Env>, config: Config, db: Db, service: Ser
           oracle: boolean;
           service_reviewer: boolean;
           document: boolean;
+          document_confirmations: number;
           forked_from: string | null;
           my_role: string | null;
           my_tags: string[] | null;
@@ -980,7 +1012,7 @@ export function mountSpaces(app: Hono<Env>, config: Config, db: Db, service: Ser
       >`
         select s.space_id::text, s.name, s.title, s.description, s.join_policy, s.visibility, s.status,
                s.signed_only, s.owner_id as owner, s.created_at, s.categories,
-               s.oracle, s.service_reviewer, s.document,
+               s.oracle, s.service_reviewer, s.document, s.document_confirmations,
                (select f.name from schellingaf.spaces f where f.space_id = s.forked_from) as forked_from,
                s.replaced_by::text as replaced_by_id,
                (select r.name from schellingaf.spaces r where r.space_id = s.replaced_by) as replaced_by_name,
@@ -1090,6 +1122,9 @@ export function mountSpaces(app: Hono<Env>, config: Config, db: Db, service: Ser
                   version: space.version_id ? { post_id: space.version_id, seq: space.version_seq } : null,
                   pending: space.pending ?? 0,
                 },
+            // How many writers' go accept a version, to every caller: it says how the SPACE
+            // decides, not who.
+            document_confirmations: space.document_confirmations,
           }
         : {}),
       // The stage a version set, to whoever reads the SPACE, while that version is shown;
@@ -1176,6 +1211,9 @@ export function mountSpaces(app: Hono<Env>, config: Config, db: Db, service: Ser
     // Whether a work space keeps a document, which an admin sets as well as the owner, in
     // the same transaction too; off is refused once a version is posted.
     const document = optionalBoolean(input.document, "document");
+    // How many writers' go accept a version of its document, which an admin sets as well as
+    // the owner, after the document in the same transaction, so both may come in one request.
+    const confirmations = optionalDocumentConfirmations(input);
 
     const updateSpace = (sql: Sql) => sql<{ updated: Record<string, unknown> }[]>`
       select schellingaf.update_space(${c.req.param("name")}, ${me.peerId},
@@ -1184,7 +1222,7 @@ export function mountSpaces(app: Hono<Env>, config: Config, db: Db, service: Ser
                                       ${filing?.main ?? null}::text[], ${serviceReviewer}) as updated`;
 
     await spend(c, db, LIMITS.peerWrites(me.hex));
-    if (!taskSettings && document === null) {
+    if (!taskSettings && document === null && confirmations === null) {
       const [row] = await updateSpace(db.write);
       return c.json(receipt(c, null, row!.updated));
     }
@@ -1198,11 +1236,14 @@ export function mountSpaces(app: Hono<Env>, config: Config, db: Db, service: Ser
                                              ${tasks.documentAfter}::int, ${tasks.tasksHours}::int) as set` : [];
       const [kept] = document !== null ? await sql<{ kept: Record<string, unknown> }[]>`
         select schellingaf.set_space_document(${c.req.param("name")}, ${me.peerId}, ${document}) as kept` : [];
-      return { updated: updated?.updated ?? null, set: set?.set ?? null, kept: kept?.kept ?? null };
+      const [confirmed] = confirmations !== null ? await sql<{ confirmed: Record<string, unknown> }[]>`
+        select schellingaf.set_document_settings(${c.req.param("name")}, ${me.peerId}, ${confirmations}::int) as confirmed` : [];
+      return { updated: updated?.updated ?? null, set: set?.set ?? null, kept: kept?.kept ?? null, confirmed: confirmed?.confirmed ?? null };
     });
     // The last function called answers with the revision the SPACE now stands at.
-    const changed = done.updated?.changed === true || done.set?.changed === true || done.kept?.changed === true;
-    return c.json(receipt(c, null, { ...done.set, ...done.kept, changed }));
+    const changed = done.updated?.changed === true || done.set?.changed === true || done.kept?.changed === true ||
+      done.confirmed?.changed === true;
+    return c.json(receipt(c, null, { ...done.set, ...done.kept, ...done.confirmed, changed }));
   });
 
   // ── members ───────────────────────────────────────────────────────────────

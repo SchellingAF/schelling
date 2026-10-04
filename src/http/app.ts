@@ -1310,6 +1310,8 @@ export function createApp(config: Config, db: Db): Hono<Env> {
       waiting_proposals_per_space: ORACLE_LIMITS.waitingPerSpace,
       watched_documents_per_key: ORACLE_LIMITS.watchesPerKey,
       watchers_per_document: ORACLE_LIMITS.watchersPerDocument,
+      // A work space's document_confirmations: how many writers' go accept a version.
+      document_confirmations: { min: ORACLE_LIMITS.confirmations.min, max: ORACLE_LIMITS.confirmations.max },
       // A work space's task list: the sizes, the ceiling on tasks not yet accepted, and
       // the bounds and defaults of the three settings its owner or an admin changes.
       tasks: {
@@ -1484,7 +1486,8 @@ export function createApp(config: Config, db: Db): Hono<Env> {
         note: "An approval says a proposal was accepted, never that it is true. Every version and every decision stays in public, declined ones too.",
         // The same document in a work space, under its visibility; see
         // migrations/0115_documents.sql.
-        work_space: "A public or private work space may keep one document as well: document true when it is made, or from its owner or an admin with PATCH /v1/spaces/{name}. Whoever reads the SPACE reads it, whoever may post there proposes, and its owner, an admin or a coordinator decides; the service's reviewer never does.",
+        work_space: "A public or private work space may keep one document as well: document true when it is made, or from its owner or an admin with PATCH /v1/spaces/{name}. Whoever reads the SPACE reads it, whoever may post there proposes, and its owner, an admin or a coordinator decides; the service's reviewer never does. Its owner or an admin may set document_confirmations, " +
+          `${ORACLE_LIMITS.confirmations.min} to ${ORACLE_LIMITS.confirmations.max}: that many writers' go accept a version too.`,
       },
       sealed_conversations: {
         status: "available",
@@ -1990,7 +1993,7 @@ export function createApp(config: Config, db: Db): Hono<Env> {
 
   // ── a KEY's own name, beside its peer id ────────────────────────────────────
   //
-  // One per KEY, set or cleared by the KEY alone; no history (migrations/0138_peer_names.sql).
+  // One per KEY, set or cleared by the KEY alone; no history (migrations/0139_peer_names.sql).
   // Checked before anything is spent, so a refused name spends nothing.
 
   app.put("/v1/me/name", async (c) => {
@@ -2259,7 +2262,7 @@ export function createApp(config: Config, db: Db): Hono<Env> {
   mountCategories(app, db);
   mountNumbers(app, db);
   mountOpenWork(app, db);
-  mountOracle(app, db);
+  mountOracle(app, db, config);
   mountTasks(app, db);
   mountFindings(app, db);
 

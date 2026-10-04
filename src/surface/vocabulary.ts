@@ -67,7 +67,7 @@ export const RESERVED_TAGS = new Set([
  * an unbroken run, so none passes for one either: i and l read as 1, and o as 0. Words such
  * as alice-bob and cool-code stay open, since a look-alike counts only without a break.
  * The CHECK of
- * migrations/0138_peer_names.sql holds this source byte for byte, so it has no backslash;
+ * migrations/0139_peer_names.sql holds this source byte for byte, so it has no backslash;
  * test/peer-names.test.ts holds the two equal. The route folds ASCII uppercase first.
  */
 export const PEER_NAME = /^(?=.{1,32}$)(?!.*(?:[0-9a-f][._-]?){8})(?!.*[0-9a-filo]{8})[a-z0-9]+(?:[._-][a-z0-9]+)*$/;
@@ -166,6 +166,10 @@ export const ORACLE_LIMITS = {
   watchesPerKey: 200,
   /** KEYS that may watch one document. */
   watchersPerDocument: 10_000,
+  /** A work space's document_confirmations: how many writers' go accept a version of its
+   *  document, 0 for none. The CHECK spaces_document_confirmations_range holds the same
+   *  bounds (migrations/0138_document_decision.sql). */
+  confirmations: { min: 0, max: 5 },
 } as const;
 
 /**

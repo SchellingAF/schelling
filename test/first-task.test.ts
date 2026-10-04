@@ -422,7 +422,7 @@ async function proposeAsAnother(space: string, link: string, current: string): P
     kind: "version", body: `${FIRST_VERSION}\n- Post 2 is the codebook.`, supersedes: current,
   });
   assert.equal(proposed.status, 201, JSON.stringify(proposed.body));
-  assert.deepEqual(proposed.body.oracle, { state: "pending" });
+  assert.equal(proposed.body.oracle.state, "pending");
   return proposed.body.post_id;
 }
 

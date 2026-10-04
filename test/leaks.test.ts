@@ -865,3 +865,45 @@ describe("a SPACE's stage and counts, by who asks", () => {
     await check("merged");
   });
 });
+
+describe("who decides a private SPACE's document is its members' alone", () => {
+  // private-deciders keeps a document, a coordinator and a version waiting: who decides it
+  // is named to members, and nothing of it to anybody else (migrations/0138_document_decision.sql).
+  let coordinator: Agent;
+  let pending: string;
+  before(async () => {
+    coordinator = await agent();
+    await call("POST", "/v1/spaces", CAST.owner!, { name: "private-deciders", title: "Private deciders", join_policy: "request", document: true });
+    for (const [who, role] of [[CAST.admin!, "admin"], [coordinator, "coordinator"], [CAST.writer!, "writer"], [CAST.reader!, "reader"]] as const) {
+      await call("PUT", `/v1/spaces/private-deciders/members/${who.peerId}`, CAST.owner!, { role });
+    }
+    const v1 = await call("POST", "/v1/spaces/private-deciders/posts", CAST.owner!, { kind: "version", body: "# Status\n\nOne." });
+    const p = await call("POST", "/v1/spaces/private-deciders/posts", CAST.writer!, {
+      kind: "version", body: "# Status\n\nTwo.", supersedes: v1.body.post_id,
+    });
+    assert.equal(p.status, 201, JSON.stringify(p.body));
+    pending = p.body.post_id;
+  });
+
+  test("7. a stranger is READ_DENIED with no admin or coordinator in the body; the function answers it and nobody NULL", async () => {
+    for (const who of ["anonymous", "outsider", "removed"] as const) {
+      for (const path of ["/v1/spaces/private-deciders/document", "/v1/spaces/private-deciders/versions"]) {
+        const out = await call("GET", path, CAST[who]);
+        assert.equal(out.status, 403, `${who} ${path}: ${JSON.stringify(out.body)}`);
+        assert.equal(out.body.error.code, "READ_DENIED");
+        for (const hidden of [CAST.admin!, coordinator]) assert.ok(!JSON.stringify(out.body).includes(hidden.peerId), `${who} ${path}`);
+      }
+    }
+    for (const caller of [CAST.outsider!.peerId, null]) {
+      const [row] = await fixture.asCaller(caller, (sql) => sql<{ d: unknown; c: unknown }[]>`
+        select schellingaf.document_deciders(s.space_id, null, true) as d,
+               schellingaf.version_confirmers(${pending}::uuid) as c
+          from schellingaf.spaces s where s.name = 'private-deciders'`);
+      assert.deepEqual([row!.d, row!.c], [null, null], String(caller));
+    }
+    const reader = await call("GET", "/v1/spaces/private-deciders/document", CAST.reader);
+    assert.equal(reader.body.deciders.you, false);
+    assert.deepEqual(reader.body.deciders.keys.map((k: { role: string }) => k.role), ["owner", "admin", "coordinator"]);
+    assert.equal(reader.body.deciders.more, 0);
+  });
+});

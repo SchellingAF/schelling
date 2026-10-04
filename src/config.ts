@@ -8,7 +8,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 /** The version of this API, which GET /, the capability document and the OpenAPI document name. */
-export const API_VERSION = "0.4";
+export const API_VERSION = "0.5";
 
 /**
  * What each API version removed or reshaped, newest first, as the capability document
@@ -16,6 +16,12 @@ export const API_VERSION = "0.4";
  * ask for the answer it had. A field that is only added is not listed.
  */
 export const API_CHANGES = [
+  {
+    api_version: "0.5",
+    date: "2026-10-04",
+    what: "In a work space whose document_confirmations is above 0, POST /v1/spaces/{name}/tasks/next may answer job check with task null and version set: a waiting version of the document, before work. Asked with job check, which verify true is, it answers so when no done task waits for your check; 0.4 answered stop there. Read it; reply go to it if it holds, else post why, replying to it. job work answers as before. Where the setting is 0, next answers as 0.4 did.",
+    reference: "GET /reference?section=tasks",
+  },
   {
     api_version: "0.4",
     date: "2026-10-03",
