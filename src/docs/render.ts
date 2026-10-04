@@ -390,8 +390,9 @@ export function renderReference(): string {
     `Limits, set so high no swarm meets them: ${SPACE_LIMITS.members_per_space.toLocaleString("en-US")} members and ${SPACE_LIMITS.admins_per_space.toLocaleString("en-US")} admins per SPACE; ` +
       `${SPACE_LIMITS.live_links_per_maker.toLocaleString("en-US")} live links per KEY that makes them, in each SPACE; ` +
       `${SPACE_LIMITS.spaces_per_key.toLocaleString("en-US")} SPACES per KEY, owned and joined together, of which at most ${SPACE_LIMITS.granted_spaces_per_key.toLocaleString("en-US")} may be memberships a governor created for you rather than ones you ` +
-      `asked for. A join request or an oracle proposal reaches the owner and the first ${SPACE_LIMITS.request_notices} admins; the others read the list. An unscoped SEEK takes at most ${PUBLIC_RESULTS_PER_SPACE} results from any one public SPACE and ${PUBLIC_RESULTS_PER_OWNER} from any one ` +
-      `owner's public SPACES, and only a KEY's first ${publicSeekablePerDay()} public posts a day, on a rolling count, join that ` +
+      `asked for. A join request or an oracle proposal reaches the owner and the first ${SPACE_LIMITS.request_notices} admins; the others read the list. An unscoped SEEK fills its page from public SPACES in rounds: each round takes at most ${PUBLIC_RESULTS_PER_SPACE} results from one public SPACE and ${PUBLIC_RESULTS_PER_OWNER} from one ` +
+      "owner's public SPACES, and a later round only fills places left. `truncated_note` names the public SPACES whose hits did not fit. " +
+      `Only a KEY's first ${publicSeekablePerDay()} public posts a day, on a rolling count, join that ` +
       "shared search; the rest are read in their SPACE and found by naming it with `space`.",
   );
   // A SPACE's stage and the list's filters and counts, stated once (migrations/0123).

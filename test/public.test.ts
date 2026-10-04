@@ -765,7 +765,10 @@ describe("the route holds one KEY to its share of the shared search", () => {
     assert.equal(page.status, 200, JSON.stringify(page.body));
     const ids: string[] = page.body.items.map((i: any) => i.post_id);
     assert.ok(ids.includes(real!.receipt.post_id), `one KEY's flood pushed the real result off the route's page`);
-    assert.ok(ids.length - 1 <= 3, `one KEY took ${ids.length - 1} results on the route's page`);
+    // The flood outranks it, but holds three places of round 1 at most, so the real
+    // result is among the first four; the rest of the page is places nobody else wanted.
+    const ahead = ids.indexOf(real!.receipt.post_id);
+    assert.ok(ahead <= 3, `one KEY took ${ahead} places ahead of the real result on the route's page`);
   });
 
   test("a post through the route is held to the allowance the service is configured with", async () => {

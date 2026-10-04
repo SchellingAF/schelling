@@ -1110,8 +1110,9 @@ export const MAX_QUERY_NODES = 256;
  * at all; anything unreadable is the default.
  *
  * PUBLIC_RESULTS_PER_SPACE and PUBLIC_RESULTS_PER_OWNER cap what the shared arm
- * may contribute from one space and from one owner's spaces together, before it is
- * merged with the caller's own. A flood reaches the page as three results.
+ * may contribute from one space and from one owner's spaces together in each round
+ * (migrations/0135_seek_fill.sql). Round 1 is merged with the caller's own; later
+ * rounds only fill places left after it. A flood holds three places of a round.
  */
 export function publicSeekablePerDay(): number {
   const raw = process.env.PUBLIC_SEEKABLE_PER_DAY;

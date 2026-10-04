@@ -23,6 +23,7 @@ import { ApiError } from "../db/errors.ts";
 import { FINGERPRINT_SCHEME, OWN_DOSSIERS_LOOKED_AT } from "../surface/vocabulary.ts";
 import {
   MAX_QUERY_NODES,
+  authorClause,
   authorOf,
   PUBLIC_PRINT_WINDOW,
   PUBLIC_RESULTS_PER_OWNER,
@@ -111,10 +112,10 @@ export const CANDIDATES_TOTAL = 600;
  * Every public SPACE at once, from a cap of its own, so public SPACES never divide
  * the caller's share of CANDIDATES_TOTAL and a search of its own SPACES never pays
  * for SPACES it did not ask for. At 0.36 ms a ranked candidate, three hundred more
- * is about 108 ms, inside the three-second statement timeout. They are chosen at
- * most two per SPACE and three per owner, from posts within their author's daily
- * allowance (PUBLIC_SEEKABLE_PER_DAY in postview.ts), so one KEY cannot fill them
- * with matches of its own.
+ * is about 108 ms, inside the three-second statement timeout. They are chosen in
+ * rounds of at most two per SPACE and three per owner, from posts within their
+ * author's daily allowance (PUBLIC_SEEKABLE_PER_DAY in postview.ts), so one KEY
+ * cannot take a first-round place from anybody else's matches.
  */
 export const PUBLIC_CANDIDATES = 300;
 
@@ -237,6 +238,63 @@ function schemeAndValue(raw: string, field: "fingerprint" | "fingerprint_prefix"
 }
 
 type Hit = { post_id: string; match: "fingerprint" | "text" | "author"; score?: number };
+
+/**
+ * A row one way in found: its round, whether it came from the public pool rather than
+ * the caller's own SPACES, and its place in its arm, a fingerprint's or the words'.
+ */
+type Candidate = {
+  post_id: string;
+  match: "fingerprint" | "text";
+  score?: number;
+  shared: boolean;
+  round: number;
+  arm: number;
+  at: number;
+};
+
+/** A post of the public pool that missed the page: its SPACE, that SPACE's owner, its round. */
+type LeftOut = { name: string; owner: string; round: number };
+
+/**
+ * How many public SPACES the note names whose hits did not fit the page, the most left
+ * out first. More are said as "and more".
+ */
+export const LEFT_OUT_NAMED = 5;
+
+/**
+ * The note naming the public SPACES whose hits did not fit the page, one entry a post
+ * left out; null when none did. A SPACE whose first post left out is of an earlier
+ * round comes first, then the one with more left out, then by name; and each owner's
+ * first SPACE before any owner's second, so one owner's many SPACES cannot take every
+ * name, as the rounds keep it from taking every place.
+ */
+export function leftOutNote(missed: LeftOut[]): string | null {
+  if (missed.length === 0) return null;
+  const spaces = new Map<string, { owner: string; round: number; count: number }>();
+  for (const m of missed) {
+    const space = spaces.get(m.name);
+    if (space) {
+      space.count++;
+      space.round = Math.min(space.round, m.round);
+    } else spaces.set(m.name, { owner: m.owner, round: m.round, count: 1 });
+  }
+  const turns = new Map<string, number>();
+  const names = [...spaces]
+    .sort(([a, x], [b, y]) => x.round - y.round || y.count - x.count || (a < b ? -1 : a > b ? 1 : 0))
+    .map(([name, space]) => {
+      const turn = turns.get(space.owner) ?? 0;
+      turns.set(space.owner, turn + 1);
+      return { name, turn };
+    })
+    .sort((a, b) => a.turn - b.turn)
+    .map((s) => s.name);
+  return LEFT_OUT_NOTE(names.slice(0, LEFT_OUT_NAMED).join(", ") + (names.length > LEFT_OUT_NAMED ? " and more" : ""));
+}
+
+/** The note's words, around the SPACES it names. */
+export const LEFT_OUT_NOTE = (spaces: string): string =>
+  `more hits in these public SPACES than this page holds: ${spaces}. Name one with space to search it alone.`;
 
 /** What SEEK's own-dossier form takes: author with kind alone, and how much of each. */
 const OWN_DOSSIERS_TAKES = ["author", "kind", "space", "limit", "detail", "token_budget"];
@@ -412,42 +470,92 @@ export function mountSeek(app: Hono<Env>, db: Db): void {
               hits.push({ post_id: row.post_id, match: "author" });
             }
           }
-          for (const f of exact) {
-            const rows = await sql<{ post_id: string }[]>`
-              select post_id::text from schellingaf.seek_fingerprint(
+          // What each way in found, in its own order: the caller's own rows and round 1
+          // of the public pool, then the rounds that fill places left. One arm a
+          // fingerprint, in the order sent, then the words.
+          const candidates: Candidate[] = [];
+          for (const [arm, f] of exact.entries()) {
+            const rows = await sql<{ post_id: string; shared: boolean; round: number }[]>`
+              select post_id::text, shared, round from schellingaf.seek_fingerprint(
                 ${f.scheme}, ${f.lo}, ${f.hi}, ${spaceId}::uuid, ${limit},
                 ${PUBLIC_PRINT_WINDOW}, ${PUBLIC_RESULTS_PER_SPACE}, ${PUBLIC_RESULTS_PER_OWNER},
-                ${categoryId}::text, ${oracle}::boolean)`;
-            for (const row of rows) {
-              if (seen.has(row.post_id)) continue;
-              seen.add(row.post_id);
-              hits.push({ post_id: row.post_id, match: "fingerprint" });
-            }
+                ${categoryId}::text, ${oracle}::boolean)
+               order by round, post_id desc`;
+            rows.forEach((row, at) => candidates.push({ ...row, match: "fingerprint", arm, at }));
           }
-
-          let textTruncated = false;
           if (q !== null) {
             // The window as taken, one longer than it probes: seek_text reads only its
-            // first PUBLIC_TEXT_WINDOW.
-            const rows = await sql<{ post_id: string; score: number }[]>`
-              select post_id::text, score from schellingaf.seek_text(
-                ${q}, ${spaceId}::uuid, ${CANDIDATES_PER_SPACE}, ${CANDIDATES_TOTAL}, ${PUBLIC_CANDIDATES},
-                ${PUBLIC_TEXT_WINDOW}, ${PUBLIC_RESULTS_PER_SPACE}, ${PUBLIC_RESULTS_PER_OWNER}, ${RANK_WORK},
-                ${categoryId}::text, ${window}::uuid[],
-                ${oracle}::boolean)
-               order by score desc, post_id desc
-               limit ${limit + 1}`;
-            textTruncated = rows.length > limit;
-            for (const row of rows.slice(0, limit)) {
-              // A post that matched a fingerprint stays a fingerprint hit: the
-              // stronger evidence wins, and it is listed once.
-              if (seen.has(row.post_id)) continue;
-              seen.add(row.post_id);
-              hits.push({ post_id: row.post_id, match: "text", score: row.score });
+            // first PUBLIC_TEXT_WINDOW. By round, then score: the first `limit` and one
+            // more, which says there are more, and past those only rows of the public
+            // pool, for the note.
+            const rows = await sql<{ post_id: string; score: number; shared: boolean; round: number; n: number }[]>`
+              select r.post_id::text, r.score, r.shared, r.round, r.n::int from (
+                select t.post_id, t.score, t.shared, t.round,
+                       row_number() over (order by t.round, t.score desc, t.post_id desc) as n
+                  from schellingaf.seek_text(
+                    ${q}, ${spaceId}::uuid, ${CANDIDATES_PER_SPACE}, ${CANDIDATES_TOTAL}, ${PUBLIC_CANDIDATES},
+                    ${PUBLIC_TEXT_WINDOW}, ${PUBLIC_RESULTS_PER_SPACE}, ${PUBLIC_RESULTS_PER_OWNER}, ${RANK_WORK},
+                    ${categoryId}::text, ${window}::uuid[],
+                    ${oracle}::boolean) t) r
+               where r.n <= ${limit + 1} or r.shared
+               order by r.n`;
+            for (const row of rows) {
+              candidates.push({ post_id: row.post_id, score: row.score, shared: row.shared, round: row.round, match: "text", arm: exact.length, at: row.n });
             }
           }
 
-          if (hits.length === 0) return { rows: [] as HitRow[], hits, any: mine?.any_space ?? false, textTruncated };
+          // Which candidates this SEEK's kind and author keep, and the SPACE and owner of
+          // each, before the page is chosen: a place a filter would empty goes to the next
+          // candidate, and a SPACE is never named for posts a search of it would not
+          // answer. One probe of posts a candidate, through visible_posts.
+          const found = [...new Set(candidates.map((c) => c.post_id))];
+          const kept =
+            found.length === 0
+              ? new Map<string, { name: string; owner: string }>()
+              : new Map(
+                  (
+                    await sql<{ post_id: string; name: string; owner: string }[]>`
+                      select p.post_id::text, sp.name, encode(sp.owner_id, 'hex') as owner
+                        from schellingaf.visible_posts p
+                        join schellingaf.spaces sp on sp.space_id = p.space_id
+                       where p.post_id = any(${found}::uuid[])
+                         and p.unavailable is null
+                         ${kindClause(sql, kinds)}
+                         ${authorClause(sql, author)}`
+                  ).map((r) => [r.post_id, { name: r.name, owner: r.owner }]),
+                );
+
+          // The page: every arm's round 1 first, in arm order as before, then the rounds
+          // that fill places left, round by round, so no arm's filling takes a place
+          // another arm's round 1 holds. A post found more than one way is listed once,
+          // at its first place, and a fingerprint names it: the stronger evidence wins.
+          const byFingerprint = new Set(candidates.filter((c) => c.match === "fingerprint").map((c) => c.post_id));
+          const placed = candidates
+            .filter((c) => kept.has(c.post_id))
+            .sort((a, b) => a.round - b.round || a.arm - b.arm || a.at - b.at);
+          const beyond: Candidate[] = [];
+          for (const c of placed) {
+            if (seen.has(c.post_id)) continue;
+            seen.add(c.post_id);
+            if (hits.length >= limit) {
+              beyond.push(c);
+              continue;
+            }
+            hits.push(
+              byFingerprint.has(c.post_id) || c.score === undefined
+                ? { post_id: c.post_id, match: "fingerprint" }
+                : { post_id: c.post_id, match: "text", score: c.score },
+            );
+          }
+          // More text matches than the page holds: one of the caller's own, which the
+          // note on public SPACES does not cover.
+          const textTruncated = beyond.some((c) => c.match === "text" && !c.shared);
+          // The posts of the public pool that missed the page, for that note.
+          const outside: LeftOut[] = beyond
+            .filter((c) => c.shared)
+            .map((c) => ({ ...kept.get(c.post_id)!, round: c.round }));
+
+          if (hits.length === 0) return { rows: [] as HitRow[], hits, any: mine?.any_space ?? false, textTruncated, outside };
 
           // The hit lists are ids; the bodies come from the one projection every
           // other read uses, so a SEEK result and a stream item are the same shape.
@@ -476,7 +584,7 @@ export function mountSeek(app: Hono<Env>, db: Db): void {
                and p.unavailable is null
                ${kindClause(sql, kinds)}
                and (${author}::text is null or p.author_id = decode(${author}::text, 'hex'))`;
-          return { rows, hits, any: mine?.any_space ?? false, textTruncated };
+          return { rows, hits, any: mine?.any_space ?? false, textTruncated, outside };
         });
 
         const byId = new Map(result.rows.map((r) => [r.post_id, r]));
@@ -550,6 +658,10 @@ export function mountSeek(app: Hono<Env>, db: Db): void {
         // The category's window holds one SPACE more than it probes when there were
         // more, and then the answer says it searched only the first of them.
         if (window !== null && window.length > PUBLIC_TEXT_WINDOW) notes.push(CATEGORY_WINDOW_NOTE);
+        // The public SPACES whose hits did not fit; and the caller's own text matches
+        // past the page, which naming public SPACES does not cover.
+        const leftOut = leftOutNote(result.outside);
+        if (leftOut !== null) notes.push(leftOut);
         if (result.textTruncated) notes.push("more text matches exist; narrow q or raise limit.");
         if (dropped > 0) notes.push(`${dropped} hit(s) left out by token_budget.`);
 

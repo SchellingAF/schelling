@@ -9,7 +9,8 @@
 // day-old KEY floods as freely as a year-old one. What answers it, and what
 // these hold, is the daily allowance of one KEY's posts that join the shared
 // public index, and the seek functions' caps on what one SPACE and one owner
-// contribute to the shared arm (postview.ts says both).
+// contribute to the shared arm in each round (postview.ts says both). Round 1 is what
+// the caps choose; later rounds only fill places nobody else wanted, after round 1.
 //
 // These tests stage the flood directly against the database, as the operator
 // role, so a scene of hundreds of posts costs seconds rather than the write
@@ -51,23 +52,26 @@ async function post(
   return row!.receipt.post_id;
 }
 
-/** An unscoped text SEEK by a caller with no KEY, ranked and cut to a page. */
-async function seekText(q: string, limit = 10): Promise<string[]> {
-  return fixture.asCaller(null, async (sql) => {
-    const rows = await sql<{ post_id: string }[]>`
-      select post_id::text from schellingaf.seek_text(${q}, null, 100, 600, 300)
-       order by score desc, post_id desc limit ${limit}`;
-    return rows.map((r) => r.post_id);
-  });
+type Placed = { post_id: string; round: number };
+
+/** An unscoped text SEEK by a caller with no KEY, ranked and cut to a page as the route does. */
+async function seekText(q: string, limit = 10): Promise<Placed[]> {
+  return fixture.asCaller(null, async (sql) =>
+    sql<Placed[]>`
+      select post_id::text, round from schellingaf.seek_text(${q}, null, 100, 600, 300)
+       order by round, score desc, post_id desc limit ${limit}`,
+  );
 }
 
-async function seekFingerprint(scheme: string, value: string, limit = 10): Promise<string[]> {
-  return fixture.asCaller(null, async (sql) => {
-    const rows = await sql<{ post_id: string }[]>`
-      select post_id::text from schellingaf.seek_fingerprint(${scheme}, ${value}, ${value + "\u0001"}, null, ${limit})`;
-    return rows.map((r) => r.post_id);
-  });
+async function seekFingerprint(scheme: string, value: string, limit = 10): Promise<Placed[]> {
+  return fixture.asCaller(null, async (sql) =>
+    sql<Placed[]>`
+      select post_id::text, round from schellingaf.seek_fingerprint(${scheme}, ${value}, ${value + "\u0001"}, null, ${limit})
+       order by round, post_id desc limit ${limit}`,
+  );
 }
+
+const ids = (page: Placed[]) => page.map((r) => r.post_id);
 
 const opened = setUp(async () => {
   fixture = await cloneDatabase("flood");
@@ -96,9 +100,10 @@ describe("one KEY flooding public SEEK", () => {
     const real = await post("text-real-space", honest, "zircaloy cladding is what failed, and here is why");
 
     const page = await seekText("zircaloy");
-    assert.ok(page.includes(real), `the real result was pushed out of the first page by one KEY's flood`);
-    const fromFlooder = page.filter((id) => id !== real).length;
-    assert.ok(fromFlooder <= 3, `one KEY took ${fromFlooder} of the first page's results`);
+    assert.ok(ids(page).includes(real), `the real result was pushed out of the first page by one KEY's flood`);
+    assert.equal(page.find((r) => r.post_id === real)?.round, 1, "the real result lost its place in the first round");
+    const fromFlooder = page.filter((r) => r.post_id !== real && r.round === 1).length;
+    assert.ok(fromFlooder <= 3, `one KEY took ${fromFlooder} of the first round's places`);
   });
 
   test("cannot push a real result out of an unscoped fingerprint SEEK", async () => {
@@ -115,9 +120,31 @@ describe("one KEY flooding public SEEK", () => {
     }
 
     const page = await seekFingerprint(print.scheme, print.value);
-    assert.ok(page.includes(real), "ten newer posts from one KEY hid the only honest post carrying that commit");
-    const fromFlooder = page.filter((id) => id !== real).length;
-    assert.ok(fromFlooder <= 3, `one KEY took ${fromFlooder} of the fingerprint page`);
+    assert.ok(ids(page).includes(real), "ten newer posts from one KEY hid the only honest post carrying that commit");
+    assert.equal(page.find((r) => r.post_id === real)?.round, 1, "the honest post lost its place in the first round");
+    const fromFlooder = page.filter((r) => r.post_id !== real && r.round === 1).length;
+    assert.ok(fromFlooder <= 3, `one KEY took ${fromFlooder} of the first round's places`);
+  });
+
+  test("fills only places nobody else wanted: with honest results for every place, three stay its", async () => {
+    // Ten honest owners, one post each, older than the flood: every place of a page of
+    // ten is wanted by round 1, so the flood keeps its three and fills nothing.
+    const flooder = await peer("full-flooder");
+    await publicSpace(flooder, "full-flood-space");
+    const print = { scheme: "git.commit", value: "9a8b7c6d5e4f30211202f3e4d5c6b7a8f9e0d1c2" };
+    const honest: string[] = [];
+    for (let i = 0; i < 10; i++) {
+      const who = await peer(`full-honest-${i}`);
+      await publicSpace(who, `full-honest-space-${i}`);
+      honest.push(await post(`full-honest-space-${i}`, who, `the honest commit, seen ${i}`, print));
+    }
+    for (let i = 0; i < 20; i++) await post("full-flood-space", flooder, `newer and louder ${i}`, print);
+
+    const page = await seekFingerprint(print.scheme, print.value);
+    assert.equal(page.length, 10);
+    const fromFlooder = page.filter((r) => !honest.includes(r.post_id)).length;
+    assert.ok(fromFlooder <= 3, `one KEY took ${fromFlooder} places that honest results wanted`);
+    assert.ok(page.every((r) => r.round === 1), "a filled place took a page round 1 could hold");
   });
 
   test("and what it posted past its allowance is still in its space, and found by naming the space", async () => {

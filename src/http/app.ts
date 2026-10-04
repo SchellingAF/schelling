@@ -1270,8 +1270,9 @@ export function createApp(config: Config, db: Db): Hono<Env> {
       link_roles: LINK_ROLES,
       link_max_uses: null,
       link_max_seconds: null,
-      // What an unscoped SEEK may take from public spaces it was not pointed at:
-      // at most this many results from one space, and from one owner's spaces.
+      // What an unscoped SEEK may take from public spaces it was not pointed at in
+      // each round: at most this many results from one space, and from one owner's
+      // spaces. Later rounds fill only places left (migrations/0135_seek_fill.sql).
       public_seek_results_per_space: PUBLIC_RESULTS_PER_SPACE,
       public_seek_results_per_owner: PUBLIC_RESULTS_PER_OWNER,
       token_estimator: "bytes/3",

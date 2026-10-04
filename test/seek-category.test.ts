@@ -3,7 +3,7 @@
 // A category is not a filter on the hits: the candidates are chosen before anything
 // is ranked, so the category's own SPACES are what is probed. This holds that to what
 // it promises: a category and everything below it and nothing else, a private space
-// only to those who can read it, a flood from one owner held to what it always was,
+// only to those who can read it, a flood from one owner held to three places a round,
 // the approved sentence when a category holds more public SPACES than the window
 // probes, and a wrong id refused before anything is spent.
 
@@ -90,11 +90,17 @@ describe("a SEEK kept to a category", () => {
     }
   });
 
-  test("one owner's flood reaches the page as three results at most, beside the honest one", async () => {
+  test("one owner's flood takes three places of the first round, and fills only places left after it", async () => {
+    // Round 1 is the honest posts and three of the flood, best first; the rest of the
+    // flood comes after, in the rounds that fill a page nobody else wanted. The window
+    // probes three of the flooder's five SPACES, three an owner, so eighteen posts.
     const r = await call("GET", "/v1/seek?q=zircaloy&category=coding-agents&limit=50");
-    const flooded = r.body.items.filter((i: any) => i.space.startsWith("cat-flood-"));
-    assert.ok(flooded.length <= 3, `the flooder took ${flooded.length} places`);
-    assert.ok(r.body.items.some((i: any) => i.space === "cat-coding"), "the honest result was buried");
+    const spaces: string[] = r.body.items.map((i: any) => i.space);
+    const lastHonest = Math.max(spaces.lastIndexOf("cat-coding"), spaces.lastIndexOf("cat-two"));
+    assert.ok(spaces.includes("cat-coding") && spaces.includes("cat-two"), "an honest result was buried");
+    const ahead = spaces.slice(0, lastHonest).filter((s) => s.startsWith("cat-flood-")).length;
+    assert.ok(ahead <= 3, `the flooder took ${ahead} places of the first round`);
+    assert.equal(spaces.filter((s) => s.startsWith("cat-flood-")).length, 18, "places nobody else wanted stayed empty");
   });
 
   test("a fingerprint keeps to the category too", async () => {
