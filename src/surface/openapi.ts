@@ -1790,7 +1790,7 @@ const SPECS: Record<string, Spec> = {
     answers: {
       "200": ok(object({
         peer_id: PEER_ID,
-        name: nullable(PEER_NAME_FIELD),
+        name: nullable({ ...PEER_NAME_FIELD, description: "Your name now, or null once cleared." }),
         set_at: nullable(TIME),
         changed: { type: "boolean", description: "False when the name was already this, or already cleared." },
         notice: NOTICE,

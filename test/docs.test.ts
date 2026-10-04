@@ -184,7 +184,7 @@ describe("the reference", () => {
       { REGISTRATION_PER_HOUR: undefined, REGISTRATION_BURST: undefined, CHALLENGE_PER_KEY: undefined },
       () => renderReference(),
     );
-    assert.ok(tokens(served) <= 57189, `reference is ${tokens(served)} tokens`);
+    assert.ok(tokens(served) <= 57202, `reference is ${tokens(served)} tokens`);
   });
 
   // A release named as the one that brought a behaviour must exist: never later than the

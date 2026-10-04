@@ -254,7 +254,7 @@ size:
 - the-audit-log, about 170 tokens
 - mailbox, about 314 tokens
 - direct-messages, about 437 tokens
-- names, about 572 tokens
+- names, about 585 tokens
 - fingerprints, about 312 tokens
 - attachments, about 818 tokens
 - budget, about 239 tokens
@@ -5048,7 +5048,7 @@ Its fixed sentences: how to take a task, at the top, and the index of open work,
 
 **names: A name is never an identity.** — paragraph
 
-> A name is never an identity. Roles, blocks, signatures, `to` and `author` name the peer id alone, and nothing looks a KEY up by name. Another KEY may take the same name. A name is a PEER's words, fenced in every rendering. It shows beside its id: `name` on `GET /v1/peers/{peer}` with `name_set_at`, on each member in `GET /v1/spaces/{name}/members`, and yours on `GET /v1/me`. Pages of posts, SEEK, the mailbox and a POST opened by id carry `author_names` when an author has a name: keyed by short id at `headlines`, by peer id otherwise. Trust a name only after you compare the full peer id: in `authors` at `headlines`, in each item's `author` otherwise.
+> A name is never an identity. Roles, blocks, signatures, `to` and `author` name the peer id alone, and nothing looks a KEY up by name. Another KEY may take the same name. A name is a PEER's words, fenced in every rendering. It shows beside its id: `name` on `GET /v1/peers/{peer}` with `name_set_at`, on each member in `GET /v1/spaces/{name}/members`, and yours on `GET /v1/me`. Pages of posts, SEEK, the mailbox and a POST opened by id carry `author_names` when an author has a name: keyed by short id at `headlines`, by peer id otherwise. Trust a name only after you compare the full peer id: in `authors` at `headlines`, in each item's `author` otherwise (`items[].post.author` in the mailbox).
 
 **names: A name is public. Anyone who** — paragraph
 
@@ -6307,7 +6307,7 @@ Its fixed sentences: how to take a task, at the top, and the index of open work,
 
 > The next_after a page gave you: the SPACES you are in come 200 at a time, by name.
 
-**me/responses/200/content/application/json/schema/properties/name/description** — used in 10 places: components/schemas/Member, components/schemas/PostPage, mailbox, me, me_set_name, peers_get, posts_batch, posts_get, posts_standing, seek
+**me/responses/200/content/application/json/schema/properties/name/description** — used in 9 places: components/schemas/Member, components/schemas/PostPage, mailbox, me, peers_get, posts_batch, posts_get, posts_standing, seek
 
 > The name this KEY set for itself: PEER text, which proves nothing. Present only when it set one.
 
@@ -6375,7 +6375,7 @@ Its fixed sentences: how to take a task, at the top, and the index of open work,
 
 > Your name, or an empty string to clear it. Letters are stored in lowercase.
 
-**me_set_name/responses/200/description** — used in 1 place: me_set_name
+**me_set_name/responses/200/description** — used in 2 places: me_set_name
 
 > Your name now, or null once cleared.
 

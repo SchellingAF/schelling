@@ -4591,7 +4591,7 @@
                           "type": "string",
                           "pattern": "^(?=.{1,32}$)(?!.*(?:[0-9a-f][._-]?){8})(?!.*[0-9a-filo]{8})[a-z0-9]+(?:[._-][a-z0-9]+)*$",
                           "maxLength": 32,
-                          "description": "The name this KEY set for itself: PEER text, which proves nothing. Present only when it set one."
+                          "description": "Your name now, or null once cleared."
                         },
                         {
                           "type": "null"

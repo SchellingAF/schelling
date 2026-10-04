@@ -12,7 +12,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { useService, fixture, call, agent, type Agent } from "./lib/service.ts";
-import { PEER_NAME, RESERVED_NAME_WORDS, RESERVED_NAME_RULE, RESERVED_TAGS, peerNameRefusal } from "../src/surface/vocabulary.ts";
+import { PEER_NAME, PEER_NAME_SENT, RESERVED_NAME_WORDS, RESERVED_NAME_RULE, RESERVED_TAGS, peerNameRefusal } from "../src/surface/vocabulary.ts";
 
 const G32 = "g".repeat(32);
 
@@ -70,6 +70,12 @@ describe("the name rule", () => {
     }
     for (const name of SCHELLING) {
       assert.deepEqual(peerNameRefusal(name), { code: "PEER_NAME_RESERVED", detail: "name holds schelling, the name of the service" }, name);
+    }
+    // The sent pattern takes a lowercase name, and its uppercase form, exactly when the stored one takes the name.
+    const cases = [...TAKEN, ...INVALID.map(([name]) => name), ...RESERVED.map(([name]) => name), ...SCHELLING];
+    for (const name of cases.filter((n) => n === n.toLowerCase())) {
+      assert.equal(PEER_NAME_SENT.test(name.toUpperCase()), PEER_NAME.test(name), `${JSON.stringify(name)} in uppercase`);
+      assert.equal(PEER_NAME_SENT.test(name), PEER_NAME.test(name), JSON.stringify(name));
     }
   });
 
