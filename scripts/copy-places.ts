@@ -185,6 +185,7 @@ export const PLACES: {
     "migrations/0131_task_give_back.sql": [19],
     "migrations/0132_task_retire_delete.sql": [19],
     "migrations/0134_task_upkeep.sql": [19],
+    "migrations/0136_contested_findings.sql": [19],
     "reviewer/review-proposal.ts": [26],
     "src/db/errors.ts": [2, 19],
     "src/docs/render.ts": [1, 12, 13],

@@ -218,6 +218,20 @@ before(async () => {
         from schellingaf.findings f join schellingaf.spaces s on s.space_id = f.space_id
        where s.name = ${name}`;
   }
+  // A hundred members' warns citing the post every finding of planned-space rests on,
+  // inserted as posts so the trigger writes post_objections, so what contests a finding
+  // is planned against a source a hundred warns cite (migrations/0136_contested_findings.sql).
+  await fixture.owner`
+    insert into schellingaf.posts (space_id, seq, admitted_revision, author_id, kind, title, body, data, content_hash)
+    select s.space_id, 900000 + g, 1,
+           (select x.peer_id from schellingaf.peers x where x.peer_id <> s.owner_id order by x.peer_id limit 1),
+           'warn', 'doubt ' || g, 'doubt',
+           jsonb_build_object('sources', jsonb_build_array(
+             (select q.post_id::text from schellingaf.posts q where q.space_id = s.space_id order by q.seq limit 1))),
+           sha256(('warn' || g)::bytea)
+      from schellingaf.spaces s, generate_series(1, 100) g
+     where s.name = 'planned-space'
+     order by g`;
   // The checks of a task list as a busy one's are likely to be: two confirmations of every
   // done or accepted task, and every fifth finding of the SPACE rejected as a task's result,
   // so the task a finding is the result of is planned against checks of other posts.
@@ -703,6 +717,33 @@ describe("the reads the service actually issues", () => {
       assert.match(plan, /tasks_done_post_idx/, `${query}:\n${plan}`);
       assert.match(plan, /task_checks_result_idx/, `${query}:\n${plan}`);
       assert.doesNotMatch(plan, /Seq Scan on (tasks|task_checks)/, `${query}:\n${plan}`);
+      // What contests a finding (src/http/contested.ts): probes of the checks of each post
+      // it rests on, the newest reject an anti-join probe, and a backward walk of the warns
+      // citing each, stopped at the limit; never a read of the SPACE's checks or warns.
+      assert.match(plan, /task_checks_result_idx on task_checks cr/, `${query}:\n${plan}`);
+      assert.match(plan, /tasks_pkey on tasks ct/, `${query}:\n${plan}`);
+      // The newest reject: a probe of that task's checks, by the task's key or by the post's.
+      assert.match(plan, /on task_checks cn\s+Index Cond: (\(task_id = cr\.task_id\)|\(\(result_post_id = .*\) AND \(checked_at > )/, `${query}:\n${plan}`);
+      assert.match(plan, /Index Scan Backward using post_objections_pkey on post_objections co/, `${query}:\n${plan}`);
+      assert.doesNotMatch(plan, /Seq Scan on (tasks|task_checks|post_objections)/, `${query}:\n${plan}`);
+      assert.doesNotMatch(plan, /Index Scan Backward using posts_pkey/, `${query}: the warns were joined to every post:\n${plan}`);
+      assert.doesNotMatch(plan, /Sort Key: .*(number|task_id)/, `${query}:\n${plan}`);
+    }
+  });
+
+  test("whether a finding is contested is a probe in a SPACE's snippets, a SEEK and one post's sources", async () => {
+    const [cited] = await fixture.owner<{ post_id: string }[]>`
+      select f.post_id::text from schellingaf.findings f join schellingaf.spaces s on s.space_id = f.space_id
+       where s.name = 'planned-space' order by f.number desc limit 1`;
+    for (const [path, contains] of [
+      ["/v1/spaces/planned-space/posts?after=100&limit=50&detail=snippets", "visible_posts"],
+      ["/v1/seek?fingerprint=subject%3Awenmi.image%3A037&space=planned-space&detail=snippets", "finding_status"],
+      [`/v1/posts/${cited!.post_id}/finding`, "as withdrawn"],
+    ] as const) {
+      const plan = await planOf(path, contains);
+      assert.match(plan, /post_objections_pkey on post_objections co/, `${path}:\n${plan}`);
+      assert.match(plan, /task_checks_result_idx on task_checks cr/, `${path}:\n${plan}`);
+      assert.doesNotMatch(plan, /Seq Scan on (task_checks|tasks|post_objections)/, `${path}:\n${plan}`);
     }
   });
 

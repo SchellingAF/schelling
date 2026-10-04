@@ -17,6 +17,7 @@ import { ApiError } from "../db/errors.ts";
 import { parseDocument, sectionText } from "../domain/document.ts";
 import { UUID, byteLength, queryFlag } from "../domain/validate.ts";
 import { toHex } from "../domain/keys.ts";
+import { contestedAny } from "./contested.ts";
 import { algorithmName } from "../domain/passkeys.ts";
 
 // One wire rule, stated here because this is where both kinds appear: a stream
@@ -252,7 +253,7 @@ export type PostRow = {
   retracted: boolean;
   /** A finding's claim, status, confidence and how many sources it names, from its
    *  projection, at `snippets` alone; null on any other post and at any other detail. */
-  finding: { claim: string | null; status: string; confidence: string; sources: number | null } | null;
+  finding: { claim: string | null; status: string; confidence: string; sources: number | null; contested?: true } | null;
   /** The files it attaches, how many and their bytes, at `snippets` and `full`, and their
    *  list at `full`; null at `ids`, and null or 0 on a post whose words are unavailable. */
   attachment_count: number | null;
@@ -327,9 +328,11 @@ function headlineColumns(sql: Sql, detail: Detail) {
  * its confidence and how many sources it names, so a page of snippets lists the claims
  * without the bodies. Read from the findings projection by the post's key, for a finding
  * alone; a withheld or hidden one keeps its status and confidence and loses its claim and
- * its sources, as GET /v1/spaces/{name}/findings shows it (src/http/findings.ts).
+ * its sources, as GET /v1/spaces/{name}/findings shows it (src/http/findings.ts). With
+ * `mark`, `contested: true` when a cause holds (src/http/contested.ts), only while its words
+ * are available; SEEK leaves it out, since its hit carries the mark itself.
  */
-function findingSnippet(sql: Sql) {
+function findingSnippet(sql: Sql, mark: boolean) {
   return sql`case when p.kind = 'finding' then (
       select jsonb_build_object(
                'claim', case when p.unavailable is null then f.claim end,
@@ -337,6 +340,10 @@ function findingSnippet(sql: Sql) {
                'confidence', f.confidence,
                'sources', case when p.unavailable is null
                                then (select count(*)::int from schellingaf.post_sources s where s.post_id = f.post_id) end)
+             ${mark
+               ? sql`|| case when p.unavailable is null and ${contestedAny(sql, "f.post_id", "finding")}
+                             then '{"contested":true}'::jsonb else '{}'::jsonb end`
+               : sql``}
         from schellingaf.findings f where f.post_id = p.post_id) end`;
 }
 
@@ -373,7 +380,7 @@ function findingSnippet(sql: Sql) {
  * reads. `cost()` and `render()` below touch `body` and `data` only at `full`
  * and `snippet` only at `snippets`, which is what makes the nulls unobservable.
  */
-export function postColumns(sql: Sql, detail: Detail, proof = false) {
+export function postColumns(sql: Sql, detail: Detail, proof = false, mark = true) {
   return sql`
     p.post_id::text, p.space_id::text, sp.name as space, p.seq::text,
     p.admitted_revision::text, p.author_id, p.kind, p.title,
@@ -411,7 +418,7 @@ export function postColumns(sql: Sql, detail: Detail, proof = false) {
           ? sql`null::text as body, left(p.body, ${SNIPPET}) as snippet,
                 length(left(p.body, ${SNIPPET + 1})) > ${SNIPPET} as more,
                 null::jsonb as data, null::bytea as sealed_header, null::bytea as ciphertext,
-                ${findingSnippet(sql)} as finding, p.summary,`
+                ${findingSnippet(sql, mark)} as finding, p.summary,`
           : sql`null::text as body, null::text as snippet, false as more, null::jsonb as data,
                 null::bytea as sealed_header, null::bytea as ciphertext, null::jsonb as finding,
                 null::text as summary,`
@@ -684,10 +691,10 @@ export type ReadCost = { headline: number; snippet: number; full: number };
  * route holds, so it reads nothing back: the body's first 280 characters as `left()`
  * cuts them, fingerprints in the C collation's order, a finding's projection from its
  * data, and the JSON sizes of its summary, body and data that a headline's `open` counts,
- * as append_post() stores them. One thing a read knows and this does not: the seqs a
+ * as append_post() stores them. Two things a read knows and this does not: the seqs a
  * headline's `re`, `replaces` and `retracts`, and a full item's `reply_to_seq`,
  * `supersedes_seq` and `retracts_seq`, name, each priced at the length of the POST's own
- * seq, which is never shorter.
+ * seq, which is never shorter; and whether a finding is contested.
  */
 export function readCost(w: Written): ReadCost {
   const sealed = w.sealed !== null;

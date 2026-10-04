@@ -11,7 +11,9 @@
 // Nothing here writes. A finding's status and confidence are its author's; the service
 // says only what it can check: which posts of the SPACE it cites, how many cite it,
 // whether one it cites was replaced or retracted, before it was cited or after, and, for
-// a task's result, which task and whose checks confirmed or rejected it.
+// a task's result, which task and whose checks confirmed or rejected it. And what contests
+// it (src/http/contested.ts): a check's reject or a member's warn or fail, a record of what
+// was posted, never a judgement of the claim.
 
 import type { Hono } from "hono";
 import type { Sql } from "postgres";
@@ -20,6 +22,7 @@ import { ApiError } from "../db/errors.ts";
 import { toHex } from "../domain/keys.ts";
 import { UUID, realTime } from "../domain/validate.ts";
 import { FINDING_LIMITS, FINDING_STATUSES, FINGERPRINT_SCHEME } from "../surface/vocabulary.ts";
+import { contestedAny, contestedOf } from "./contested.ts";
 import { boundedNumber, budgetCut, cursor, itemsWithin, optionalTokenBudget, readDenied } from "./postview.ts";
 import { optionalBearer, type Env } from "./app.ts";
 
@@ -46,6 +49,8 @@ type FindingRow = {
   sources: string[] | null;
   cited_by: number;
   source_withdrawn: boolean;
+  /** What contests it, when anything does: null when nothing does, or its words are unavailable. */
+  contested: unknown[] | null;
   task: { number: number; state: string; confirmed_by: string[]; rejected_by: string[] } | null;
 };
 
@@ -68,6 +73,7 @@ function findingColumns(sql: Sql) {
                      where s.post_id = f.post_id order by s.ord) end as sources,
     (select count(*)::int from schellingaf.post_sources c where c.source_id = f.post_id) as cited_by,
     ${sourceWithdrawn(sql, "f.post_id")} as source_withdrawn,
+    ${contestedOf(sql, "f.post_id")} as contested,
     ${resultOf(sql)} as task`;
 }
 
@@ -123,6 +129,8 @@ function shown(row: FindingRow): Record<string, unknown> {
     sources: row.sources,
     cited_by: row.cited_by,
     source_withdrawn: row.source_withdrawn,
+    // What a check's reject or a member's warn or fail recorded, only when it holds.
+    ...(Array.isArray(row.contested) ? { contested: row.contested } : {}),
     supersedes: row.supersedes,
     superseded_by: row.superseded_by,
     retracted_by: row.retracted_by,
@@ -240,10 +248,13 @@ export function mountFindings(app: Hono<Env>, db: Db): void {
           from schellingaf.findings f
           join schellingaf.visible_posts p on p.post_id = f.post_id
          where f.post_id = ${id}::uuid`;
-      const sources = await sql<{ post_id: string; seq: string; kind: string; withdrawn: boolean }[]>`
+      // Each source's own mark: a cause on it, or, on a finding whose words are available,
+      // on a post it rests on. Never on a source whose words are unavailable.
+      const sources = await sql<{ post_id: string; seq: string; kind: string; withdrawn: boolean; contested: boolean }[]>`
         select s.source_id::text as post_id, x.seq::text, x.kind,
                (exists (select 1 from schellingaf.posts y where y.supersedes = s.source_id and y.kind <> 'version')
-                or exists (select 1 from schellingaf.posts y where y.retracts = s.source_id)) as withdrawn
+                or exists (select 1 from schellingaf.posts y where y.retracts = s.source_id)) as withdrawn,
+               ${contestedAny(sql, "s.source_id", "source")} as contested
           from schellingaf.post_sources s
           join schellingaf.posts x on x.post_id = s.source_id
          where s.post_id = ${id}::uuid
@@ -269,7 +280,9 @@ export function mountFindings(app: Hono<Env>, db: Db): void {
       finding: found.finding ? shown(found.finding) : null,
       // The posts it names, by id in the order its author named them, a seq resolved;
       // null once its words are withheld or hidden.
-      sources: post.unavailable ? null : found.sources,
+      sources: post.unavailable
+        ? null
+        : found.sources.map(({ contested, ...source }) => (contested ? { ...source, contested: true } : source)),
       source_withdrawn: post.source_withdrawn,
       cited_by: found.citedBy,
       citing: found.citing,

@@ -238,6 +238,12 @@ export const FINDING_LIMITS = {
   sources: 32,
   /** How many of the posts that cite one post its view names, newest first; cited_by counts them all. */
   citing: 200,
+  /** How many causes of its mark one finding shows: rejects first, then the newest. */
+  causes: 8,
+  /** How many findings one reject or one warn tells their authors of: cap('contested_notices'). */
+  contestedNotices: 200,
+  /** How many citing posts of one cited post a contested notice walks: cap('contested_scan'). */
+  contestedScan: 500,
 } as const;
 
 /** A SPACE's stage word: one lowercase word, as a task's tag is, of up to 32 characters. */
@@ -293,6 +299,9 @@ export const MAILBOX_REASONS = [
   "task_confirmed", "task_accepted", "task_rejected", "task_reopened", "task_changed", "task_retired", "task_deleted",
   // Another post naming yours in its data.sources.
   "cited",
+  // A finding of yours a check's reject or a member's warn or fail contested
+  // (migrations/0136_contested_findings.sql).
+  "contested",
 ] as const;
 
 /**

@@ -373,7 +373,14 @@ async function scenario() {
       data: { claim: "Telegram 37 uses the 1931 codebook", status: "supported", confidence: "medium", sources: [evidence.post_id] },
     },
   }), 201);
+  // A member's warn citing it: the finding reads contested, with the warn's cause.
+  ok(await call("posts.append", { name: open }, {
+    token: member.token,
+    json: { kind: "warn", title: "Row 9 is not in the 1931 codebook", body: "See the scan.", data: { sources: [claimed.seq] } },
+  }), 201);
   ok(await call("findings.list", { name: open }));
+  ok(await call("seek", {}, { query: { q: "codebook", space: open, detail: "snippets" } }));
+  ok(await call("posts.read", { name: open }, { query: { detail: "snippets" } }));
   ok(await call("findings.list", { name: open }, { accept: "text/markdown" }));
   ok(await call("findings.list", { name: open }, {
     token: owner.token,

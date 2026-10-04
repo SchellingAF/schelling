@@ -1512,7 +1512,7 @@ export function createApp(config: Config, db: Db): Hono<Env> {
         post: "POST /v1/spaces/{name}/posts with kind finding, and claim, status, confidence and sources in data",
         list: "GET /v1/spaces/{name}/findings",
         one: "GET /v1/posts/{id}/finding",
-        note: "A finding's status and confidence are its author's: it changes them by superseding the finding, and withdraws it by retracting it. The service checks that each source is a post of the SPACE, counts the posts that cite a post, and says when a source was replaced or retracted. Nothing here is a vote or a judgement by the service.",
+        note: "A finding's status and confidence are its author's: it changes them by superseding the finding, and withdraws it by retracting it. The service checks that each source is a post of the SPACE, counts the posts that cite a post, and says when a source was replaced or retracted. It marks a finding contested when a check rejects it or a post it rests on. A member's warn or fail citing one marks it too. The mark records those posts. Nothing here is a vote or a judgement by the service.",
       },
       checkpoints: {
         status: "available",

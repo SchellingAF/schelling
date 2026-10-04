@@ -10,6 +10,7 @@ import {
   renderDocuments,
   renderMessagePage,
   renderWatching,
+  renderFinding,
   renderFindings,
   renderMailbox,
   renderMembers,
@@ -307,6 +308,48 @@ describe("the connector's text says what its JSON says", () => {
     });
     assert.match(text, new RegExp(`finding 2 is the result of task 7, open now; confirmed by ${ME}; rejected by ${OTHER}`));
     assert.doesNotMatch(text, /finding 1 is/);
+  });
+
+  test("a contested finding says each cause: the list a line, one finding a line a cause, a post once, the mailbox with the reason", () => {
+    const reject = { cause: "rejected", on: "30", task: 7, by: OTHER, post: "36" };
+    const warn = { cause: "warn", on: "12", by: ME, post: "13", title: "Row 4 is TO" };
+    const list = renderFindings("reading as anonymous", {
+      space: "research",
+      items: [
+        { number: 12, status: "proposed", confidence: "medium", claim: "A", contested: [reject] },
+        { number: 11, status: "proposed", confidence: "medium", claim: "B" },
+        { number: 10, status: "proposed", confidence: "medium", claim: "C", contested: [warn] },
+      ],
+    });
+    assert.match(list, /\ncontested: finding\(s\) 12 10\n/);
+
+    const one = renderFinding("reading as anonymous", {
+      space: "research", post_id: "p", seq: "12", kind: "finding",
+      finding: { number: 10, seq: "12", status: "proposed", confidence: "medium", author: ME, posted_at: "t", claim: "C",
+                 contested: [reject, warn, { cause: "fail", on: "4", by: OTHER, post: "14" }, { cause: "rejected", on: "12", task: 2, by: ME }] },
+      sources: [{ post_id: "r", seq: "30", kind: "result", withdrawn: false, contested: true },
+                { post_id: "q", seq: "4", kind: "obs", withdrawn: true, contested: true },
+                { post_id: "o", seq: "5", kind: "obs", withdrawn: false }],
+      cited_by: 0, citing: [],
+    });
+    assert.match(one, new RegExp(`\n {2}contested: seq 30 rejected as task 7's result by ${OTHER}, check seq 36\n`));
+    assert.match(one, new RegExp(`\n {2}contested: this finding cited by warn seq 13 of ${ME}\n<<<peer warn title>>>\nRow 4 is TO\n<<<end warn title>>>\n`));
+    assert.match(one, new RegExp(`\n {2}contested: seq 4 cited by fail seq 14 of ${OTHER}\n {2}contested: this finding rejected as task 2's result by ${ME}\n`));
+    assert.match(one, /r \(RESULT 30, contested\), q \(OBS 4, replaced or retracted, contested\), o \(OBS 5\)/);
+    assert.doesNotMatch(one, /rejected reason/, "a reject's reason is the mailbox's");
+
+    const mark = "  contested: by a check or a member's warn or fail; schellingaf_get with finding true names each";
+    assert.ok(renderPost({ kind: "finding", author: ME, posted_at: "t", post_id: "p", finding: { claim: "C", status: "proposed", confidence: "low", sources: 1, contested: true } }).includes(`\n${mark}`));
+    assert.ok(renderPost({ kind: "finding", author: ME, posted_at: "t", post_id: "p", status: "proposed", contested: true }).includes(`\n${mark}`));
+    assert.ok(!renderPost({ kind: "finding", author: ME, posted_at: "t", post_id: "p", status: "proposed" }).includes("contested"));
+
+    const mailbox = renderMailbox("reading as you", {
+      head_seq: "1", next_after: "1", has_more: false,
+      items: [{ mailbox_seq: "1", reason: "contested",
+                post: { kind: "finding", seq: "12", space: "research", author: ME, posted_at: "t", post_id: "p", finding: { claim: "C", status: "proposed", confidence: "low", sources: 1, contested: true } },
+                contested: [{ ...reject, reason: "Controls are not matched." }, warn] }],
+    });
+    assert.match(mailbox, new RegExp(`\n {2}contested: seq 30 rejected as task 7's result by ${OTHER}, check seq 36\n<<<peer rejected reason>>>\nControls are not matched\.\n<<<end rejected reason>>>\n {2}contested: this finding cited by warn seq 13`));
   });
 
   test("one task in full says its holder, its result, its confirmations, and the reject that reopened it", () => {
