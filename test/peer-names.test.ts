@@ -7,11 +7,13 @@
 import { test, before, describe } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import postgres from "postgres";
 import { useService, fixture, call, agent, type Agent } from "./lib/service.ts";
+import { SUPERUSER } from "./bootstrap.ts";
 import { PEER_NAME, PEER_NAME_SENT, RESERVED_NAME_WORDS, RESERVED_NAME_RULE, RESERVED_TAGS, peerNameRefusal } from "../src/surface/vocabulary.ts";
 
 const G32 = "g".repeat(32);
@@ -596,5 +598,96 @@ describe("a block clears the name", () => {
       select p.blocked_at is not null as blocked, p.blocked_reason as reason from schellingaf.peers p where p.peer_id = ${id}`;
     assert.deepEqual({ ...row }, { blocked: true, reason: "a test" });
     assert.equal((await nameRow(a)).length, 0);
+  });
+
+  test("the migration clears the names of KEYS blocked before it", async () => {
+    // Before 0142 a block left a name in place. Put that state back: block, then write the
+    // row as the owner, as the trigger would not. Then run 0142's one statement for it.
+    const [old, free] = await Promise.all([agent(), agent()]);
+    const oldId = Buffer.from(old.peerId, "hex");
+    await block(old);
+    await fixture.owner`insert into schellingaf.peer_names (peer_id, name) values (${oldId}, 'from-before')`;
+    assert.equal((await setName(free, "kept-name")).status, 200);
+    const migration = readFileSync(new URL("../migrations/0142_block_clears_name.sql", import.meta.url), "utf8");
+    const statement = migration.split("\n").filter((l) => l.startsWith("DELETE FROM schellingaf.peer_names"));
+    assert.equal(statement.length, 1, "one clearing statement");
+    await fixture.owner.unsafe(statement[0]!);
+    assert.equal((await nameRow(old)).length, 0, "the blocked KEY's name is gone");
+    assert.deepEqual((await nameRow(free)).map((r) => r.name), ["kept-name"], "an unblocked KEY keeps its name");
+  });
+
+  // Two sessions on the database. A lock_timeout bounds each wait, so neither test can hang.
+  async function waitingOnLock(su: postgres.Sql, text: string) {
+    for (let i = 0; i < 500; i++) {
+      const [row] = await su<{ n: number }[]>`
+        select count(*)::int as n from pg_stat_activity
+         where datname = current_database() and wait_event_type = 'Lock' and query like ${`%${text}%`}`;
+      if (row!.n >= 1) return;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    throw new Error(`nothing waited in ${text}`);
+  }
+
+  test("a set during a block waits for it, then is refused KEY_BLOCKED", async () => {
+    const a = await agent();
+    const id = Buffer.from(a.peerId, "hex");
+    const su = postgres({ ...SUPERUSER, database: fixture.name, max: 2, onnotice: () => {} });
+    const release = Promise.withResolvers<void>();
+    const held = Promise.withResolvers<void>();
+    const blocking = su.begin(async (tx) => {
+      await tx`set local role schellingaf_owner`;
+      await tx`set local lock_timeout = '10s'`;
+      await tx`update schellingaf.peers set blocked_at = now(), blocked_reason = 'a race' where peer_id = ${id}`;
+      held.resolve();
+      await release.promise;
+    });
+    try {
+      await held.promise;
+      const setting = fixture.api.begin(async (tx) => {
+        await tx`set local lock_timeout = '10s'`;
+        return tx`select schellingaf.set_peer_name(${id}, 'slipped-in') as r`;
+      });
+      setting.catch(() => {});
+      await waitingOnLock(su, "set_peer_name");
+      release.resolve();
+      await blocking;
+      await assert.rejects(setting, /KEY_BLOCKED/);
+      assert.equal((await nameRow(a)).length, 0, "no name on the blocked KEY");
+    } finally {
+      release.resolve();
+      await blocking.catch(() => {});
+      await su.end({ timeout: 5 });
+    }
+  });
+
+  test("a block during a set waits for it, then clears the name it wrote", async () => {
+    const a = await agent();
+    const id = Buffer.from(a.peerId, "hex");
+    const su = postgres({ ...SUPERUSER, database: fixture.name, max: 2, onnotice: () => {} });
+    const release = Promise.withResolvers<void>();
+    const held = Promise.withResolvers<void>();
+    const setting = su.begin(async (tx) => {
+      await tx`set local role schellingaf_api`;
+      await tx`select schellingaf.set_peer_name(${id}, 'set-first')`;
+      held.resolve();
+      await release.promise;
+    });
+    try {
+      await held.promise;
+      const blocking = fixture.owner.begin(async (tx) => {
+        await tx`set local lock_timeout = '10s'`;
+        await tx`update schellingaf.peers set blocked_at = now(), blocked_reason = 'a race' where peer_id = ${id}`;
+      });
+      blocking.catch(() => {});
+      await waitingOnLock(su, "update schellingaf.peers");
+      release.resolve();
+      await setting;
+      await blocking;
+      assert.equal((await nameRow(a)).length, 0, "the block cleared the name the set wrote");
+    } finally {
+      release.resolve();
+      await setting.catch(() => {});
+      await su.end({ timeout: 5 });
+    }
   });
 });

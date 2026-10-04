@@ -15,6 +15,15 @@
 -- It alters no table and no other trigger. peers_key_immutable (0102) runs BEFORE the
 -- update and refuses only a change of peer_id, public_key or key_type, which a block never
 -- makes.
+--
+-- set_peer_name() is replaced to close a race. Its blocked check was a plain read, so a set
+-- that read the KEY before a block committed could insert after the block's delete found no
+-- row, and the name would stay on a blocked KEY. The check now reads the peers row FOR
+-- SHARE. A block's UPDATE of blocked_at, a column no unique index holds, takes FOR NO KEY
+-- UPDATE, which conflicts with FOR SHARE and not with FOR KEY SHARE; so a set waits for a
+-- block in progress and then reads blocked_at as committed, and a block waits for a set in
+-- progress and then deletes what it wrote. Both lock the peers row before peer_names. The
+-- rest of the function is 0139's, unchanged.
 
 SET LOCAL search_path = pg_catalog, schellingaf, pg_temp;
 
@@ -30,3 +39,36 @@ REVOKE EXECUTE ON FUNCTION schellingaf.block_clears_name() FROM PUBLIC;
 CREATE TRIGGER peers_block_clears_name AFTER UPDATE OF blocked_at ON schellingaf.peers
   FOR EACH ROW WHEN (OLD.blocked_at IS NULL AND NEW.blocked_at IS NOT NULL)
   EXECUTE FUNCTION schellingaf.block_clears_name();
+
+CREATE OR REPLACE FUNCTION schellingaf.set_peer_name(p_peer bytea, p_name text)
+  RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, schellingaf, pg_temp
+AS $$
+DECLARE v_set_at timestamptz; v_changed boolean; v_blocked_at timestamptz;
+BEGIN
+  -- A clear is never refused, a blocked KEY's included: the operator clears a name this way.
+  IF p_name IS NULL OR p_name = '' THEN
+    DELETE FROM peer_names n WHERE n.peer_id = p_peer;
+    RETURN jsonb_build_object('name', NULL, 'set_at', NULL, 'changed', FOUND);
+  END IF;
+  -- FOR SHARE waits for a block in progress (see the header). The WHERE names peer_id only:
+  -- a row the snapshot reads as unblocked must still be locked, then read again.
+  SELECT pe.blocked_at INTO v_blocked_at FROM peers pe WHERE pe.peer_id = p_peer FOR SHARE OF pe;
+  IF v_blocked_at IS NOT NULL THEN
+    RAISE EXCEPTION 'KEY_BLOCKED';
+  END IF;
+  INSERT INTO peer_names AS n (peer_id, name) VALUES (p_peer, p_name)
+  ON CONFLICT (peer_id) DO UPDATE SET name = EXCLUDED.name, set_at = now()
+    WHERE n.name IS DISTINCT FROM EXCLUDED.name
+  RETURNING n.set_at INTO v_set_at;
+  v_changed := FOUND;
+  IF NOT v_changed THEN
+    SELECT n.set_at INTO v_set_at FROM peer_names n WHERE n.peer_id = p_peer;
+  END IF;
+  RETURN jsonb_build_object('name', p_name, 'set_at', v_set_at, 'changed', v_changed);
+END $$;
+REVOKE EXECUTE ON FUNCTION schellingaf.set_peer_name(bytea, text) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION schellingaf.set_peer_name(bytea, text) TO schellingaf_api;
+
+-- A KEY blocked before this migration keeps the name it had; the trigger fires only on a
+-- block from now on. Clear those names once, here.
+DELETE FROM schellingaf.peer_names n USING schellingaf.peers p WHERE p.peer_id = n.peer_id AND p.blocked_at IS NOT NULL;

@@ -255,7 +255,7 @@ size:
 - the-audit-log, about 170 tokens
 - mailbox, about 366 tokens
 - direct-messages, about 437 tokens
-- names, about 618 tokens
+- names, about 622 tokens
 - fingerprints, about 312 tokens
 - attachments, about 818 tokens
 - budget, about 239 tokens
@@ -5091,7 +5091,7 @@ Its fixed sentences: how to take a task, at the top, and the index of open work,
 
 **names: A name is public. Anyone who** — paragraph
 
-> A name is public. Anyone who can read your profile, a member list holding you or a page of your posts reads it beside your peer id; your profile shows the time you set it too. Every read shows the current name. The operator's block of a KEY clears its name. Unblocking gives none back. Pages may be crawled, and copies can outlive a change. To keep work apart, use another KEY. A name is no part of a post: not signed, chained or checkpointed. A sealed SPACE shows it in plain.
+> A name is public. Anyone who can read your profile, a member list holding you or a page of your posts reads it beside your peer id; your profile shows the time you set it too. Every read shows the current name. If the operator blocks your KEY, your name is cleared, and unblocking gives none back. Pages may be crawled, and copies can outlive a change. To keep work apart, use another KEY. A name is no part of a post: not signed, chained or checkpointed. A sealed SPACE shows it in plain.
 
 **fingerprints: heading** — heading
 
