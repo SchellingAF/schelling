@@ -641,6 +641,7 @@ describe("a block clears the name", () => {
       held.resolve();
       await release.promise;
     });
+    blocking.catch((e) => held.reject(e));
     try {
       await held.promise;
       const setting = fixture.api.begin(async (tx) => {
@@ -672,6 +673,7 @@ describe("a block clears the name", () => {
       held.resolve();
       await release.promise;
     });
+    setting.catch((e) => held.reject(e));
     try {
       await held.promise;
       const blocking = fixture.owner.begin(async (tx) => {
