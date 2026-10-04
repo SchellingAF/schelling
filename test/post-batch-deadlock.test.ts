@@ -56,3 +56,45 @@ test("batches that reach two mailboxes in opposite orders are all written, each 
      where p.kind = 'obs'`;
   assert.deepEqual(posted, { one: ROUNDS * 4, two: ROUNDS * 4, three: ROUNDS });
 });
+
+test("batches whose task parts tell each other's mailboxes are all written, each POST and each notice once", async () => {
+  // A POST's task part that ends another KEY's claim tells that holder (migrations/0140_task_attempts.sql),
+  // after its POST took the mailboxes it names: batch one reaches r, then x as a task's holder;
+  // batch two x, then r.
+  const codes: Record<string, number> = {};
+  const item = (to: string, i: number) => ({ kind: "obs", title: `t${i}`, body: "x".repeat(20000), to: [to] });
+  for (let round = 0; round < ROUNDS; round++) {
+    for (const who of [a, b, r, x, owner]) await fixture.setBucket(`peer:${who.peerId}`, 60);
+    for (const from of [a, b]) {
+      for (const to of [r, x]) await fixture.setBucket(`dm:${from.peerId}:${to.peerId}`, 200);
+    }
+    for (const to of [r, x]) await fixture.setBucket(`rcpt:${to.peerId}`, 200);
+    const held: number[] = [];
+    for (const [name, holder] of [[ONE, x], [TWO, r]] as const) {
+      const added = await call("POST", `/v1/spaces/${name}/tasks`, owner.token, { title: `Round ${round}` });
+      assert.equal(added.status, 201, JSON.stringify(added.body));
+      const number = added.body.task.number as number;
+      assert.equal((await call("POST", `/v1/spaces/${name}/tasks/next`, holder.token, { number })).status, 200);
+      held.push(number);
+    }
+    const one = call("POST", `/v1/spaces/${ONE}/posts`, a.token, {
+      posts: [item(r.peerId, 0), { kind: "result", title: "Done", body: "Done.", task: { number: held[0] } }],
+    });
+    const two = call("POST", `/v1/spaces/${TWO}/posts`, b.token, {
+      posts: [item(x.peerId, 0), { kind: "result", title: "Done", body: "Done.", task: { number: held[1] } }],
+    });
+    for (const out of await Promise.all([one, two])) {
+      const code = out.status === 201 ? "201" : `${out.status} ${out.body?.error?.code} ${out.body?.error?.detail ?? ""}`;
+      codes[code] = (codes[code] ?? 0) + 1;
+    }
+  }
+  assert.deepEqual(codes, { "201": ROUNDS * 2 });
+  const [told] = await fixture.owner<{ x: number; r: number }[]>`
+    select count(*) filter (where d.recipient_id = ${Buffer.from(x.peerId, "hex")})::int as x,
+           count(*) filter (where d.recipient_id = ${Buffer.from(r.peerId, "hex")})::int as r
+      from schellingaf.mailbox_deliveries d where d.reason = 'task_attempt'`;
+  assert.deepEqual(told, { x: ROUNDS, r: ROUNDS });
+  const [posted] = await fixture.owner<{ n: number }[]>`
+    select count(*)::int as n from schellingaf.posts p where p.kind = 'result'`;
+  assert.equal(posted!.n, ROUNDS * 2);
+});

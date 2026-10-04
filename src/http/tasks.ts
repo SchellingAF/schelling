@@ -28,6 +28,8 @@ import { toHex } from "../domain/keys.ts";
 import {
   optionalBoolean,
   optionalString,
+  optionalTaskAttempt,
+  optionalTaskCycle,
   optionalTaskJob,
   optionalTaskNumber,
   optionalTaskTag,
@@ -100,7 +102,8 @@ export function shown<T extends Record<string, unknown> | null>(task: T): T {
  * confirmations, without what to do and the rest of the record; the numbers of the tasks it
  * waits for, when it waits for any; its revision once its words changed; once its holder
  * linked one, where it stands: the progress post's id and when it was linked; and, once it
- * is retired with replacements, their numbers; and an upkeep task's kind.
+ * is retired with replacements, their numbers; an upkeep task's kind; and, while two or
+ * more KEYS hold it, every holder.
  */
 function compact(task: Record<string, unknown>): Record<string, unknown> {
   const { number, title, tag, state, claimed_by, confirmations } = task;
@@ -115,6 +118,7 @@ function compact(task: Record<string, unknown>): Record<string, unknown> {
     ...(progress ? { progress: { post_id: progress.post_id, at: progress.at } } : {}),
     ...(replaced?.length ? { replaced_by_numbers: replaced } : {}),
     ...(typeof task.upkeep === "string" ? { upkeep: task.upkeep } : {}),
+    ...(Array.isArray(task.claimants) ? { claimants: (task.claimants as { by: string }[]).map((c) => c.by) } : {}),
   };
 }
 
@@ -414,6 +418,10 @@ export function mountTasks(app: Hono<Env>, db: Db): void {
     // With a number, that task (0125_task_progress.sql): a tag or a check would narrow
     // nothing it could still choose.
     const number = optionalTaskNumber(input.number);
+    // join holds a task another KEY holds, beside it, and only by its number
+    // (migrations/0141_task_claims.sql).
+    const join = optionalBoolean(input.join, "join") ?? false;
+    if (join && number === null) throw new ApiError("INVALID_REQUEST", { detail: "join needs number" });
     if (number !== null && (tag !== null || (job !== "any" && job !== "work"))) {
       throw new ApiError("INVALID_REQUEST", { detail: "number takes no tag, no verify and no job but work: send number alone" });
     }
@@ -424,7 +432,7 @@ export function mountTasks(app: Hono<Env>, db: Db): void {
                                   ${sql.json(NEXT_WORDS as never)}, ${TASK_LIMITS.held},
                                   ${TASK_LIMITS.checkFirstMinutes}, ${TASK_LIMITS.checkOfferMinutes},
                                   ${TASK_LIMITS.notAcceptedPerSpace}, ${TASK_LIMITS.upkeep.documentGapHours},
-                                  ${TASK_LIMITS.upkeep.reviewGapHours}) as out`));
+                                  ${TASK_LIMITS.upkeep.reviewGapHours}, ${join}, ${TASK_LIMITS.claimants}) as out`));
   });
 
   // A post of the holder's own, linked to show where the task stands; it renews the claim.
@@ -448,14 +456,16 @@ export function mountTasks(app: Hono<Env>, db: Db): void {
     const input = await readBody(c);
     const post = optionalUuid(input.post_id, "post_id");
     if (post === null) {
-      throw new ApiError("INVALID_REQUEST", { detail: "post_id is the id of your own post in this SPACE that carries the result" });
+      throw new ApiError("INVALID_REQUEST", { detail: "post_id is the id of the post in this SPACE that carries the result" });
     }
     // The revision your result answers. Unless sent, done is refused once the task changed
-    // after you took it (migrations/0130_task_changes.sql).
+    // after you took it (migrations/0130_task_changes.sql). Any writer's done is a numbered
+    // attempt, which tells the KEYS it concerns (migrations/0140_task_attempts.sql).
     const revision = taskRevision(input.revision, false);
     const number = taskNumber(c.req.param("number"));
     return c.json(await write(c, me.hex, whole, (sql) => sql<{ out: Answer }[]>`
-      select schellingaf.task_done(${c.req.param("name")}, ${me.peerId}, ${number}, ${post}::uuid, ${revision}::int) as out`));
+      select schellingaf.task_done(${c.req.param("name")}, ${me.peerId}, ${number}, ${post}::uuid, ${revision}::int,
+                                   true, ${TASK_LIMITS.attempts}) as out`));
   });
 
   // A task's words changed, naming the revision read and why. Its holder, if another KEY
@@ -515,18 +525,25 @@ export function mountTasks(app: Hono<Env>, db: Db): void {
       select schellingaf.task_release(${c.req.param("name")}, ${me.peerId}, ${number}, ${reason}::text, true) as out`));
   });
 
-  /** A check of a done task: confirm, or reject with a reason. */
+  /**
+   * A check of one attempt at a done task: confirm, or reject with a reason. attempt and
+   * cycle name what was checked; without them, the attempt and cycle next offered, else the
+   * one attempt waiting (migrations/0140_task_attempts.sql).
+   */
   const check = (verdict: "confirm" | "reject") => async (c: Context<Env>) => {
     const me = keyOf(c);
     const whole = wholeTask(c);
     const input = await readBody(c);
     const post = optionalUuid(input.post_id, "post_id");
     const reason = taskReason(input.reason, verdict === "reject");
+    const attempt = optionalTaskAttempt(input.attempt);
+    const cycle = optionalTaskCycle(input.cycle);
     const number = taskNumber(c.req.param("number"));
     const name = c.req.param("name")!;
     return c.json(await write(c, me.hex, whole, (sql) => sql<{ out: Answer }[]>`
       select schellingaf.task_check(${name}, ${me.peerId}, ${number}, ${verdict},
-                                    ${post}::uuid, ${reason}, true) as out`));
+                                    ${post}::uuid, ${reason}, true, ${attempt}::int, ${cycle}::int,
+                                    ${TASK_LIMITS.checkOfferMinutes}) as out`));
   };
   app.post("/v1/spaces/:name/tasks/:number/confirm", check("confirm"));
   app.post("/v1/spaces/:name/tasks/:number/reject", check("reject"));

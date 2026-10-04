@@ -187,6 +187,8 @@ export const PLACES: {
     "migrations/0134_task_upkeep.sql": [19],
     "migrations/0137_contested_findings.sql": [19],
     "migrations/0138_document_decision.sql": [19],
+    "migrations/0140_task_attempts.sql": [19],
+    "migrations/0141_task_claims.sql": [19],
     "reviewer/review-proposal.ts": [26],
     "src/db/errors.ts": [2, 19],
     "src/docs/render.ts": [1, 12, 13],
@@ -248,6 +250,38 @@ const LOG = "a line for the request log or the operator's console (row 51), neve
  * it (test/copy.test.ts), with its reason. A run is excused only when it is one of
  * these exactly, so a new sentence that opens with the same words is not. */
 export const NOT_SAID: Record<string, { why: string; runs: string[] }[]> = {
+  "migrations/0140_task_attempts.sql": [
+    {
+      why: "task_mirror_faults(), which only the tests call as the owner, granted to nobody, never answered",
+      runs: [
+        ": an upkeep task has attempts",
+        "with an attempt of record",
+        "with attempts in its cycle",
+        "with no attempt of record in its cycle",
+        ": accepted with a rejected attempt",
+        ": claimed_by or done_post_id is not attempt",
+        ": done_at is not the first attempt's time",
+      ],
+    },
+  ],
+  "migrations/0141_task_claims.sql": [
+    {
+      why: "task_mirror_faults(), which only the tests call as the owner, granted to nobody, never answered",
+      runs: [
+        ": an upkeep task has attempts",
+        ": an upkeep task has claim rows",
+        ": claimed with no claim row",
+        ": claimed_until is not the latest claim's",
+        ": claimed_by, claimed_at or claim_revision is not one claim's",
+        "with an attempt of record",
+        "with attempts in its cycle",
+        "with no attempt of record in its cycle",
+        ": accepted with a rejected attempt",
+        ": claimed_by or done_post_id is not attempt",
+        ": done_at is not the first attempt's time",
+      ],
+    },
+  ],
   "src/http/app.ts": [
     {
       why: "printed by a test run that sets SCHELLINGAF_CHECK_REFUSALS, never answered",

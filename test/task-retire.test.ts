@@ -7,6 +7,8 @@
 import { test, before, describe } from "node:test";
 import assert from "node:assert/strict";
 import { useService, app, db, fixture, config, call, agent, connector, type Agent } from "./lib/service.ts";
+import { claimUntil, claimFor, claimsFromRows } from "./lib/claims.ts";
+import { mirrorChecked } from "./lib/mirror.ts";
 import { createApp } from "../src/http/app.ts";
 import { OPERATIONS } from "../src/surface/operations.ts";
 import { ERRORS } from "../src/db/errors.ts";
@@ -17,6 +19,7 @@ before(() => {
   process.env.GLOBAL_READ_WAIT_MS = "60000";
 });
 const ready = useService("task_retire", { apiHost: "api.task-retire.test" });
+mirrorChecked();
 before(async () => {
   await ready;
 });
@@ -255,10 +258,7 @@ describe("the tasks that waited", () => {
     await added(owner, name, { title: "A", after: [2] });
     // A is claimed by number while B is not accepted: it is open, so take it by changing
     // nothing but its claim, as a holder would have taken it before B was added to after.
-    await fixture.owner`
-      update schellingaf.tasks t set state = 'claimed', claimed_by = decode(${a.peerId}, 'hex'),
-             claimed_until = now() + interval '1 hour', claimed_at = now(), claim_revision = 1, takes = 1
-        from schellingaf.spaces s where s.space_id = t.space_id and s.name = ${name} and t.number = 3`;
+    await claimFor(name, 3, a.peerId);
     const out = await retire(coordinator, name, 2);
     assert.equal(out.status, 200, JSON.stringify(out.body));
     assert.deepEqual(out.body.dependents, [3]);

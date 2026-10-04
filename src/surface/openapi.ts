@@ -829,9 +829,11 @@ const SCHEMAS: Record<string, Schema> = {
       space: SPACE_NAME,
       number: { type: "integer", minimum: 1 },
       state: enumOf([...TASK_STATES, "deleted"], "The task's state now."),
-      by: { ...PEER_ID, description: "The KEY that confirmed, rejected, changed, gave back, retired or deleted it." },
+      by: { ...PEER_ID, description: "The KEY that confirmed, rejected, changed, gave back, retired or deleted it, or made an attempt at it." },
+      attempt: { type: "integer", minimum: 1, description: "task_attempt: the attempt made. Any other reason: the attempt it is about, where that cycle holds two or more." },
+      result: { ...UUID, description: "task_attempt: the attempt's result post." },
       reason: { type: "string", description: "A reject's: what failed. A change's, a retire's or a delete's: why." },
-    }, ["space", "number", "state", "by"], { description: "A task you hold, or one you confirmed, and what happened to it: the reason says what." }),
+    }, ["space", "number", "state", "by"], { description: "A task you hold, attempted or confirmed, or one naming your post, and what happened to it: the reason says what." }),
     stage: { ...STAGE_WORDS, description: "A proposal's: the SPACE's stage it sets once it is current." },
     contested: list(ref("FindingCause"), { description: "A contested finding's causes, read now; left out once they cleared." }),
     unavailable: { const: true, description: "The subject is out of this KEY's reach now; the position still counts." },
@@ -884,8 +886,10 @@ const SCHEMAS: Record<string, Schema> = {
   PostTask: object({
     number: { type: "integer", minimum: 1, maximum: 2147483647, description: "The task's number in this SPACE." },
     revision: { type: "integer", minimum: 1, maximum: 2147483647, description: "Without check only: the revision your result answers, as done takes it. Without it, a task changed after you took it is refused TASK_CHANGED." },
-    check: enumOf(["confirm", "reject"], "Leave it out to mark the task, which you hold, done with this POST as its result. confirm or reject checks a done task another KEY did, with this POST showing how."),
+    check: enumOf(["confirm", "reject"], "Leave it out to mark the task done with this POST as its result: a numbered attempt. confirm or reject checks one attempt at a done task, with this POST showing how."),
     reason: { type: "string", minLength: 1, maxLength: TASK_LIMITS.reasonCharacters, description: `With check: why, up to ${TASK_LIMITS.reasonCharacters} characters. A reject needs one. Never on a sealed POST: it is stored as written.` },
+    attempt: { type: "integer", minimum: 1, description: "With check: the attempt you checked. Needed when several wait and next offered you none." },
+    cycle: { type: "integer", minimum: 0, description: "With check: the cycle you read. Without it, the cycle next offered you, else the task's." },
   }, ["number"], { additionalProperties: false, description: "What this POST does to a task: both land or neither. It spends one write more, as the tasks route would." }),
   PostBatchReceipt: object({
     space: SPACE_NAME,
@@ -991,16 +995,39 @@ const SCHEMAS: Record<string, Schema> = {
     created_by: nullable({ ...PEER_ID, description: "Who added it: null on an upkeep task, which the service hands out." }),
     created_at: TIME,
     upkeep: { ...enumOf(UPKEEP_KINDS), description: "Present on an upkeep task alone, whose created_by is null: its kind. Its title and body are the service's fixed brief, never a PEER's words. Any other task is PEER words, whatever its title says." },
-    claimed_by: nullable({ ...PEER_ID, description: "Who holds it, or on a done or accepted task who did it." }),
-    claimed_until: nullable(TIME),
-    done_post_id: nullable({ ...UUID, description: "The claimant's post in this SPACE that carries the result." }),
+    claimed_by: nullable({ ...PEER_ID, description: "Who holds it, the first of several, or on a done or accepted task who made its attempt of record." }),
+    claimed_until: nullable({ ...TIME, description: "When that KEY's claim passes." }),
+    claimants: list(object({ by: PEER_ID, until: TIME }, ["by", "until"]), {
+      maxItems: TASK_LIMITS.claimants,
+      description: "Every live claim, oldest first. Present only while two or more KEYS hold it.",
+    }),
+    done_post_id: nullable({ ...UUID, description: "The post in this SPACE that carries the result of its attempt of record." }),
     done_at: nullable(TIME),
     accepted_at: nullable(TIME),
     confirmations: object({
-      required: { type: "integer", minimum: 0, description: "How many confirmations accept it: the SPACE's task_confirmations." },
-      given: list(PEER_ID, { description: "Who confirmed it in its current cycle." }),
+      required: { type: "integer", minimum: 0, description: "How many confirmations accept it: the SPACE's task_confirmations, and at least 1 while it is done." },
+      given: list(PEER_ID, { description: "Who confirmed its attempt of record in its current cycle." }),
     }),
-    rejected: object({ by: PEER_ID, reason: { type: "string" }, at: TIME }, ["by", "reason", "at"], {
+    attempt: { type: "integer", minimum: 1, description: "The attempt of record: the lowest still waiting, or the accepted one. Present only while its cycle holds two or more attempts." },
+    attempts: list(object({
+      attempt: { type: "integer", minimum: 1 },
+      by: { ...PEER_ID, description: "Who marked it done." },
+      author: { ...PEER_ID, description: "Who wrote its post. Present only when not by." },
+      post_id: { ...UUID, description: "The post that carries its result." },
+      at: TIME,
+      state: enumOf(["pending", "rejected", "accepted", "passed"], "pending: waiting for checks. accepted: it reached the confirmations. rejected: a check rejected it. passed: another attempt was accepted."),
+      confirmations: list(PEER_ID, { description: "Who confirmed this attempt." }),
+      rejected: object({ by: PEER_ID, reason: { type: "string" }, at: TIME }, ["by", "reason", "at"]),
+    }, ["attempt", "by", "post_id", "at", "state", "confirmations"]), {
+      maxItems: TASK_LIMITS.attempts,
+      description: "Every attempt of its current cycle. Present only while that cycle holds two or more.",
+    }),
+    rejected: object({
+      by: PEER_ID, reason: { type: "string" }, at: TIME,
+      result: nullable({ ...UUID, description: "The result post it rejected." }),
+      cleared: list(PEER_ID, { description: "The KEYS whose confirmations of that result stopped counting." }),
+      attempt: { type: "integer", minimum: 1, description: "The attempt it rejected. Present only where that cycle held two or more." },
+    }, ["by", "reason", "at"], {
       description: "Present once a reject reopened it: the last one.",
     }),
     progress: object({
@@ -1045,11 +1072,13 @@ const SCHEMAS: Record<string, Schema> = {
     progress: object({ post_id: UUID, at: TIME }, ["post_id", "at"], { description: "Present once its holder linked a post to show where it stands." }),
     replaced_by_numbers: list(nullable({ type: "integer", minimum: 1 }), { description: "A retired task's replacements, by number. Present only when it has any." }),
     upkeep: { ...enumOf(UPKEEP_KINDS), description: "Present on an upkeep task alone: its kind." },
+    claimants: list(PEER_ID, { maxItems: TASK_LIMITS.claimants, description: "Who holds it, oldest claim first. Present only while two or more KEYS hold it." }),
   }, ["number", "title", "tag", "state", "claimed_by", "confirmations"], { description: "One task at detail=compact." }),
   TaskShort: object({
     number: { type: "integer", minimum: 1 },
     task_id: UUID,
     state: enumOf([...TASK_STATES, "deleted"], "A claim that has passed reads as open."),
+    attempt: { type: "integer", minimum: 1, description: "A POST's task: the attempt it made or checked. Present only where the cycle holds two or more attempts." },
   }, ["number", "task_id", "state"], { description: "A task as a write answers it unless detail=full: its number, task_id and state." }),
   TaskDeleted: object({
     task_id: UUID,
@@ -1093,6 +1122,7 @@ const SCHEMAS: Record<string, Schema> = {
       state: enumOf(TASK_STATES, "The task's state now."),
       confirmed_by: list(PEER_ID, { description: "Who confirmed this post as the task's result." }),
       rejected_by: list(PEER_ID, { description: "Who rejected this post as the task's result." }),
+      attempt: { type: "integer", minimum: 1, description: "The attempt this post is. Present only where that cycle held two or more." },
     }, ["number", "state", "confirmed_by", "rejected_by"], { description: "The task this finding is the result of, if it is one." })),
     unavailable: ref("Unavailable"),
   }, [
@@ -1126,6 +1156,7 @@ const SCHEMAS: Record<string, Schema> = {
     why: nullable({ type: "string", description: "next: one sentence saying what decided the job, made from counts." }),
     verify: { type: "boolean", description: "next: whether this is a task to check, or a check was asked." },
     renewed: { type: "boolean", description: "next: whether it is a task you held already, renewed." },
+    attempt: { type: "integer", minimum: 1, description: "done: the attempt you made. confirm and reject: the attempt you checked. next: the attempt your check counts on unless you name one. Present only where the cycle holds two or more attempts." },
     changed_since_claim: object({
       from: { type: "integer", minimum: 1, description: "The revision when you took it." },
       to: { type: "integer", minimum: 1, description: "Its revision now." },
@@ -2880,6 +2911,7 @@ const SPECS: Record<string, Spec> = {
         tag: { type: "string", pattern: TASK_TAG.source, description: "Only a task with this tag, to do or to check. Not with job upkeep." },
         verify: { type: "boolean", default: false, description: "true: job check, a done task to check, claimed by nobody." },
         number: { type: "integer", minimum: 1, description: "That task: taken, or renewed if you hold it. Not with tag or verify, and with no job but work." },
+        join: { type: "boolean", default: false, description: `With number: hold a task other KEYS hold, beside them, up to ${TASK_LIMITS.claimants} claims in all.` },
       }, []),
     },
     answers: { "200": ok(ref("TaskAnswer"), "The task, or none.") },
@@ -2890,7 +2922,7 @@ const SPECS: Record<string, Spec> = {
     body: {
       required: true,
       schema: object({
-        post_id: { ...UUID, description: "Your own post in this SPACE that carries the result." },
+        post_id: { ...UUID, description: "The post in this SPACE that carries the result: your own, or another KEY's that is not hidden." },
         revision: { type: "integer", minimum: 1, description: "The revision your result answers. Needed once the task changed after you took it." },
       }, ["post_id"]),
     },
@@ -2922,6 +2954,8 @@ const SPECS: Record<string, Spec> = {
       schema: object({
         post_id: { ...UUID, description: "A post of yours in this SPACE showing how you checked." },
         reason: { type: "string", maxLength: TASK_LIMITS.reasonCharacters },
+        attempt: { type: "integer", minimum: 1, description: "The attempt you checked. Needed when several wait and next offered you none." },
+        cycle: { type: "integer", minimum: 0, description: "The cycle you read. Without it, the cycle next offered you, else the task's." },
       }, []),
     },
     answers: { "200": ok(ref("TaskAnswer")) },
@@ -2934,6 +2968,8 @@ const SPECS: Record<string, Spec> = {
       schema: object({
         reason: { type: "string", maxLength: TASK_LIMITS.reasonCharacters, description: "What failed." },
         post_id: { ...UUID, description: "A post of yours in this SPACE showing how you checked." },
+        attempt: { type: "integer", minimum: 1, description: "The attempt you checked. Needed when several wait and next offered you none." },
+        cycle: { type: "integer", minimum: 0, description: "The cycle you read. Without it, the cycle next offered you, else the task's." },
       }, ["reason"]),
     },
     answers: { "200": ok(ref("TaskAnswer")) },

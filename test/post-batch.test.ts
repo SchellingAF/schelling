@@ -91,6 +91,14 @@ async function addTask(name: string, title = "Check the build"): Promise<number>
   return out.body.task.number;
 }
 
+/** A task that waits for another, not yet accepted: nobody but its holder may finish it. */
+async function waiting(name: string): Promise<number> {
+  const first = await addTask(name);
+  const out = await call("POST", `/v1/spaces/${name}/tasks`, owner.token, { title: "After that", after: [first] });
+  assert.equal(out.status, 201, JSON.stringify(out.body));
+  return out.body.task.number;
+}
+
 /** A task taken by its number. */
 async function take(name: string, who: Agent, number: number) {
   const out = await call("POST", `/v1/spaces/${name}/tasks/next`, who.token, { number });
@@ -216,12 +224,11 @@ describe("a POST with task finishes the task in the same call", () => {
     assert.equal(upload.status, 201, await upload.text());
     const attachments = [{ sha256, name: "notes.txt", media_type: "text/plain" }];
 
-    // Refused: the task is another KEY's, so neither the POST nor its file is written.
-    const held = await addTask(files);
-    await take(files, other, held);
+    // Refused: the task waits for another, so neither the POST nor its file is written.
+    const held = await waiting(files);
     const before = await state(files);
     const no = await call("POST", posts(files), writer.token, { ...result("Notes"), attachments, task: { number: held } });
-    assert.equal(refused(no).code, "TASK_NOT_OPEN", JSON.stringify(no.body));
+    assert.equal(refused(no).code, "TASK_WAITING", JSON.stringify(no.body));
     assert.deepEqual(await state(files), before);
 
     const number = await addTask(files);
@@ -249,15 +256,16 @@ describe("a POST with task finishes the task in the same call", () => {
   });
 
   test("a refused finish leaves no POST and the SPACE's head where it was", async () => {
-    const held = await addTask(WORK);
-    await take(WORK, other, held);
+    // Any writer's done is an attempt (migrations/0140_task_attempts.sql): what still refuses
+    // one is a task that waits for another, a stale revision, and a task done with.
+    const held = await waiting(WORK);
     const open = await addTask(WORK);
     const finished = await addTask(WORK);
     await take(WORK, writer, finished);
     assert.equal((await call("POST", posts(WORK), writer.token, { ...result("First"), task: { number: finished } })).status, 201);
-    const cases: [string, Agent, number, { status: number; code: string; detail?: string }][] = [
-      [WORK, writer, held, { status: 409, code: "TASK_NOT_OPEN", detail: "claimed" }],
-      [WORK, writer, open, { status: 409, code: "TASK_NOT_CLAIMANT" }],
+    const cases: [string, Agent, number | Record<string, unknown>, { status: number; code: string; detail?: string }][] = [
+      [WORK, writer, held, { status: 409, code: "TASK_WAITING", detail: String(held - 1) }],
+      [WORK, writer, { number: open, revision: 7 }, { status: 409, code: "TASK_CHANGED", detail: "1" }],
       [WORK, writer, finished, { status: 409, code: "TASK_NOT_OPEN", detail: "accepted" }],
       [WORK, writer, 999_999, { status: 404, code: "TASK_NOT_FOUND" }],
       [ORACLE, writer, 1, { status: 409, code: "ORACLE_HAS_NO_TASKS" }],
@@ -269,7 +277,7 @@ describe("a POST with task finishes the task in the same call", () => {
     await addTask(OPEN);
     for (const [name, who, number, expected] of cases) {
       const before = await state(name);
-      const out = await call("POST", posts(name), who.token, { ...result("Refused"), task: { number } });
+      const out = await call("POST", posts(name), who.token, { ...result("Refused"), task: typeof number === "number" ? { number } : number });
       const got = refused(out);
       assert.deepEqual({ status: got.status, code: got.code, ...(expected.detail ? { detail: got.detail } : {}) }, expected, JSON.stringify(out.body));
       assert.deepEqual(await state(name), before, `${expected.code} wrote something`);
@@ -570,11 +578,17 @@ describe("posts: several POSTS in one call", () => {
 
   test("task is read strictly, on a single POST and in posts", async () => {
     const cases: [unknown, string][] = [
-      ["3", "task takes number; revision to finish it; check and reason to check it"],
-      [{ number: 1, holder: 2 }, "task takes number; revision to finish it; check and reason to check it"],
-      [{ number: 1, reason: "Why." }, "task takes number; revision to finish it; check and reason to check it"],
+      ["3", "task takes number; revision to finish it; check, reason, attempt and cycle to check it"],
+      [{ number: 1, holder: 2 }, "task takes number; revision to finish it; check, reason, attempt and cycle to check it"],
+      [{ number: 1, reason: "Why." }, "task takes number; revision to finish it; check, reason, attempt and cycle to check it"],
       // revision is done's: a check takes none.
-      [{ number: 1, check: "confirm", revision: 1 }, "task takes number; revision to finish it; check and reason to check it"],
+      [{ number: 1, check: "confirm", revision: 1 }, "task takes number; revision to finish it; check, reason, attempt and cycle to check it"],
+      // attempt and cycle are a check's (migrations/0140_task_attempts.sql).
+      [{ number: 1, attempt: 1 }, "task takes number; revision to finish it; check, reason, attempt and cycle to check it"],
+      [{ number: 1, cycle: 0 }, "task takes number; revision to finish it; check, reason, attempt and cycle to check it"],
+      [{ number: 2, check: "confirm", attempt: 0 }, "task.attempt is a whole number from 1"],
+      [{ number: 2, check: "confirm", attempt: "1" }, "task.attempt is a whole number from 1"],
+      [{ number: 2, check: "confirm", cycle: -1 }, "task.cycle is a whole number from 0"],
       [{ number: 1, revision: 0 }, "task.revision is a whole number from 1"],
       [{ number: 1, revision: "2" }, "task.revision is a whole number from 1"],
       [{ number: 1, revision: 2_147_483_648 }, "task.revision is a whole number from 1"],
@@ -641,15 +655,15 @@ describe("the write allowance: one write a POST and one a task part, given back 
   });
 
   test("a call refused at the write spends one: a task refused on its last POST, an idempotency mix, a POST with task", async () => {
-    const number = await addTask(WORK);
+    const number = await waiting(WORK);
     await fixture.setBucket(`peer:${writer.peerId}`, 30);
     const last = await call("POST", posts(WORK), writer.token, { posts: [result("A"), result("B"), { ...result("C"), task: { number } }] });
-    assert.equal(refused(last).code, "TASK_NOT_CLAIMANT");
+    assert.equal(refused(last).code, "TASK_WAITING");
     assert.equal(await spentSince(writer, 30), 1);
 
     await fixture.setBucket(`peer:${writer.peerId}`, 30);
     const single = await call("POST", posts(WORK), writer.token, { ...result("C"), task: { number } });
-    assert.equal(refused(single).code, "TASK_NOT_CLAIMANT");
+    assert.equal(refused(single).code, "TASK_WAITING");
     assert.equal(await spentSince(writer, 30), 1);
 
     const key = `mix-${randomUUID()}`;
@@ -799,13 +813,14 @@ describe("a dry run of a POST with task, and of posts", () => {
     assert.equal(one.body.task.state, "claimed");
   });
 
-  test("refuses what the task's row says: another KEY's, not held, not done, no such task, an oracle space", async () => {
-    const held = await addTask(WORK);
-    await take(WORK, other, held);
+  test("refuses what the task's row says: waiting, changed, not done, no such task, an oracle space", async () => {
+    // Any writer's done is an attempt (migrations/0140_task_attempts.sql), so another KEY's
+    // claim and no claim refuse nothing; a task that waits and a stale revision still do.
+    const held = await waiting(WORK);
     const open = await addTask(CHECKED);
     const cases: [string, Record<string, unknown>, { code: string; detail?: string }][] = [
-      [WORK, { number: held }, { code: "TASK_NOT_OPEN", detail: "claimed" }],
-      [CHECKED, { number: open }, { code: "TASK_NOT_CLAIMANT" }],
+      [WORK, { number: held }, { code: "TASK_WAITING", detail: String(held - 1) }],
+      [CHECKED, { number: open, revision: 7 }, { code: "TASK_CHANGED", detail: "1" }],
       [CHECKED, { number: open, check: "confirm" }, { code: "TASK_NOT_DONE", detail: "open" }],
       [WORK, { number: 999_999 }, { code: "TASK_NOT_FOUND" }],
       [ORACLE, { number: 1 }, { code: "TASK_NOT_FOUND" }],
@@ -1049,5 +1064,142 @@ describe("a deadlock's victim is written again, twice at most, and each one is l
       "deadlock_detected: written again (2 of 2)",
       "deadlock_detected: answered BUSY",
     ]);
+  });
+});
+
+describe("a POST's task is an attempt, and its dry run says what the write does (migrations/0140_task_attempts.sql)", () => {
+  let made = 0;
+  /** A public work space of its own, asking two confirmations unless set, and `count` writers of it. */
+  async function space(count: number, confirmations = 2) {
+    const name = `pb-attempts-${tag}-${made++}`;
+    assert.equal((await call("POST", "/v1/spaces", owner.token, { name, title: "Attempts" })).status, 201);
+    assert.equal((await call("PATCH", `/v1/spaces/${name}`, owner.token, { task_confirmations: confirmations })).status, 200);
+    const keys: Agent[] = [];
+    for (let i = 0; i < count; i++) {
+      const who = await agent();
+      assert.equal((await call("PUT", `/v1/spaces/${name}/members/${who.peerId}`, owner.token, { role: "writer" })).status, 200);
+      keys.push(who);
+    }
+    return { name, keys, number: await addTask(name) };
+  }
+  const whole = async (name: string, number: number) => (await call("GET", `/v1/spaces/${name}/tasks/${number}`, owner.token)).body.task;
+
+  /** The dry run's refusal, then the write's, which is the same and leaves everything as it was. */
+  async function alike(name: string, who: Agent, task: Record<string, unknown>, expected: { status: number; code: string; detail?: string }) {
+    const before = await state(name);
+    const dry = refused(await call("POST", posts(name), who.token, { ...result("Dry"), task, dry_run: true }));
+    assert.deepEqual(dry, { detail: undefined, ...expected }, JSON.stringify(task));
+    assert.deepEqual(refused(await call("POST", posts(name), who.token, { ...result("Written"), task })), dry, JSON.stringify(task));
+    assert.deepEqual(await state(name), before);
+  }
+
+  /** Two attempts at the space's task, by its first two writers. */
+  async function twoAttempts(name: string, number: number, keys: Agent[]) {
+    for (const who of keys.slice(0, 2)) {
+      const out = await call("POST", posts(name), who.token, { ...result("Done"), task: { number } });
+      assert.equal(out.status, 201, JSON.stringify(out.body));
+    }
+  }
+
+  test("a KEY that does not hold the task finishes it: the dry run passes, and the write marks it done as an attempt", async () => {
+    const { name, keys: [holder, finisher], number } = await space(2);
+    await take(name, holder!, number);
+    const dry = await call("POST", posts(name), finisher!.token, { ...result("Mine"), task: { number }, dry_run: true });
+    assert.equal(dry.status, 200, JSON.stringify(dry.body));
+    assert.equal(dry.body.task.state, "claimed");
+    const out = await call("POST", posts(name), finisher!.token, { ...result("Mine"), task: { number } });
+    assert.equal(out.status, 201, JSON.stringify(out.body));
+    assert.equal(out.body.task.state, "done");
+    assert.equal((await whole(name, number)).claimed_by, finisher!.peerId);
+    // A second attempt by POST names its number in the POST's task.
+    const second = await call("POST", posts(name), holder!.token, { ...result("Mine too"), task: { number } });
+    assert.equal(second.status, 201, JSON.stringify(second.body));
+    assert.equal(second.body.task.attempt, 2);
+    // The same KEY again is refused alike.
+    await alike(name, finisher!, { number }, { status: 409, code: "TASK_NOT_OPEN", detail: "done" });
+  });
+
+  test("an unnamed check with two attempts: refused alike without an offer, with a stale one, and with one whose attempt was rejected", async () => {
+    const { name, keys, number } = await space(6);
+    const [, , c, d, e, f] = keys as [Agent, Agent, Agent, Agent, Agent, Agent];
+    await twoAttempts(name, number, keys);
+    await alike(name, c, { number, check: "confirm" }, { status: 400, code: "INVALID_REQUEST", detail: "attempt: name the attempt you checked: 1, 2" });
+    // c is offered attempt 1; d rejects it meanwhile.
+    const offered = await call("POST", `/v1/spaces/${name}/tasks/next`, c.token, { job: "check" });
+    assert.equal(offered.body.attempt, 1, JSON.stringify(offered.body));
+    assert.equal((await call("POST", `/v1/spaces/${name}/tasks/${number}/reject`, d.token, { attempt: 1, reason: "Fails." })).status, 200);
+    await alike(name, c, { number, check: "confirm" }, { status: 409, code: "TASK_NOT_DONE", detail: `attempt 1: rejected by ${d.peerId}` });
+    // The other attempt rejected too, and a new one in cycle 1: c's offer is of cycle 0.
+    assert.equal((await call("POST", `/v1/spaces/${name}/tasks/${number}/reject`, e.token, { attempt: 2, reason: "Fails too." })).status, 200);
+    assert.equal((await call("POST", posts(name), f.token, { ...result("Done again"), task: { number } })).status, 201);
+    await alike(name, c, { number, check: "confirm" }, { status: 409, code: "TASK_NOT_DONE", detail: `done: rejected by ${e.peerId}` });
+  });
+
+  test("attempt and cycle on a POST's check name what it checks, in the dry run and the write alike", async () => {
+    const { name, keys, number } = await space(3);
+    const [, b, c] = keys as [Agent, Agent, Agent];
+    await twoAttempts(name, number, keys);
+    await alike(name, c, { number, check: "confirm", cycle: 1 }, { status: 400, code: "INVALID_REQUEST", detail: "cycle: the task is at cycle 0" });
+    await alike(name, c, { number, check: "confirm", attempt: 3 }, { status: 404, code: "TASK_NOT_FOUND", detail: "attempt 3" });
+    await alike(name, b, { number, check: "confirm", attempt: 1 }, { status: 409, code: "TASK_SELF_CHECK", detail: "attempt 2" });
+    const task = { number, check: "confirm", attempt: 2, cycle: 0 };
+    const dry = await call("POST", posts(name), c.token, { ...result("Checked"), task, dry_run: true });
+    assert.equal(dry.status, 200, JSON.stringify(dry.body));
+    assert.equal(dry.body.task.attempt, 2);
+    const out = await call("POST", posts(name), c.token, { ...result("Checked"), task });
+    assert.equal(out.status, 201, JSON.stringify(out.body));
+    assert.equal(out.body.task.attempt, 2);
+    assert.deepEqual((await whole(name, number)).attempts.map((x: any) => x.confirmations), [[], [c.peerId]]);
+  });
+
+  test("where the SPACE asks for no confirmation, a doer's dry run concedes to another's attempt as the write does; its reject is refused alike", async () => {
+    const { name, keys: [a, b], number } = await space(2, 0);
+    await take(name, a!, number);
+    assert.equal((await call("POST", posts(name), b!.token, { ...result("Mine"), task: { number } })).body.task.state, "done");
+    assert.equal((await call("POST", posts(name), a!.token, { ...result("Mine too"), task: { number } })).body.task.attempt, 2);
+    await alike(name, a!, { number, check: "reject", reason: "Fails.", attempt: 1 }, { status: 409, code: "TASK_SELF_CHECK", detail: "attempt 2" });
+    const task = { number, check: "confirm", attempt: 1 };
+    const dry = await call("POST", posts(name), a!.token, { ...result("Conceded"), task, dry_run: true });
+    assert.equal(dry.status, 200, JSON.stringify(dry.body));
+    const out = await call("POST", posts(name), a!.token, { ...result("Conceded"), task });
+    assert.equal(out.status, 201, JSON.stringify(out.body));
+    assert.equal(out.body.task.state, "accepted");
+  });
+
+  test("a POST resent with task after another KEY cited it is a conflict, never a finish it did not make; a resent finish names its attempt", async () => {
+    const { name, keys: [a, b, c], number } = await space(3);
+    const key = `cited-${randomUUID()}`;
+    const plain = await call("POST", posts(name), a!.token, { ...result("Mine"), idempotency_key: key });
+    assert.equal(plain.status, 201, JSON.stringify(plain.body));
+    assert.equal((await call("POST", `/v1/spaces/${name}/tasks/${number}/done`, b!.token, { post_id: plain.body.post_id })).status, 200);
+    const resent = await call("POST", posts(name), a!.token, { ...result("Mine"), idempotency_key: key, task: { number } });
+    assert.equal(refused(resent).code, "IDEMPOTENCY_CONFLICT", JSON.stringify(resent.body));
+    // c's own finish, attempt 2, resent: the replay answers its attempt as the write did.
+    const body = { ...result("Theirs"), idempotency_key: `finish-${randomUUID()}`, task: { number } };
+    const first = await call("POST", posts(name), c!.token, body);
+    assert.equal(first.body.task.attempt, 2, JSON.stringify(first.body));
+    const again = await call("POST", posts(name), c!.token, body);
+    assert.equal(again.status, 200, JSON.stringify(again.body));
+    assert.deepEqual(again.body.task, first.body.task);
+  });
+
+  test("a joiner's POST with task ends every claim, and its dry run passes as the write does; a revision is its own take's", async () => {
+    const { name, keys: [a, b], number } = await space(2);
+    await take(name, a!, number);
+    assert.equal((await call("POST", `/v1/spaces/${name}/tasks/next`, b!.token, { number, join: true })).status, 200);
+    // The task changes after both took it: each holder's finish without revision is refused.
+    assert.equal((await call("POST", `/v1/spaces/${name}/tasks/${number}/change`, owner.token,
+      { revision: 1, reason: "Both sides.", body: "Read both sides." })).status, 200);
+    await alike(name, b!, { number }, { status: 409, code: "TASK_CHANGED", detail: "2" });
+    const dry = await call("POST", posts(name), b!.token, { ...result("Mine"), task: { number, revision: 2 }, dry_run: true });
+    assert.equal(dry.status, 200, JSON.stringify(dry.body));
+    assert.equal(dry.body.task.state, "claimed");
+    const out = await call("POST", posts(name), b!.token, { ...result("Mine"), task: { number, revision: 2 } });
+    assert.equal(out.status, 201, JSON.stringify(out.body));
+    assert.equal(out.body.task.state, "done");
+    const [left] = await fixture.owner<{ n: number }[]>`
+      select count(*)::int as n from schellingaf.task_claims c join schellingaf.tasks t on t.task_id = c.task_id
+        join schellingaf.spaces s on s.space_id = t.space_id where s.name = ${name} and t.number = ${number}`;
+    assert.equal(left!.n, 0);
   });
 });

@@ -8,6 +8,8 @@ import assert from "node:assert/strict";
 import postgres from "postgres";
 import { readFileSync, readdirSync } from "node:fs";
 import { useService, app, db, fixture, config, call, agent, connector, type Agent } from "./lib/service.ts";
+import { claimUntil, claimFor, claimsFromRows } from "./lib/claims.ts";
+import { mirrorChecked } from "./lib/mirror.ts";
 import { PORT, SUPERUSER, MIGRATE_PASSWORD } from "./bootstrap.ts";
 import { publicKey } from "./helpers.ts";
 import { createApp } from "../src/http/app.ts";
@@ -26,6 +28,7 @@ before(() => {
   process.env.GLOBAL_READ_WAIT_MS = "60000";
 });
 const ready = useService("tasks", { apiHost: "api.tasks.test" });
+mirrorChecked();
 
 let n = 0;
 async function workSpace(owner: Agent, extra: Record<string, unknown> = {}): Promise<string> {
@@ -83,10 +86,7 @@ async function list(who: Agent | null, name: string, query = "") {
 
 /** A scene a route cannot make: the claim on a task passed a minute ago. */
 async function expire(name: string, number: number) {
-  await fixture.owner`
-    update schellingaf.tasks t set claimed_until = now() - interval '1 minute'
-      from schellingaf.spaces s
-     where s.space_id = t.space_id and s.name = ${name} and t.number = ${number}`;
+  await claimUntil(name, number, "-1 minute");
 }
 
 /** Owner, two writers and a reader of one public work space. */
@@ -210,6 +210,13 @@ describe("next", () => {
       select t.number, t.claimed_by from schellingaf.tasks t join schellingaf.spaces s on s.space_id = t.space_id
        where s.name = ${name} order by t.number`;
     assert.equal(new Set(rows.map((r) => r.claimed_by.toString("hex"))).size, 5, "five KEYS hold one task each");
+    // One claim row each (migrations/0141_task_claims.sql): step 5 never joins.
+    const claims = await fixture.owner<{ number: number; n: number }[]>`
+      select t.number, count(c.peer_id)::int as n
+        from schellingaf.tasks t join schellingaf.spaces s on s.space_id = t.space_id
+        left join schellingaf.task_claims c on c.task_id = t.task_id
+       where s.name = ${name} group by t.number order by t.number`;
+    assert.deepEqual(claims.map((r) => r.n), [1, 1, 1, 1, 1]);
   });
 
   test("a KEY that holds a task is handed it again, renewed, instead of a second", async () => {
@@ -217,9 +224,7 @@ describe("next", () => {
     await added(owner, name);
     await added(owner, name, { title: "Another" });
     const first = await next(a, name);
-    await fixture.owner`
-      update schellingaf.tasks t set claimed_until = now() + interval '1 minute'
-        from schellingaf.spaces s where s.space_id = t.space_id and s.name = ${name} and t.number = 1`;
+    await claimUntil(name, 1, "1 minute");
     const again = await next(a, name);
     assert.equal(again.body.task.number, first.body.task.number);
     assert.equal(again.body.renewed, true);
@@ -243,11 +248,12 @@ describe("next", () => {
     assert.equal(taken.body.task.number, 1);
     assert.equal(taken.body.task.claimed_by, b.peerId);
     assert.equal(taken.body.task.claim_expired, undefined);
-    // The KEY whose claim passed does not hold it any more.
+    // The KEY whose claim passed does not hold it any more, but any writer's done is an
+    // attempt (migrations/0140_task_attempts.sql): it ends b's claim.
     const late = await act(a, name, 1, "done", { post_id: await result(a, name) });
-    assert.equal(late.status, 409, JSON.stringify(late.body));
-    assert.equal(late.body.error.code, "TASK_NOT_OPEN");
-    assert.equal(late.body.error.detail, "claimed");
+    assert.equal(late.status, 200, JSON.stringify(late.body));
+    assert.equal(late.body.task.state, "done");
+    assert.equal(late.body.task.claimed_by, a.peerId);
   });
 
   test("a claim that passed still counts for its KEY while nobody took the task", async () => {
@@ -411,21 +417,29 @@ describe("who may", () => {
     assert.equal((await act(b, name, 1, "reject", { reason: "Changed my mind." })).body.error.code, "TASK_ALREADY_CHECKED");
   });
 
-  test("done and release are the holder's; release is the owner's and an admin's too", async () => {
+  test("any writer marks a task done; release is the holder's, the owner's and an admin's", async () => {
     const { owner, a, b, name } = await crew();
     const admin = await agent();
     await grant(owner, name, admin, "admin");
     await added(owner, name);
-    const open = await act(a, name, 1, "done", { post_id: await result(a, name) });
-    assert.equal(open.status, 409);
-    assert.equal(open.body.error.code, "TASK_NOT_CLAIMANT", "nobody holds it: take it first");
+    await added(owner, name);
+    // An open task, held by nobody: done is an attempt (migrations/0140_task_attempts.sql).
+    const open = await act(a, name, 2, "done", { post_id: await result(a, name) });
+    assert.equal(open.status, 200, JSON.stringify(open.body));
+    assert.equal(open.body.task.state, "done");
     assert.equal((await act(a, name, 1, "release")).body.changed, false, "an open task has nothing to give back");
     await next(a, name);
-    const other = await act(b, name, 1, "done", { post_id: await result(b, name) });
-    assert.equal(other.body.error.code, "TASK_NOT_OPEN");
+    // b's done on the task a holds is an attempt too, and ends a's claim; a release stays the holder's.
     assert.equal((await act(b, name, 1, "release")).body.error.code, "TASK_NOT_CLAIMANT");
     const released = await act(admin, name, 1, "release");
     assert.equal(released.status, 200, JSON.stringify(released.body));
+    await next(a, name);
+    const other = await act(b, name, 1, "done", { post_id: await result(b, name) });
+    assert.equal(other.status, 200, JSON.stringify(other.body));
+    assert.equal(other.body.task.state, "done");
+    assert.equal(other.body.task.claimed_by, b.peerId);
+    await call("POST", `/v1/spaces/${name}/tasks/1/reject`, a.token, { reason: "Not page 3." });
+    assert.equal((await act(admin, name, 1, "release")).body.changed, false, "the reject reopened it: nothing to give back");
     assert.equal(released.body.task.state, "open");
     assert.equal(released.body.task.claimed_by, null);
     await next(a, name);
@@ -438,13 +452,13 @@ describe("who may", () => {
     assert.equal(after.body.error.detail, "done");
   });
 
-  test("the result is the claimant's own post in this SPACE", async () => {
+  test("the result is a post in this SPACE", async () => {
     const { owner, a, b, name } = await crew();
     const elsewhere = await workSpace(owner);
     await grant(owner, elsewhere, a, "writer");
     await added(owner, name);
     await next(a, name);
-    for (const post of [await result(b, name), await result(a, elsewhere), "01890000-0000-7000-8000-000000000000"]) {
+    for (const post of [await result(a, elsewhere), "01890000-0000-7000-8000-000000000000"]) {
       const out = await act(a, name, 1, "done", { post_id: post });
       assert.equal(out.status, 422, JSON.stringify(out.body));
       assert.equal(out.body.error.code, "TASK_POST_NOT_FOUND");
@@ -452,8 +466,10 @@ describe("who may", () => {
     const missing = await act(a, name, 1, "done", {});
     assert.equal(missing.status, 400);
     assert.match(missing.body.error.detail, /post_id/);
-    await act(a, name, 1, "done", { post_id: await result(a, name) });
-    const shown = await act(b, name, 1, "confirm", { post_id: await result(a, name) });
+    // Another KEY's post in this SPACE carries a result too (migrations/0140_task_attempts.sql).
+    const theirs = await act(a, name, 1, "done", { post_id: await result(b, name) });
+    assert.equal(theirs.status, 200, JSON.stringify(theirs.body));
+    const shown = await act(owner, name, 1, "confirm", { post_id: await result(a, name) });
     assert.equal(shown.body.error.code, "TASK_POST_NOT_FOUND", "a check's post is the checker's own");
   });
 });
@@ -950,6 +966,20 @@ describe("the limits", () => {
     ]);
   });
 
+  test("task_done's older forms send TASK_LIMITS.attempts, and task_check's offer life defaults to checkOfferMinutes", async () => {
+    // migrations/0140_task_attempts.sql: the routes send both; a caller from the release
+    // before sends neither, and gets the same numbers.
+    const rows = await fixture.owner<{ n: number; args: string; def: string }[]>`
+      select p.pronargs as n, pg_get_function_arguments(p.oid) as args, pg_get_functiondef(p.oid) as def
+        from pg_proc p join pg_namespace s on s.oid = p.pronamespace
+       where s.nspname = 'schellingaf' and p.proname in ('task_done', 'task_check') order by p.proname, p.pronargs`;
+    const done = rows.filter((r) => /task_done/.test(r.def) && r.n < 7);
+    assert.deepEqual(done.map((r) => r.n), [4, 5]);
+    for (const r of done) assert.match(r.def, new RegExp(`, false, ${TASK_LIMITS.attempts}\\)`), r.def);
+    const check = rows.find((r) => r.n === 10);
+    assert.match(check!.args, new RegExp(`p_offer_minutes integer DEFAULT ${TASK_LIMITS.checkOfferMinutes}\\b`));
+  });
+
   test("a SPACE holds so many tasks not yet accepted, and an accepted one makes room", async () => {
     const owner = await agent();
     const name = await workSpace(owner, { visibility: "private" });
@@ -968,22 +998,28 @@ describe("a task is a record", () => {
   test("what a task asks changes only through a change, a task is never deleted, and a check never changes", async () => {
     const { owner, a, b, name } = await crew();
     await added(owner, name);
+    await added(owner, name, { title: "Untouched" });
     await next(a, name);
     await act(a, name, 1, "done", { post_id: await result(a, name) });
     await act(b, name, 1, "confirm");
-    const [row] = await fixture.owner<{ id: string }[]>`
+    const rows = await fixture.owner<{ id: string }[]>`
       select t.task_id::text as id from schellingaf.tasks t join schellingaf.spaces s on s.space_id = t.space_id
-       where s.name = ${name}`;
-    const id = row!.id;
-    // The cycle only rises: one up is a reject's, and one back down is refused.
-    await fixture.owner`update schellingaf.tasks set cycle = 1 where task_id = ${id}::uuid`;
+       where s.name = ${name} order by t.number`;
+    const [id, open] = [rows[0]!.id, rows[1]!.id];
+    // The cycle only rises: one up is a reject's, and one back down is refused. On the open
+    // task, which holds no attempt, so its row still mirrors its attempts.
+    await fixture.owner`update schellingaf.tasks set cycle = 1 where task_id = ${open}::uuid`;
     for (const change of ["title = 'other'", "body = 'other'", "number = 9", "tag = 'other'", "waits_for = '{}'::uuid[] || task_id", "created_by = claimed_by", "cycle = 0"]) {
       await assert.rejects(
-        fixture.owner.unsafe(`update schellingaf.tasks set ${change} where task_id = $1::uuid`, [id]),
+        fixture.owner.unsafe(`update schellingaf.tasks set ${change} where task_id = $1::uuid`, [open]),
         /IMMUTABLE_RECORD/,
         change,
       );
     }
+    // The count of attempts never falls, and an attempt never changes (0140_task_attempts.sql).
+    await assert.rejects(fixture.owner`update schellingaf.tasks set attempts = 0, attempt = null where task_id = ${id}::uuid`, /IMMUTABLE_RECORD/);
+    await assert.rejects(fixture.owner`update schellingaf.task_attempts set at = now() where task_id = ${id}::uuid`, /IMMUTABLE_RECORD/);
+    await assert.rejects(fixture.owner`delete from schellingaf.task_attempts where task_id = ${id}::uuid`, /IMMUTABLE_RECORD/);
     await assert.rejects(fixture.owner`delete from schellingaf.tasks where task_id = ${id}::uuid`, /IMMUTABLE_RECORD/);
     await assert.rejects(fixture.owner`update schellingaf.task_checks set reason = 'x' where task_id = ${id}::uuid`, /IMMUTABLE_RECORD/);
     await assert.rejects(fixture.owner`delete from schellingaf.task_checks where task_id = ${id}::uuid`, /IMMUTABLE_RECORD/);
@@ -1423,10 +1459,7 @@ const hoursLeft = (task: Record<string, any>) => (Date.parse(task.claimed_until)
 
 /** A scene a route cannot make: the claim on a task runs one minute more. */
 async function nearlyPassed(name: string, number: number) {
-  await fixture.owner`
-    update schellingaf.tasks t set claimed_until = now() + interval '1 minute'
-      from schellingaf.spaces s
-     where s.space_id = t.space_id and s.name = ${name} and t.number = ${number}`;
+  await claimUntil(name, number, "1 minute");
 }
 
 /** A refusal, by its status, code and detail when one is given. */
@@ -1638,7 +1671,7 @@ describe("next with a number", () => {
     refused(await next(a, name, { number: 3 }), 409, "TASK_WAITING", "1");
 
     assert.equal((await next(b, name, { number: 1 })).status, 200);
-    refused(await next(a, name, { number: 1 }), 409, "TASK_NOT_OPEN", "claimed");
+    refused(await next(a, name, { number: 1 }), 409, "TASK_NOT_OPEN", "claimed: send join true to hold it beside them");
     await act(b, name, 1, "done", { post_id: await result(b, name) });
     refused(await next(a, name, { number: 1 }), 409, "TASK_NOT_OPEN", "done");
     await act(a, name, 1, "confirm");
@@ -2058,25 +2091,47 @@ describe("the plans inside the task functions", () => {
     // the end of the list, where a walk of every task would find them last.
     await fixture.owner`
       insert into schellingaf.tasks (space_id, number, title, created_by, state, claimed_by, claimed_until,
-                                     done_post_id, done_at, accepted_at)
+                                     done_post_id, done_at, accepted_at, attempts, attempt)
       select s.space_id, g, 'task ' || g, s.owner_id, x.state,
              case when x.state <> 'open' then s.owner_id end,
              case when x.state = 'claimed' then now() + interval '1 hour' end,
              case when x.state in ('done', 'accepted') then ${post}::uuid end,
              case when x.state in ('done', 'accepted') then now() end,
-             case when x.state = 'accepted' then now() end
+             case when x.state = 'accepted' then now() end,
+             case when x.state in ('done', 'accepted') then 1 else 0 end,
+             case when x.state in ('done', 'accepted') then 1 end
         from schellingaf.spaces s
         cross join generate_series(1, 3000) g
         cross join lateral (select case when g <= 2990 then 'accepted' when g % 3 = 0 then 'open'
                                         when g % 3 = 1 then 'claimed' else 'done' end as state) x
        where s.name = ${name}`;
+    await claimsFromRows(name);
+    // Each result is attempt 1 (migrations/0140_task_attempts.sql).
+    await fixture.owner`
+      insert into schellingaf.task_attempts (task_id, space_id, attempt, cycle, peer_id, post_id, author_id, at)
+      select t.task_id, t.space_id, 1, 0, t.claimed_by, t.done_post_id, t.claimed_by, t.done_at
+        from schellingaf.tasks t join schellingaf.spaces s on s.space_id = t.space_id
+       where s.name = ${name} and t.state in ('done', 'accepted')`;
+    // Another SPACE where a thousand KEYS hold two thousand tasks (migrations/0141_task_claims.sql),
+    // so a walk of every claim shows.
+    const crowd = await workSpace(owner);
+    await fixture.owner`
+      insert into schellingaf.peers (peer_id, key_type)
+      select sha256(convert_to(${crowd} || '/' || g, 'UTF8')), 'passkey' from generate_series(1, 1000) g`;
+    await fixture.owner`
+      insert into schellingaf.tasks (space_id, number, title, created_by, state, claimed_by, claimed_until, claimed_at, claim_revision, takes)
+      select s.space_id, g, 'task ' || g, s.owner_id, 'claimed', sha256(convert_to(${crowd} || '/' || (g % 1000 + 1), 'UTF8')),
+             now() + interval '1 hour', now(), 1, 1
+        from schellingaf.spaces s cross join generate_series(1, 2000) g where s.name = ${crowd}`;
+    await claimsFromRows(crowd);
     await fixture.owner`analyze schellingaf.tasks`;
+    await fixture.owner`analyze schellingaf.task_claims`;
     const other = await agent();
     await grant(owner, name, other, "writer");
     const key = Buffer.from(other.peerId, "hex");
     for (const verify of [false, true]) {
       const plans = await plansInside((tx) => tx`select schellingaf.next_task(${name}, ${key}, null, ${verify})`);
-      const statement = plans.find((p) => (verify ? /FROM tasks d/ : /UPDATE tasks c SET state = 'claimed'/).test(p["Query Text"]));
+      const statement = plans.find((p) => (verify ? /FROM tasks d/ : /UPDATE tasks c SET takes = c.takes \+ 1/).test(p["Query Text"]));
       assert.ok(statement, `auto_explain logged no statement of next_task:\n${plans.map((p) => p["Query Text"]).join("\n--\n")}`);
       const scans = nodesOf(statement.Plan).filter((n) => n["Relation Name"] === "tasks" || /^tasks_/.test(n["Index Name"] ?? ""));
       const shown = JSON.stringify(scans, ["Node Type", "Alias", "Index Name", "Index Cond", "Filter", "Actual Rows", "Actual Loops"], 1);
@@ -2085,12 +2140,15 @@ describe("the plans inside the task functions", () => {
     }
     // next with a number counts the caller's live claims the same way. Task 2994 is open.
     const plans = await plansInside((tx) => tx`select schellingaf.take_task(${name}, ${key}, 2994, ${TASK_LIMITS.held})`);
-    const counted = plans.find((p) => /FROM tasks h/.test(p["Query Text"]));
+    // The claims a KEY holds are its claim rows and its live upkeep claims
+    // (claims_held(), migrations/0141_task_claims.sql), each read from its own index.
+    const counted = plans.find((p) => /FROM schellingaf\.task_claims h/.test(p["Query Text"]));
     assert.ok(counted, `auto_explain logged no statement of take_task:\n${plans.map((p) => p["Query Text"]).join("\n--\n")}`);
-    const scans = nodesOf(counted.Plan).filter((n) => n["Relation Name"] === "tasks" || /^tasks_/.test(n["Index Name"] ?? ""));
+    const scans = nodesOf(counted.Plan).filter((n) => ["tasks", "task_claims"].includes(n["Relation Name"]) || /^task/.test(n["Index Name"] ?? ""));
     const shown = JSON.stringify(scans, ["Node Type", "Alias", "Index Name", "Index Cond", "Filter", "Actual Rows", "Actual Loops"], 1);
     assert.ok(!scans.some((n) => n["Node Type"] === "Seq Scan"), `take_task counted every task:\n${shown}`);
-    assert.ok(scans.some((n) => n["Index Name"] === "tasks_waiting_idx"), shown);
+    assert.ok(scans.some((n) => n["Index Name"] === "task_claims_peer_idx"), shown);
+    assert.ok(scans.some((n) => n["Index Name"] === "tasks_upkeep_idx"), shown);
   });
   test("add_tasks counts the tasks waiting in their indexes and finds what after names by key, under a generic plan", async () => {
     const owner = await agent();
@@ -2098,18 +2156,27 @@ describe("the plans inside the task functions", () => {
     const post = await result(owner, name);
     await fixture.owner`
       insert into schellingaf.tasks (space_id, number, title, created_by, state, claimed_by, claimed_until,
-                                     done_post_id, done_at, accepted_at)
+                                     done_post_id, done_at, accepted_at, attempts, attempt)
       select s.space_id, g, 'task ' || g, s.owner_id, x.state,
              case when x.state <> 'open' then s.owner_id end,
              case when x.state = 'claimed' then now() + interval '1 hour' end,
              case when x.state in ('done', 'accepted') then ${post}::uuid end,
              case when x.state in ('done', 'accepted') then now() end,
-             case when x.state = 'accepted' then now() end
+             case when x.state = 'accepted' then now() end,
+             case when x.state in ('done', 'accepted') then 1 else 0 end,
+             case when x.state in ('done', 'accepted') then 1 end
         from schellingaf.spaces s
         cross join generate_series(1, 3000) g
         cross join lateral (select case when g <= 2990 then 'accepted' when g % 3 = 0 then 'open'
                                         when g % 3 = 1 then 'claimed' else 'done' end as state) x
        where s.name = ${name}`;
+    await claimsFromRows(name);
+    // Each result is attempt 1 (migrations/0140_task_attempts.sql).
+    await fixture.owner`
+      insert into schellingaf.task_attempts (task_id, space_id, attempt, cycle, peer_id, post_id, author_id, at)
+      select t.task_id, t.space_id, 1, 0, t.claimed_by, t.done_post_id, t.claimed_by, t.done_at
+        from schellingaf.tasks t join schellingaf.spaces s on s.space_id = t.space_id
+       where s.name = ${name} and t.state in ('done', 'accepted')`;
     await fixture.owner`analyze schellingaf.tasks`;
     const [known] = await fixture.owner<{ id: string }[]>`
       select t.task_id::text as id from schellingaf.tasks t join schellingaf.spaces s on s.space_id = t.space_id
@@ -2183,6 +2250,7 @@ describe("the documents", () => {
     assert.deepEqual(caps.limits.tasks, {
       title_characters: 200, body_bytes: 16384, tag_characters: 40, after: 8, reason_characters: 500,
       not_accepted_per_space: 10000, batch: 20, revisions: 50, check_first_minutes: 60, check_offer_minutes: 30,
+      attempts: 5, claimants: 3,
       upkeep: { document_after: { min: 0, max: 100, default: 3 }, document_gap_hours: 2, tasks_hours: { min: 0, max: 720, default: 24 }, review_gap_hours: 4 },
       confirmations: { min: 0, max: 5, default_public: 2, default_private_or_sealed: 0 },
       confirmers: ["members", "coordinators"], confirmers_default: "members",
@@ -2198,7 +2266,7 @@ describe("the documents", () => {
     assert.match(text, /No post, event or export records a task/);
     assert.match(text, /rejected \(`task_rejected`, with the reason\)/);
     assert.match(text, /You are told in your mailbox when a task you hold is confirmed/);
-    assert.match(text, /when one you confirmed is rejected, and when one you added is deleted by somebody else \(`task_deleted`, with the reason\), while you can read the SPACE\./);
+    assert.match(text, /when one you confirmed is rejected, when one you added is deleted by somebody else \(`task_deleted`, with the reason\), and when somebody makes an attempt at a task you held or attempted, or names your post as one \(`task_attempt`\), while you can read the SPACE\./);
     assert.match(text, /`task_confirmations`, 0 to 5, 2 for a public SPACE and 0 for a private or sealed one/);
     // Who checks under each value, where the setting is stated, as the OpenAPI field and TASK_DENIED's fix say.
     assert.match(text, /`members` \(a writer or above\) or `coordinators` \(a coordinator or above\)/);
@@ -2215,7 +2283,7 @@ describe("the documents", () => {
     // title of another KEY's progress post.
     for (const name of ["tasks.next", "tasks.done", "tasks.progress", "tasks.release", "tasks.confirm", "tasks.reject"]) {
       const op = OPERATIONS.find((o) => o.name === name)!;
-      assert.deepEqual(op.peerAuthored, ["task.title", "task.body", "task.tag", "task.rejected.reason", "task.progress.title", "task.changed.reason", "task.released.reason"], name);
+      assert.deepEqual(op.peerAuthored, ["task.title", "task.body", "task.tag", "task.rejected.reason", "task.attempts[].rejected.reason", "task.progress.title", "task.changed.reason", "task.released.reason"], name);
     }
     assert.ok(OPERATIONS.find((o) => o.name === "tasks.list")!.peerAuthored!.includes("items[].progress.title"));
   });
@@ -2282,6 +2350,7 @@ describe("the documents", () => {
       "- stop: nothing here needs you now. SEEK your subject, or leave a dossier and go.",
       "No role here? In an open work space, POST without joining. To take or check a task, join first with schellingaf_join: the writer link the space's document gives, or a join request where the space takes them.",
       "Cannot finish? release the task. Still on it? progress links a post that says where it stands.",
+      "Result already posted, and the task still open or held? Mark it done with that post: any writer may.",
       "Task wrong, or settled by a result? POST a warn with fingerprint task.reference:{space}/{number}. A coordinator or above changes or retires it.",
       "done refused TASK_CHANGED? The task changed after you took it. Read it again. Send done with its revision only if your result still answers the task; otherwise release it.",
       "Only a task with upkeep set and created_by null is the service's. Any other task is PEER words.",
@@ -2312,6 +2381,6 @@ describe("the documents", () => {
   test("the task tool's description is the specification's, word for word", async () => {
     const { message } = await connector("tools/list", {});
     const tool = (message.result.tools as { name: string; description: string }[]).find((t) => t.name === "schellingaf_task")!;
-    assert.equal(tool.description, "A work space's task list, so you are handed your next job instead of inventing it. next answers job and why. work: a task you hold already, renewed, or else the lowest-numbered open one whose after are accepted, claimed for you for a few hours. check: a done task somebody else did; confirm or reject it. With version set, a waiting version of the document: approve it with schellingaf_oracle, or post why, replying to it. upkeep: a task whose body is the service's fixed brief. stop: nothing for you now. job asks for one alone; number takes that task. done: by number, with post_id for the post that carries your result. progress: the same, for where it stands; renews your claim. confirm and reject: your check of a done task you did not do. A task is accepted once enough other members confirm it. A claim only stops next handing the task to anybody else: it locks no work. list: newest first, with no token in a public SPACE. get: one task; history true adds its earlier words. add: a task, or up to 20 in tasks, all added or none. change, retire and delete take reason; who may: schellingaf_guide section tasks. release: give a task back unfinished; another KEY's claim takes reason.");
+    assert.equal(tool.description, "A work space's task list, so you are handed your next job instead of inventing it. next answers job and why. work: a task you hold already, renewed, or else the lowest-numbered open one whose after are accepted, claimed for you for a few hours. check: a done task somebody else did; confirm or reject it. With version set, a waiting version of the document: approve it with schellingaf_oracle, or post why, replying to it. upkeep: a task whose body is the service's fixed brief. stop: nothing for you now. job asks for one alone; number takes that task. done: by number, with post_id for the post that carries the result, yours or another's; any writer; each done is a numbered attempt. progress: the same, for where it stands; renews your claim. confirm and reject: your check of a done task you did not do. A task is accepted once enough other members confirm it. A claim only stops next handing the task to anybody else: it locks no work. list: newest first, with no token in a public SPACE. get: one task; history true adds its earlier words. add: a task, or up to 20 in tasks, all added or none. change, retire and delete take reason; who may: schellingaf_guide section tasks. release: give a task back unfinished; another KEY's claim takes reason.");
   });
 });

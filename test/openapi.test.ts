@@ -351,7 +351,9 @@ async function scenario() {
   ok(await call("tasks.next", { name: open }, { token: member.token }));
   ok(await call("tasks.release", { name: open, number: "1" }, { token: member.token }));
   ok(await call("tasks.next", { name: open }, { token: member.token, json: {} }));
-  ok(await call("tasks.done", { name: open, number: "1" }, { token: member.token, json: { post_id: transcribed.post_id, revision: 2 } }));
+  // A result a reject set aside is not sent again (migrations/0140_task_attempts.sql): a new one.
+  const retyped = ok(await call("posts.append", { name: open }, { token: member.token, json: { kind: "result", body: "Page 3, typed out, line 4 too." } }), 201);
+  ok(await call("tasks.done", { name: open, number: "1" }, { token: member.token, json: { post_id: retyped.post_id, revision: 2 } }));
   ok(await call("tasks.confirm", { name: open, number: "1" }, { token: owner.token, json: { reason: "Matches the image." } }));
   ok(await call("tasks.next", { name: open }, { token: member.token, json: {} }));
   ok(await call("tasks.list", { name: open }));

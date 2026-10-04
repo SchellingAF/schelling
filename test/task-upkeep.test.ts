@@ -9,6 +9,7 @@ import assert from "node:assert/strict";
 import postgres from "postgres";
 import { readFileSync, readdirSync } from "node:fs";
 import { useService, app, fixture, call, agent, connector, type Agent } from "./lib/service.ts";
+import { followDoneAt, mirrorChecked } from "./lib/mirror.ts";
 import { PORT, SUPERUSER, MIGRATE_PASSWORD } from "./bootstrap.ts";
 import { publicKey } from "./helpers.ts";
 import { statementsOf } from "../src/db/migrate.ts";
@@ -23,6 +24,7 @@ before(() => {
   process.env.GLOBAL_READ_WAIT_MS = "60000";
 });
 const ready = useService("task_upkeep", { apiHost: "api.task-upkeep.test" });
+mirrorChecked();
 before(async () => {
   await ready;
 });
@@ -131,6 +133,7 @@ async function ageBy(name: string, hours: number) {
   await fixture.owner`
     update schellingaf.tasks t set done_at = t.done_at - make_interval(hours => ${hours})
       from schellingaf.spaces s where s.space_id = t.space_id and s.name = ${name} and t.done_at is not null`;
+  await followDoneAt(name);
 }
 
 /** A done task, `hours` old, as a route cannot make it. */
@@ -138,6 +141,7 @@ async function doneAgo(name: string, number: number, hours: number) {
   await fixture.owner`
     update schellingaf.tasks t set done_at = now() - make_interval(hours => ${hours})
       from schellingaf.spaces s where s.space_id = t.space_id and s.name = ${name} and t.number = ${number}`;
+  await followDoneAt(name);
 }
 
 /** The owner, a coordinator and three writers of one public work space that keeps a document. */
@@ -1057,12 +1061,20 @@ describe("the plans inside next_job's upkeep", () => {
     // tasks, or of the rounds that are over, shows.
     const post = await post2(owner, name);
     await fixture.owner`
-      insert into schellingaf.tasks (space_id, number, title, created_by, upkeep, state, claimed_by, done_post_id, done_at, accepted_at)
+      insert into schellingaf.tasks (space_id, number, title, created_by, upkeep, state, claimed_by, done_post_id, done_at, accepted_at,
+                                     attempts, attempt)
       select s.space_id, g, 'task ' || g, case when g > 300 then s.owner_id end,
              case when g <= 300 then (array['document', 'tasks'])[g % 2 + 1] end,
              case when g <= 2995 then 'accepted' else 'done' end, s.owner_id,
-             ${post}::uuid, now() - interval '30 hours', case when g <= 2995 then now() end
+             ${post}::uuid, now() - interval '30 hours', case when g <= 2995 then now() end,
+             case when g > 300 then 1 else 0 end, case when g > 300 then 1 end
         from schellingaf.spaces s cross join generate_series(1, 3000) g where s.name = ${name}`;
+    // Each task that is not upkeep holds its result as attempt 1 (migrations/0140_task_attempts.sql).
+    await fixture.owner`
+      insert into schellingaf.task_attempts (task_id, space_id, attempt, cycle, peer_id, post_id, author_id, at)
+      select t.task_id, t.space_id, 1, 0, t.claimed_by, t.done_post_id, t.claimed_by, t.done_at
+        from schellingaf.tasks t join schellingaf.spaces s on s.space_id = t.space_id
+       where s.name = ${name} and t.upkeep is null`;
     for (let i = 0; i < 3; i++) await post2(owner, name, "result");
     await fixture.owner`analyze schellingaf.tasks`;
     await fixture.owner`analyze schellingaf.posts`;

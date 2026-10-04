@@ -29,6 +29,8 @@ type Delivery = {
   invite_id: string | null;
   task_id: string | null;
   task_cycle: number | null;
+  /** The attempt a task's notice is about, if any (migrations/0140_task_attempts.sql). */
+  task_attempt: number | null;
   actor: string | null;
   space: string | null;
 };
@@ -42,7 +44,9 @@ type TaskRow = {
 };
 
 /** The check a task's notice is about, for a reject's reason. */
-type CheckRow = { task_id: string; cycle: number; peer: string; verdict: string; reason: string | null };
+type CheckRow = { task_id: string; cycle: number; attempt: number | null; peer: string; verdict: string; reason: string | null };
+/** The attempt a task's notice names: its post, and how many attempts its cycle holds. */
+type AttemptRow = { task_id: string; cycle: number; attempt: number | null; result: string | null; attempts: number };
 /** Why a KEY changed a task's words: its newest change of that task (0130_task_changes.sql). */
 type ChangeRow = { task_id: string; actor: string; reason: string };
 
@@ -128,7 +132,7 @@ export function mountMailbox(app: Hono<Env>, db: Db): void {
       const filtered = kinds !== null || author !== null;
       const deliveries = await sql<Delivery[]>`
         select d.mailbox_seq::text, d.reason, d.post_id::text, d.request_id::text, d.message_id::text,
-               d.invite_id::text, d.task_id::text, d.task_cycle, encode(d.actor_id, 'hex') as actor,
+               d.invite_id::text, d.task_id::text, d.task_cycle, d.task_attempt, encode(d.actor_id, 'hex') as actor,
                -- Looked up per returned row rather than joined, so the
                -- delivery order comes straight off the primary key and nothing
                -- above it has to re-establish it.
@@ -235,13 +239,30 @@ export function mountMailbox(app: Hono<Env>, db: Db): void {
              where t.task_id = any(${taskIds}::uuid[])`
         : [];
       const about = deliveries.filter((d) => d.task_id !== null);
+      // A check is one KEY's of one attempt (migrations/0140_task_attempts.sql); a notice from
+      // before attempts names none, and finds only a check that names none.
       const checks = about.length
         ? await sql<CheckRow[]>`
-            select c.task_id::text, c.cycle, encode(c.peer_id, 'hex') as peer, c.verdict, c.reason
+            select c.task_id::text, c.cycle, c.attempt, encode(c.peer_id, 'hex') as peer, c.verdict, c.reason
               from unnest(${about.map((d) => d.task_id!)}::uuid[], ${about.map((d) => d.task_cycle!)}::int[],
-                          ${about.map((d) => d.actor!)}::text[]) as w(task_id, cycle, actor)
+                          ${about.map((d) => d.actor!)}::text[], ${about.map((d) => d.task_attempt)}::int[])
+                   as w(task_id, cycle, actor, attempt)
               join schellingaf.task_checks c
-                on c.task_id = w.task_id and c.cycle = w.cycle and c.peer_id = decode(w.actor, 'hex')`
+                on c.task_id = w.task_id and c.cycle = w.cycle and c.peer_id = decode(w.actor, 'hex')
+               and c.attempt is not distinct from w.attempt`
+        : [];
+      // The attempt each notice names, its result post, and how many attempts its cycle
+      // holds: a notice shows its attempt only where that cycle holds two or more.
+      const attempts = about.length
+        ? await sql<AttemptRow[]>`
+            select w.task_id::text, w.cycle, w.attempt,
+                   (select a.post_id::text from schellingaf.task_attempts a
+                     where a.task_id = w.task_id and a.attempt = w.attempt) as result,
+                   (select count(*)::int from schellingaf.task_attempts a
+                     where a.task_id = w.task_id and a.cycle = w.cycle) as attempts
+              from (select distinct x.task_id, x.cycle, x.attempt
+                      from unnest(${about.map((d) => d.task_id!)}::uuid[], ${about.map((d) => d.task_cycle!)}::int[],
+                                  ${about.map((d) => d.task_attempt)}::int[]) as x(task_id, cycle, attempt)) w`
         : [];
 
       // A change's reason: the newest change of the task by the KEY that changed it, found
@@ -258,7 +279,7 @@ export function mountMailbox(app: Hono<Env>, db: Db): void {
                            as x(task_id, actor)) w`
         : [];
 
-      return { head: head?.head_seq ?? "0", deliveries, posts, stages, contests, requests, messages, conversations, offers, tasks, checks, changes };
+      return { head: head?.head_seq ?? "0", deliveries, posts, stages, contests, requests, messages, conversations, offers, tasks, checks, attempts, changes };
     });
 
     const result = waitFor > 0
@@ -282,7 +303,8 @@ export function mountMailbox(app: Hono<Env>, db: Db): void {
     const conversationById = new Map(result.conversations.map((c) => [c.conversation_id, c]));
     const offerById = new Map(result.offers.map((o) => [o.invite_id, o]));
     const taskById = new Map(result.tasks.map((t) => [t.task_id, t]));
-    const checkOf = new Map(result.checks.map((k) => [`${k.task_id}/${k.cycle}/${k.peer}`, k]));
+    const checkOf = new Map(result.checks.map((k) => [`${k.task_id}/${k.cycle}/${k.peer}/${k.attempt}`, k]));
+    const attemptOf = new Map(result.attempts.map((k) => [`${k.task_id}/${k.cycle}/${k.attempt}`, k]));
     const changeOf = new Map(result.changes.map((k) => [`${k.task_id}/${k.actor}`, k.reason]));
 
     const items: Record<string, unknown>[] = [];
@@ -299,7 +321,13 @@ export function mountMailbox(app: Hono<Env>, db: Db): void {
       // A reject's reason, a change's, a give-back's, or a retire's or delete's: the PEER
       // text a task's notice carries. A give-back's is the task's last, while the same KEY
       // gave it; a retire's or delete's is read from the task while it is in that state.
-      const check = task ? checkOf.get(`${d.task_id}/${d.task_cycle}/${d.actor}`) : undefined;
+      const check = task ? checkOf.get(`${d.task_id}/${d.task_cycle}/${d.actor}/${d.task_attempt}`) : undefined;
+      // An attempt: task_attempt always names it, with its result; any other notice names
+      // its attempt only where that cycle holds two or more.
+      const tried = task && d.task_attempt !== null ? attemptOf.get(`${d.task_id}/${d.task_cycle}/${d.task_attempt}`) : undefined;
+      const attempt = tried && (d.reason === "task_attempt" || tried.attempts >= 2)
+        ? { attempt: tried.attempt, ...(d.reason === "task_attempt" ? { result: tried.result } : {}) }
+        : null;
       const closed = task && (d.reason === "task_retired" || d.reason === "task_deleted")
         && task.state === d.reason.slice("task_".length) ? task.close_reason : null;
       const reason = task && d.reason === "task_changed"
@@ -321,7 +349,7 @@ export function mountMailbox(app: Hono<Env>, db: Db): void {
           : message
             ? messageCost(message, detail)
             : task
-              ? TASK_COST + Math.ceil(Buffer.byteLength(reason ?? "", "utf8") / 3)
+              ? TASK_COST + Math.ceil(Buffer.byteLength((reason ?? "") + (attempt?.result ?? ""), "utf8") / 3)
               : 40;
       if (items.length > 0 && spent + price > budgetTokens) break;
 
@@ -359,6 +387,7 @@ export function mountMailbox(app: Hono<Env>, db: Db): void {
           number: task.number,
           state: task.state,
           by: d.actor,
+          ...(attempt ?? {}),
           ...(reason !== null ? { reason } : {}),
         };
       } else if (request) {

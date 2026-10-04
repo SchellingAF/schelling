@@ -591,13 +591,18 @@ export function renderMailbox(header: string, body: Record<string, any>): string
         task_changed: "changed",
         task_retired: "retired",
         task_deleted: "deleted",
+        task_attempt: "attempt",
       };
       const fence: Record<string, string> = {
         task_changed: "change reason",
         task_retired: "retire reason",
         task_deleted: "delete reason",
       };
-      lines.push(`  task ${t.number} in ${spaceName(t.space)}: ${what[item.reason] ?? item.reason} by ${t.by}; ${t.state} now`);
+      // An attempt (migrations/0140_task_attempts.sql) names its number and its result post;
+      // any other notice names its attempt where that cycle holds two or more.
+      lines.push(item.reason === "task_attempt"
+        ? `  task ${t.number} in ${spaceName(t.space)}: attempt ${t.attempt} by ${t.by}, result ${t.result}; ${t.state} now`
+        : `  task ${t.number} in ${spaceName(t.space)}: ${what[item.reason] ?? item.reason}${t.attempt ? ` attempt ${t.attempt}` : ""} by ${t.by}; ${t.state} now`);
       const why: Record<string, string> = { ...fence, task_reopened: "give-back reason" };
       if (t.reason) lines.push(delimit(why[item.reason] ?? "rejected reason", t.reason));
     } else if (item.request && item.reason === "decision") {
@@ -1631,7 +1636,8 @@ export function renderTask(header: string, body: Record<string, any>): string {
   }
   if (body.replayed) lines.push("this idempotency_key replayed and nothing new was added");
   if (!("title" in t)) {
-    lines.push(`task ${t.number} in ${spaceName(body.space)}: ${t.state === "done" ? "done, waiting for checks" : t.state}, task_id ${t.task_id}`);
+    lines.push(`task ${t.number} in ${spaceName(body.space)}: ${t.state === "done" ? "done, waiting for checks" : t.state}, task_id ${t.task_id}` +
+      (body.attempt !== undefined ? `; your call: attempt ${body.attempt}` : ""));
     // A deleted task, read whole, holds no words but who deleted it, when and why.
     if (t.deleted) {
       lines.push(`  deleted by ${t.deleted.by} at ${t.deleted.at}: its words are erased`);
@@ -1654,6 +1660,10 @@ export function renderTask(header: string, body: Record<string, any>): string {
               ? `retired by ${t.retired.by ?? "the service"} at ${t.retired.at}${t.claimed_by ? `, done by ${t.claimed_by}` : ""}`
               : t.state;
   lines.push(`task ${t.number} in ${spaceName(body.space)}: ${state}`);
+  // Every holder on one line, while several hold it (migrations/0141_task_claims.sql).
+  if (Array.isArray(t.claimants)) {
+    lines.push(`  held by ${t.claimants.length} KEYS: ${t.claimants.map((h: any) => `${h.by} until ${h.until}`).join(", ")}`);
+  }
   if (body.verify) lines.push("for you to check: confirm or reject it, with a post showing how");
   else if (body.renewed) lines.push("you held it already: your claim is renewed");
   const moved = body.changed_since_claim;
@@ -1678,7 +1688,22 @@ export function renderTask(header: string, body: Record<string, any>): string {
   const c = t.confirmations ?? {};
   const given: string[] = c.given ?? [];
   lines.push(`  confirmed ${given.length} of ${c.required} needed${given.length ? `: ${given.join(" ")}` : ""}`);
-  if (t.rejected) lines.push(`  last rejected by ${t.rejected.by} at ${t.rejected.at}`);
+  // Each attempt of the cycle on one line, where it holds two or more
+  // (migrations/0140_task_attempts.sql), and what the last reject cleared.
+  const attempts: any[] = Array.isArray(t.attempts) ? t.attempts : [];
+  for (const a of attempts) {
+    const confirmed: string[] = a.confirmations ?? [];
+    lines.push(`  attempt ${a.attempt} by ${a.by}${a.author ? `, post by ${a.author}` : ""}: ${a.state}${a.attempt === t.attempt ? ", of record" : ""}, ` +
+      `confirmed ${confirmed.length}${confirmed.length ? `: ${confirmed.join(" ")}` : ""}; result post ${a.post_id}` +
+      (a.rejected ? `; rejected by ${a.rejected.by} at ${a.rejected.at}` : ""));
+  }
+  if (body.attempt !== undefined) lines.push(`your call: attempt ${body.attempt}`);
+  if (t.rejected) {
+    const cleared: string[] = t.rejected.cleared ?? [];
+    lines.push(`  last rejected by ${t.rejected.by} at ${t.rejected.at}${t.rejected.attempt ? `, attempt ${t.rejected.attempt}` : ""}` +
+      (t.rejected.result ? `, result ${t.rejected.result}` : "") +
+      (t.rejected.cleared ? `; cleared ${cleared.length} confirmations` : ""));
+  }
   if (t.tag) lines.push(delimit("task tag", t.tag));
   if (service) {
     lines.push(`upkeep task: the service's fixed brief`, t.title, t.body);
@@ -1687,6 +1712,7 @@ export function renderTask(header: string, body: Record<string, any>): string {
     lines.push(...peerField("task body", t.body));
   }
   if (t.rejected) lines.push(...peerField("rejected reason", t.rejected.reason));
+  for (const a of attempts) if (a.rejected) lines.push(...peerField(`attempt ${a.attempt} rejected reason`, a.rejected.reason));
   if (t.progress) lines.push(...peerField("progress title", t.progress.title));
   if (t.changed) lines.push(...peerField("change reason", t.changed.reason));
   if (t.released) {
@@ -1820,7 +1846,7 @@ export function renderFindings(header: string, body: Record<string, any>): strin
 function resultLine(task: Record<string, any>): string {
   const confirmed: string[] = task.confirmed_by ?? [];
   const rejected: string[] = task.rejected_by ?? [];
-  return `the result of task ${task.number}, ${task.state} now` +
+  return `the result of task ${task.number}${task.attempt ? `, attempt ${task.attempt}` : ""}, ${task.state} now` +
     (confirmed.length ? `; confirmed by ${confirmed.join(" ")}` : "") +
     (rejected.length ? `; rejected by ${rejected.join(" ")}` : "");
 }

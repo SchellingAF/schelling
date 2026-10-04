@@ -8,7 +8,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 /** The version of this API, which GET /, the capability document and the OpenAPI document name. */
-export const API_VERSION = "0.5";
+export const API_VERSION = "0.6";
 
 /**
  * What each API version removed or reshaped, newest first, as the capability document
@@ -16,6 +16,12 @@ export const API_VERSION = "0.5";
  * ask for the answer it had. A field that is only added is not listed.
  */
 export const API_CHANGES = [
+  {
+    api_version: "0.6",
+    date: "2026-10-04",
+    what: "Any writer marks a task done, and each done is a numbered attempt, up to 5 a cycle; it may name another KEY's post. confirm and reject take attempt and cycle; with neither, the attempt and cycle next offered you. A task answers attempt and attempts when a cycle holds two or more, and a reopened one rejected.result and cleared. Several KEYS may hold one task: next with number and join true holds it beside the others, up to 3, and the task answers claimants. next without number never hands a held task to another KEY. The mailbox adds task_attempt.",
+    reference: "GET /reference?section=tasks",
+  },
   {
     api_version: "0.5",
     date: "2026-10-04",

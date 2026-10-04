@@ -8,6 +8,8 @@ import assert from "node:assert/strict";
 import postgres from "postgres";
 import { readFileSync } from "node:fs";
 import { useService, app, db, fixture, call, agent, connector, type Agent } from "./lib/service.ts";
+import { claimUntil, claimFor, claimsFromRows } from "./lib/claims.ts";
+import { followDoneAt, mirrorChecked } from "./lib/mirror.ts";
 import { SUPERUSER } from "./bootstrap.ts";
 import { NEXT_WORDS } from "../src/surface/next-words.ts";
 import { TASK_JOBS, TASK_LIMITS } from "../src/surface/vocabulary.ts";
@@ -24,6 +26,7 @@ before(() => {
   process.env.GLOBAL_READ_WAIT_MS = "60000";
 });
 const ready = useService("task_next", { apiHost: "api.task-next.test" });
+mirrorChecked();
 before(async () => {
   await ready;
 });
@@ -88,6 +91,7 @@ async function doneAgo(name: string, number: number, minutes: number) {
     update schellingaf.tasks t set done_at = now() - make_interval(mins => ${minutes})
       from schellingaf.spaces s
      where s.space_id = t.space_id and s.name = ${name} and t.number = ${number}`;
+  await followDoneAt(name);
 }
 
 /** Task `number`, taken and done by `who` with a result of its own. */
@@ -108,6 +112,38 @@ async function crew(extra: Record<string, unknown> = {}) {
   for (const k of [doer, a, b]) await grant(owner, name, k, "writer");
   return { owner, doer, a, b, name };
 }
+
+describe("next hands out checks of attempts (migrations/0140_task_attempts.sql)", () => {
+  test("it passes over a done task the caller made an attempt at, offers one whose other attempt's post it wrote, and records the attempt offered", async () => {
+    const { owner, doer, a, b, name } = await crew();
+    await added(owner, name);
+    await added(owner, name);
+    // Task 1: the doer's attempt, then a's. Task 2: an attempt by b with a's post, then the owner's.
+    await did(doer, name, 1);
+    assert.equal((await act(a, name, 1, "done", { post_id: await result(a, name) })).status, 200);
+    assert.equal((await act(b, name, 2, "done", { post_id: await result(a, name) })).status, 200);
+    assert.equal((await act(owner, name, 2, "done", { post_id: await result(owner, name) })).status, 200);
+    // a made an attempt at task 1, so it is passed over; at task 2 it wrote attempt 1's post,
+    // so it is offered attempt 2.
+    const offered = await job(a, name, { job: "check" });
+    assert.equal(offered.task.number, 2);
+    assert.equal(offered.attempt, 2);
+    assert.equal(offered.why, why("check_attempts", { number: 2, attempts: 2, attempt: 2 }));
+    const [row] = await fixture.owner<{ cycle: number; attempt: number | null }[]>`
+      select o.cycle, o.attempt from schellingaf.task_check_offers o
+        join schellingaf.tasks t on t.task_id = o.task_id join schellingaf.spaces s on s.space_id = t.space_id
+       where s.name = ${name} and t.number = 2 and o.peer_id = ${Buffer.from(a.peerId, "hex")}`;
+    assert.deepEqual(row, { cycle: 0, attempt: 2 });
+    // The doer of task 1 is offered task 2's lowest attempt, and nothing of task 1.
+    assert.equal((await job(doer, name, { job: "check" })).task.number, 2);
+    // With one attempt left to check, why is the old sentence and no attempt is answered.
+    assert.equal((await act(doer, name, 2, "reject", { attempt: 1, reason: "Not page 3." })).status, 200);
+    const last = await job(doer, name, { job: "check" });
+    assert.equal(last.task.number, 2);
+    assert.equal(last.attempt, undefined);
+    assert.equal(last.why, why("check_asked", { number: 2 }));
+  });
+});
 
 describe("next with job any", () => {
   test("a check that waited an hour comes before new work, oldest done first, and claims nothing", async () => {
@@ -409,11 +445,11 @@ describe("the release before", () => {
 });
 
 describe("the words", () => {
-  const sql = ["0133_task_next_job.sql", "0134_task_upkeep.sql", "0138_document_decision.sql"]
+  const sql = ["0133_task_next_job.sql", "0134_task_upkeep.sql", "0138_document_decision.sql", "0140_task_attempts.sql", "0141_task_claims.sql"]
     .map((file) => readFileSync(new URL(`../migrations/${file}`, import.meta.url), "utf8")).join("\n");
 
   test("every sentence next_job names is in NEXT_WORDS, and every one in NEXT_WORDS is named", () => {
-    const named = new Set([...sql.replace(/--.*$/gm, "").matchAll(/'((?:renewed|renewed_changed|held_upkeep|number|work|check_first|check_idle|check_asked|upkeep_document|upkeep_document_first|upkeep_tasks|stop|stop_waiting|stop_upkeep|stop_check|check_version|check_version_decide))'/g)].map((m) => m[1]!));
+    const named = new Set([...sql.replace(/--.*$/gm, "").matchAll(/'((?:renewed|renewed_changed|held_upkeep|number|joined|work|check_first|check_idle|check_asked|check_attempts|upkeep_document|upkeep_document_first|upkeep_tasks|stop|stop_waiting|stop_upkeep|stop_check|check_version|check_version_decide))'/g)].map((m) => m[1]!));
     // work and number are also job values and a field name; each sentence key must appear.
     assert.deepEqual([...named].sort(), Object.keys(NEXT_WORDS.why).sort());
   });
@@ -421,7 +457,7 @@ describe("the words", () => {
   test("why is filled with numbers only: each placeholder is a number next counted, or the signals made of them", async () => {
     // hours is twice the SPACE's claim hours, an upkeep claim's cap. signals is NEXT_WORDS' own signal sentences, filled with task numbers and hours
     // (test/task-upkeep.test.ts).
-    const values = { number: "12", minutes: "61", from: "1", to: "3", count: "4", seq: "70", hours: "8", given: "1", required: "2", signals: "a new document version since the last review" };
+    const values = { number: "12", minutes: "61", from: "1", to: "3", count: "4", seq: "70", hours: "8", given: "1", required: "2", signals: "a new document version since the last review", attempts: "2", attempt: "1", others: "1" };
     for (const [key, text] of Object.entries(NEXT_WORDS.why)) {
       for (const [, name] of text.matchAll(/\{([a-z_]+)\}/g)) assert.ok(Object.keys(values).includes(name!), `${key}: {${name}}`);
       const [row] = await fixture.owner<{ text: string }[]>`
@@ -436,13 +472,11 @@ describe("the words", () => {
   test("the operation, the capability document and the API version say it", async () => {
     const op = OPERATIONS.find((o) => o.name === "tasks.next")!;
     assert.ok(op.describe.includes(`waited ${TASK_LIMITS.checkFirstMinutes} minutes for a check`), op.describe);
-    assert.equal(API_VERSION, "0.5");
-    assert.equal(API_CHANGES[0].api_version, "0.5");
-    assert.match(API_CHANGES[0].what, /may answer job check with task null and version set/);
-    assert.equal(API_CHANGES[1].api_version, "0.4");
-    assert.match(API_CHANGES[1].what, /answers job \(work, check, upkeep or stop\) and why/);
+    assert.equal(API_VERSION, API_CHANGES[0].api_version);
+    assert.match(API_CHANGES.find((c) => c.api_version === "0.5")!.what, /may answer job check with task null and version set/);
+    assert.match(API_CHANGES.find((c) => c.api_version === "0.4")!.what, /answers job \(work, check, upkeep or stop\) and why/);
     const caps = (await call("GET", "/v1/capabilities")).body;
-    assert.equal(caps.api_version, "0.5");
+    assert.equal(caps.api_version, API_VERSION);
     assert.equal(caps.limits.tasks.check_first_minutes, 60);
     assert.equal(caps.limits.tasks.check_offer_minutes, 30);
   });
@@ -522,32 +556,52 @@ describe("the plans inside next_job", () => {
     // and an offer from the owner on each accepted one, so a walk of either table shows.
     await fixture.owner`
       insert into schellingaf.tasks (space_id, number, title, created_by, state, claimed_by, claimed_until,
-                                     done_post_id, done_at, accepted_at)
+                                     done_post_id, done_at, accepted_at, attempts, attempt)
       select s.space_id, g, 'task ' || g, s.owner_id, x.state,
              case when x.state <> 'open' then s.owner_id end,
              case when x.state = 'claimed' then now() + interval '1 hour' end,
              case when x.state in ('done', 'accepted') then ${post}::uuid end,
              case when x.state in ('done', 'accepted') then now() - interval '2 hours' end,
-             case when x.state = 'accepted' then now() end
+             case when x.state = 'accepted' then now() end,
+             case when x.state in ('done', 'accepted') then 1 else 0 end,
+             case when x.state in ('done', 'accepted') then 1 end
         from schellingaf.spaces s
         cross join generate_series(1, 3000) g
         cross join lateral (select case when g <= 2990 then 'accepted' when g % 3 = 0 then 'open'
                                         when g % 3 = 1 then 'claimed' else 'done' end as state) x
        where s.name = ${name}`;
+    await claimsFromRows(name);
+    // Each result is attempt 1 (migrations/0140_task_attempts.sql).
+    await fixture.owner`
+      insert into schellingaf.task_attempts (task_id, space_id, attempt, cycle, peer_id, post_id, author_id, at)
+      select t.task_id, t.space_id, 1, 0, t.claimed_by, t.done_post_id, t.claimed_by, t.done_at
+        from schellingaf.tasks t join schellingaf.spaces s on s.space_id = t.space_id
+       where s.name = ${name} and t.state in ('done', 'accepted')`;
     // A thousand KEYs, as passkeys hold them, to spread the offers and checks over.
     await fixture.owner`
       insert into schellingaf.peers (peer_id, key_type)
       select sha256(convert_to(${name} || '/' || g, 'UTF8')), 'passkey' from generate_series(1, 1000) g`;
     for (const table of ["task_check_offers", "task_checks"]) {
       await fixture.owner.unsafe(`
-        insert into schellingaf.${table} (space_id, task_id, cycle, peer_id${table === "task_checks" ? ", verdict" : ""})
-        select t.space_id, t.task_id, 0, sha256(convert_to($1 || '/' || (t.number % 1000 + 1), 'UTF8'))${table === "task_checks" ? ", 'confirm'" : ""}
+        insert into schellingaf.${table} (space_id, task_id, cycle, peer_id${table === "task_checks" ? ", verdict, attempt" : ""})
+        select t.space_id, t.task_id, 0, sha256(convert_to($1 || '/' || (t.number % 1000 + 1), 'UTF8'))${table === "task_checks" ? ", 'confirm', 1" : ""}
           from schellingaf.tasks t join schellingaf.spaces s on s.space_id = t.space_id
          where s.name = $1 and t.state = 'accepted'`, [name]);
     }
+    // Another SPACE where those KEYs hold two thousand tasks (migrations/0141_task_claims.sql),
+    // so a walk of every claim shows.
+    const crowd = await workSpace(owner);
+    await fixture.owner`
+      insert into schellingaf.tasks (space_id, number, title, created_by, state, claimed_by, claimed_until, claimed_at, claim_revision, takes)
+      select s.space_id, g, 'task ' || g, s.owner_id, 'claimed', sha256(convert_to(${name} || '/' || (g % 1000 + 1), 'UTF8')),
+             now() + interval '1 hour', now(), 1, 1
+        from schellingaf.spaces s cross join generate_series(1, 2000) g where s.name = ${crowd}`;
+    await claimsFromRows(crowd);
+    await fixture.owner`analyze schellingaf.task_claims`;
     await fixture.owner`analyze schellingaf.tasks`;
     await fixture.owner`analyze schellingaf.task_check_offers`;
     await fixture.owner`analyze schellingaf.task_checks`;
+    await fixture.owner`analyze schellingaf.task_attempts`;
     const other = await agent();
     await grant(owner, name, other, "writer");
     const key = Buffer.from(other.peerId, "hex");
@@ -566,20 +620,28 @@ describe("the plans inside next_job", () => {
     assert.ok(drop.scans.some((n) => n["Index Name"] === "task_check_offers_peer_idx"), drop.shown);
     const first = scansOf(any, /ORDER BY d\.done_at/);
     assert.ok(!first.scans.some((n) => n["Node Type"] === "Seq Scan"), `next walked a whole table:\n${first.shown}`);
-    for (const index of ["tasks_done_idx", "task_checks_pkey", "task_check_offers_pkey"]) {
+    // The attempts' probes (migrations/0140_task_attempts.sql): one check a KEY an attempt, and
+    // the attempts of the task's cycle, by key.
+    for (const index of ["tasks_done_idx", "task_checks_attempt_key", "task_check_offers_pkey"]) {
       assert.ok(first.scans.some((n) => n["Index Name"] === index), `${index} unused:\n${first.shown}`);
     }
+    assert.ok(first.scans.some((n) => n["Relation Name"] === "task_attempts" && n["Node Type"] !== "Seq Scan"), first.shown);
 
     // job work: the take walks the waiting tasks.
     const work = await plansInside((tx) => tx`select schellingaf.next_job(${name}, ${key}, 'work', null, null, ${tx.json(words)})`);
-    const take = scansOf(work, /UPDATE tasks c SET state = 'claimed'/);
+    const take = scansOf(work, /UPDATE tasks c SET takes = c.takes \+ 1/);
     assert.ok(!take.scans.some((n) => n["Node Type"] === "Seq Scan" && n["Relation Name"] === "tasks"), take.shown);
     assert.ok(take.scans.some((n) => n["Index Name"] === "tasks_waiting_idx"), take.shown);
+    // Step 1 reads the caller's claims by its index, never every claim.
+    const held = scansOf(work, /FROM task_claims c JOIN tasks k/);
+    assert.ok(!held.scans.some((n) => n["Node Type"] === "Seq Scan"), held.shown);
+    assert.ok(held.scans.some((n) => n["Index Name"] === "task_claims_peer_idx"), held.shown);
 
     // Check when idle, with no work left for this caller: every open task is held.
     await fixture.owner`
       update schellingaf.tasks t set state = 'claimed', claimed_by = s.owner_id, claimed_until = now() + interval '1 hour'
         from schellingaf.spaces s where s.space_id = t.space_id and s.name = ${name} and t.state = 'open'`;
+    await claimsFromRows(name);
     // A KEY that holds none, since the one above took a task.
     const idler = await agent();
     await grant(owner, name, idler, "writer");

@@ -234,6 +234,13 @@ export const TASK_LIMITS = {
   /** How long next holds a check it handed out for its KEY, in minutes, unless that KEY asks
    *  next again sooner: passed to next_job(). */
   checkOfferMinutes: 30,
+  /** The attempts one task may take in one cycle: each writer's done is a numbered attempt,
+   *  passed to task_done() (migrations/0140_task_attempts.sql). */
+  attempts: 5,
+  /** The live claims one task may hold: next with number and join holds a task beside the
+   *  KEYS that hold it, up to this many in all; passed to take_task()
+   *  (migrations/0141_task_claims.sql). */
+  claimants: 3,
   /** Upkeep, the tasks next hands out from its counts (migrations/0134_task_upkeep.sql):
    *  the bounds and defaults of a work space's two settings, which the CHECKs hold too, and
    *  the hours between two rounds of each kind, passed to next_job(). */
@@ -372,8 +379,10 @@ export const MAILBOX_REASONS = [
   // task you confirmed rejected (migrations/0116_sources_and_notices.sql). A task you hold
   // whose words somebody else changed (migrations/0130_task_changes.sql). A task you held,
   // did or confirmed retired, and one you added deleted by somebody else
-  // (migrations/0132_task_retire_delete.sql).
+  // (migrations/0132_task_retire_delete.sql). An attempt at a task you held or attempted,
+  // or one naming your post (migrations/0140_task_attempts.sql).
   "task_confirmed", "task_accepted", "task_rejected", "task_reopened", "task_changed", "task_retired", "task_deleted",
+  "task_attempt",
   // Another post naming yours in its data.sources.
   "cited",
   // A finding of yours a check's reject or a member's warn or fail contested

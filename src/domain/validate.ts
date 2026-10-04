@@ -1026,6 +1026,27 @@ export function taskRevision(value: unknown, required: boolean): number | null {
   return value;
 }
 
+/**
+ * The attempt a check names, or null when it names none: a whole number from 1
+ * (migrations/0140_task_attempts.sql). One past the largest names no attempt.
+ */
+export function optionalTaskAttempt(value: unknown): number | null {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 1) {
+    throw new ApiError("INVALID_REQUEST", { detail: "attempt is a whole number from 1" });
+  }
+  return Math.min(value, 2147483647);
+}
+
+/** The cycle a check names, or null when it names none: a whole number from 0. */
+export function optionalTaskCycle(value: unknown): number | null {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
+    throw new ApiError("INVALID_REQUEST", { detail: "cycle is a whole number from 0" });
+  }
+  return Math.min(value, 2147483647);
+}
+
 /** A change of a task's words, as change_task() takes it: only the fields sent. */
 export type TaskChange = {
   revision: number;
@@ -1100,29 +1121,36 @@ export function optionalTaskNumber(value: unknown): number | null {
 
 /**
  * What `task` on a POST asks: finish task `number` with this POST, with the `revision` its
- * result answers if sent, as done takes it; or check it, with `check`.
+ * result answers if sent, as done takes it; or check it, with `check`, of the `attempt` and
+ * `cycle` sent, as confirm and reject take them.
  */
-export type PostTask = { number: number; revision: number | null; check: "confirm" | "reject" | null; reason: string | null };
+export type PostTask = {
+  number: number; revision: number | null; check: "confirm" | "reject" | null; reason: string | null;
+  attempt: number | null; cycle: number | null;
+};
 
 /** The keys `task` on a POST takes. */
-const POST_TASK_FIELDS = ["number", "revision", "check", "reason"];
+const POST_TASK_FIELDS = ["number", "revision", "check", "reason", "attempt", "cycle"];
 
 /**
  * `task` on a POST, or null when it sends none: `number`, which this POST marks done, as
  * POST .../tasks/{number}/done would, with `revision` read as done reads it; or with
  * `check`, confirm or reject, a check of it that this POST shows, as .../confirm and
- * .../reject would, with `reason`, which a reject needs. Read strictly: no other key, a
- * revision only without a check and a reason only with one. Each refusal names its field
+ * .../reject would, with `reason`, which a reject needs, and the `attempt` and `cycle` it
+ * checked, if sent. Read strictly: no other key, a revision only without a check, and a
+ * reason, an attempt and a cycle only with one. Each refusal names its field
  * as task.(field); a refusal in a batch is named by its item around it.
  */
 export function readPostTask(value: unknown): PostTask | null {
   if (value === undefined || value === null) return null;
-  const shape = () => new ApiError("INVALID_REQUEST", { detail: "task takes number; revision to finish it; check and reason to check it" });
+  const shape = () => new ApiError("INVALID_REQUEST", { detail: "task takes number; revision to finish it; check, reason, attempt and cycle to check it" });
   if (typeof value !== "object" || Array.isArray(value)) throw shape();
   const task = value as Record<string, unknown>;
   if (Object.keys(task).some((key) => !POST_TASK_FIELDS.includes(key))) throw shape();
   const checks = task.check !== undefined && task.check !== null;
-  if (task.reason !== undefined && task.reason !== null && !checks) throw shape();
+  for (const field of ["reason", "attempt", "cycle"]) {
+    if (task[field] !== undefined && task[field] !== null && !checks) throw shape();
+  }
   if (task.revision !== undefined && task.revision !== null && checks) throw shape();
   const prefixed = (error: unknown) =>
     error instanceof ApiError && error.code === "INVALID_REQUEST" && error.detail !== undefined
@@ -1137,7 +1165,7 @@ export function readPostTask(value: unknown): PostTask | null {
   if (number === null) throw new ApiError("INVALID_REQUEST", { detail: "task.number is a whole number from 1" });
   if (!checks) {
     try {
-      return { number, revision: taskRevision(task.revision, false), check: null, reason: null };
+      return { number, revision: taskRevision(task.revision, false), check: null, reason: null, attempt: null, cycle: null };
     } catch (error) {
       throw prefixed(error);
     }
@@ -1146,7 +1174,10 @@ export function readPostTask(value: unknown): PostTask | null {
     throw new ApiError("INVALID_REQUEST", { detail: "task.check is confirm or reject" });
   }
   try {
-    return { number, revision: null, check: task.check, reason: taskReason(task.reason, task.check === "reject") };
+    return {
+      number, revision: null, check: task.check, reason: taskReason(task.reason, task.check === "reject"),
+      attempt: optionalTaskAttempt(task.attempt), cycle: optionalTaskCycle(task.cycle),
+    };
   } catch (error) {
     throw prefixed(error);
   }

@@ -569,7 +569,11 @@ export const ERRORS: Record<string, ErrorSpec> = {
   // TASK_NOT_DONE is the task's state, TASK_NOT_DONE's followed by the KEY whose reject
   // reopened it when one did (0116_sources_and_notices.sql); of TASK_AFTER_INVALID, the
   // entry it names, a task_id or a number, after the task that sent it in a batch
-  // (0122_task_batches.sql).
+  // (0122_task_batches.sql). Attempts (0140_task_attempts.sql): TASK_NOT_DONE names
+  // `attempt <n>: rejected by <KEY>` for a rejected attempt or a result sent again, and
+  // `cycle <n>: rejected by <KEY>` for one rejected before attempts; TASK_SELF_CHECK names the
+  // attempt, TASK_ALREADY_CHECKED why done is refused (`attempt: ...`, `post_id: ...`),
+  // TASK_LIMIT `attempts: 5`, and TASK_NOT_FOUND `attempt <n>` for an attempt the task lacks.
   TASK_NOT_FOUND: {
     status: 404,
     message: "TASK_NOT_FOUND. No task in this SPACE has that number, or it was deleted.",
@@ -588,27 +592,27 @@ export const ERRORS: Record<string, ErrorSpec> = {
   TASK_NOT_CLAIMANT: {
     status: 409,
     message: "TASK_NOT_CLAIMANT. Your KEY does not hold that task.",
-    fix: "Take it with POST /v1/spaces/{name}/tasks/next before you link progress or mark it done. The KEY that holds a task gives it back. The owner and an admin give back anybody's; a coordinator, the claim of a KEY ranked below it, with reason.",
+    fix: "Take it with POST /v1/spaces/{name}/tasks/next before you link progress or mark an upkeep task done. Any other task is marked done without a claim. The KEY that holds a task gives it back. The owner and an admin give back anybody's; a coordinator, the claim of a KEY ranked below it, with reason.",
   },
   TASK_NOT_DONE: {
     status: 409,
     message: "TASK_NOT_DONE. That task is not done and waiting for a check.",
-    fix: "The detail is its state, and who rejected it when a reject reopened it. Through the tasks route, that reject is in your mailbox; on either route, the task's `rejected` field in GET /v1/spaces/{name}/tasks gives the reason. Find a done task to check with POST /v1/spaces/{name}/tasks/next and verify true.",
+    fix: "The detail is its state, and who rejected it when a reject reopened it. Through the tasks route, that reject is in your mailbox; on either route, the task's `rejected` field in GET /v1/spaces/{name}/tasks gives the reason. Find a done task to check with POST /v1/spaces/{name}/tasks/next and verify true. To check the result there now, read the task and send its cycle. From done: that post was already rejected as this task's result; post a new one.",
   },
   TASK_SELF_CHECK: {
     status: 409,
-    message: "TASK_SELF_CHECK. Your KEY did this task in its current cycle, so it cannot check it.",
-    fix: "Another member checks it. Take other work with POST /v1/spaces/{name}/tasks/next.",
+    message: "TASK_SELF_CHECK. Your KEY made an attempt at this task in its current cycle, or wrote that attempt's post, so it cannot check it.",
+    fix: "Your KEY may still confirm another KEY's attempt, but only where the SPACE asks for no confirmations. Another member checks it. Take other work with POST /v1/spaces/{name}/tasks/next.",
   },
   TASK_ALREADY_CHECKED: {
     status: 409,
-    message: "TASK_ALREADY_CHECKED. Your KEY checked this task in its current cycle already.",
-    fix: "Nothing more to do: your check stands. If the task is rejected and done again, check it again then.",
+    message: "TASK_ALREADY_CHECKED. Your KEY checked that attempt already, or checked this task in its current cycle and so cannot add an attempt.",
+    fix: "Nothing more to do: your check stands. If the task is rejected and done again, check it again then. From done with post_id: name another post, or post your own result.",
   },
   TASK_POST_NOT_FOUND: {
     status: 422,
-    message: "TASK_POST_NOT_FOUND. No post of yours in this SPACE has that id.",
-    fix: "POST your result, your progress or how you checked in this SPACE first, then send that post's id as post_id, or send task on that POST itself.",
+    message: "TASK_POST_NOT_FOUND. No post in this SPACE that this call may name has that id.",
+    fix: "done names the post that carries the result: yours, or another KEY's that is not hidden or withheld. progress, confirm and reject name a post of your own. POST it first and send its id as post_id, or send task on that POST itself.",
   },
   TASK_AFTER_INVALID: {
     status: 422,
@@ -617,7 +621,7 @@ export const ERRORS: Record<string, ErrorSpec> = {
   },
   TASK_LIMIT: {
     status: 409,
-    message: "TASK_LIMIT. This SPACE holds as many tasks not yet accepted as it may, or that task changed as often as it may.",
+    message: "TASK_LIMIT. This SPACE holds as many tasks not yet accepted as it may, or that task changed as often as it may, or that task holds as many claims or attempts as it may.",
     fix: "The detail is the limit. A batch that does not fit is refused whole. Add more once some are accepted, or keep them in another work space. When the detail names revisions, add a new task instead.",
   },
   // A task's words changed (migrations/0130_task_changes.sql): the detail is the task's

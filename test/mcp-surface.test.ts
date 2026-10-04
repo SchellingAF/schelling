@@ -14,6 +14,7 @@ import { useService, app, agent, send, read, HOST, type Agent } from "./lib/serv
 import { COMPATIBILITY_TOOLS, DOCUMENT_RESOURCES, INSTRUCTIONS, MCP_TOOLS, PROMPT_TOOLS, PROMPTS, TEMPLATE_RESOURCES, TOOLSETS } from "../src/mcp/server.ts";
 import { OPERATIONS } from "../src/surface/operations.ts";
 import { ERRORS } from "../src/db/errors.ts";
+import { API_VERSION } from "../src/config.ts";
 import { referenceParts, renderPrimer, renderReference, sectionNames } from "../src/docs/render.ts";
 import { connectionPublicKey, delegationPreimage, delegationStatementBytes } from "../src/domain/connection-keys.ts";
 import { TOKEN_TTL_DEFAULT_SECONDS } from "../src/domain/protocol.ts";
@@ -537,7 +538,7 @@ describe("the resources", () => {
     const reference = await readResource("schellingaf://reference");
     assert.match(reference.result.contents[0].text, /^# Schelling Add Forward API reference/);
     const caps = await readResource("schellingaf://capabilities");
-    assert.equal(JSON.parse(caps.result.contents[0].text).api_version, "0.5");
+    assert.equal(JSON.parse(caps.result.contents[0].text).api_version, API_VERSION);
   });
 
   test("a KEY's own documents need its token, say which code when they have none, and are never shared", async () => {

@@ -7,6 +7,8 @@
 import { test, before, describe } from "node:test";
 import assert from "node:assert/strict";
 import { useService, app, fixture, call, agent, connector, type Agent } from "./lib/service.ts";
+import { claimUntil, claimFor, claimsFromRows } from "./lib/claims.ts";
+import { mirrorChecked } from "./lib/mirror.ts";
 import { OPERATIONS } from "../src/surface/operations.ts";
 import { ERRORS } from "../src/db/errors.ts";
 
@@ -15,6 +17,7 @@ before(() => {
   process.env.GLOBAL_READ_WAIT_MS = "60000";
 });
 const ready = useService("task_give_back", { apiHost: "api.task-give-back.test" });
+mirrorChecked();
 before(async () => {
   await ready;
 });
@@ -172,15 +175,16 @@ describe("a coordinator gives back a claim", () => {
     // A KEY no longer a member of a public SPACE still reads it, so it is told.
     assert.deepEqual((await notices(a)).map((i) => i.reason), ["task_reopened"]);
 
-    await fixture.owner`
-      update schellingaf.tasks t set claimed_until = now() - interval '1 minute'
-        from schellingaf.spaces s where s.space_id = t.space_id and s.name = ${name} and t.number = 2`;
+    await claimUntil(name, 2, "-1 minute");
     const passed = await giveBack(coordinator, name, 2);
     assert.equal(passed.status, 200, JSON.stringify(passed.body));
     assert.equal(passed.body.changed, true);
     assert.equal(passed.body.task.released.by, coordinator.peerId);
+    // Given back, the task is open, and b's done is an attempt like any writer's
+    // (migrations/0140_task_attempts.sql).
     const done = await act(b, name, 2, "done", { post_id: await result(b, name) });
-    refused(done, 409, "TASK_NOT_CLAIMANT");
+    assert.equal(done.status, 200, JSON.stringify(done.body));
+    assert.equal(done.body.task.state, "done");
   });
 
   test("may not take the task back for the SPACE's claim hours; anybody else may at once", async () => {
@@ -291,7 +295,7 @@ describe("the owner, an admin, the holder and a writer", () => {
 });
 
 describe("races", () => {
-  test("a give-back racing the holder's done: whichever lands first, the other is refused", async () => {
+  test("a give-back racing the holder's done: the done is an attempt either way; a give-back after it is refused", async () => {
     for (let round = 0; round < 4; round++) {
       const { owner, coordinator, a, name } = await crew();
       await added(owner, name);
@@ -299,8 +303,10 @@ describe("races", () => {
       const post = await result(a, name);
       const [given, done] = await Promise.all([giveBack(coordinator, name, 1), act(a, name, 1, "done", { post_id: post })]);
       if (given.status === 200) {
-        refused(done, 409, "TASK_NOT_CLAIMANT");
-        assert.equal((await get(name, 1)).state, "open");
+        // Given back first: the done lands on the open task as an attempt (0140_task_attempts.sql).
+        assert.equal(done.status, 200, JSON.stringify(done.body));
+        assert.equal((await get(name, 1)).state, "done");
+        assert.deepEqual((await notices(a)).map((i) => i.reason), ["task_reopened"], "no notice of its own attempt");
       } else {
         assert.equal(done.status, 200, JSON.stringify(done.body));
         refused(given, 409, "TASK_NOT_OPEN", "done");

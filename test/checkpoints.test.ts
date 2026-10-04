@@ -374,26 +374,28 @@ describe("a receipt the service signs for every post", () => {
     assert.equal(await head(), before, "nothing was written");
   });
 
-  test("the capability document says api_version 0.5 and what changed", async () => {
+  test("the capability document says api_version 0.6 and what changed", async () => {
     const caps = (await call("GET", "/v1/capabilities")).body;
-    assert.equal(caps.api_version, "0.5");
-    assert.equal(caps.changes[0].api_version, "0.5");
-    assert.match(caps.changes[0].what, /document_confirmations is above 0/);
-    assert.match(caps.changes[0].what, /Where the setting is 0, next answers as 0\.4 did/);
-    assert.match(caps.changes[0].what, /Asked with job check, which verify true is, it answers so when no done task waits for your check; 0\.4 answered stop there/);
-    assert.match(caps.changes[0].reference, /section=tasks/);
-    assert.equal(caps.changes[1].api_version, "0.4");
-    assert.match(caps.changes[1].what, /answers job \(work, check, upkeep or stop\) and why/);
-    assert.match(caps.changes[1].what, /job work answers as 0\.3 did/);
+    assert.equal(caps.api_version, "0.6");
+    assert.equal(caps.changes[0].api_version, "0.6");
+    assert.match(caps.changes[0].what, /each done is a numbered attempt/);
+    assert.equal(caps.changes[1].api_version, "0.5");
+    assert.match(caps.changes[1].what, /document_confirmations is above 0/);
+    assert.match(caps.changes[1].what, /Where the setting is 0, next answers as 0\.4 did/);
+    assert.match(caps.changes[1].what, /Asked with job check, which verify true is, it answers so when no done task waits for your check; 0\.4 answered stop there/);
     assert.match(caps.changes[1].reference, /section=tasks/);
-    assert.equal(caps.changes[2].api_version, "0.3");
-    assert.match(caps.changes[2].what, /detail=headlines/);
-    assert.match(caps.changes[2].reference, /section=reading/);
-    assert.equal(caps.changes[3].api_version, "0.2");
-    assert.match(caps.changes[3].what, /detail=full/);
-    assert.match(caps.changes[3].what, /receipt=full/);
-    assert.match(caps.changes[3].reference, /section=tasks/);
-    assert.match(caps.changes[3].reference, /section=chains-checkpoints-and-proofs/);
+    assert.equal(caps.changes[2].api_version, "0.4");
+    assert.match(caps.changes[2].what, /answers job \(work, check, upkeep or stop\) and why/);
+    assert.match(caps.changes[2].what, /job work answers as 0\.3 did/);
+    assert.match(caps.changes[2].reference, /section=tasks/);
+    assert.equal(caps.changes[3].api_version, "0.3");
+    assert.match(caps.changes[3].what, /detail=headlines/);
+    assert.match(caps.changes[3].reference, /section=reading/);
+    assert.equal(caps.changes[4].api_version, "0.2");
+    assert.match(caps.changes[4].what, /detail=full/);
+    assert.match(caps.changes[4].what, /receipt=full/);
+    assert.match(caps.changes[4].reference, /section=tasks/);
+    assert.match(caps.changes[4].reference, /section=chains-checkpoints-and-proofs/);
     assert.match(caps.notice, /A new api_version may remove or reshape fields: changes lists each\./);
   });
 });

@@ -79,11 +79,13 @@ function findingColumns(sql: Sql) {
 
 /**
  * The task a finding is the result of, when it is one: the task whose result it is now,
- * or else the one whose checks judged it, since a reject clears a task's result. Its
- * number, its state as every read shows it, and the KEYS whose checks confirmed or
- * rejected this post as that task's result. Index walks of tasks_done_post_idx and
- * task_checks_result_idx, bounded by that one post's tasks and checks, not by the
- * SPACE's: a post that is no task's result costs two empty probes.
+ * or else the one an attempt names it for (migrations/0140_task_attempts.sql), or else the
+ * one whose checks judged it, since a reject clears a task's result. Its number, its state
+ * as every read shows it, the KEYS whose checks confirmed or rejected this post as that
+ * task's result, and its attempt where that attempt's cycle held two or more. Index walks
+ * of tasks_done_post_idx, task_attempts_post_idx and task_checks_result_idx, bounded by
+ * that one post's tasks, attempts and checks, not by the SPACE's: a post that is no task's
+ * result costs three empty probes.
  */
 function resultOf(sql: Sql) {
   const judged = (verdict: "confirm" | "reject") => sql`coalesce((
@@ -95,9 +97,19 @@ function resultOf(sql: Sql) {
       'state', case when t.state = 'claimed' and t.claimed_until <= now() then 'open' else t.state end,
       'confirmed_by', ${judged("confirm")},
       'rejected_by', ${judged("reject")})`;
+  // An attempt's number, where its cycle held two or more attempts.
   return sql`coalesce(
-    (select ${shown} from schellingaf.tasks t
+    (select ${shown}
+            || case when t.attempt is not null
+                         and (select count(*) from schellingaf.task_attempts x where x.task_id = t.task_id and x.cycle = t.cycle) >= 2
+                    then jsonb_build_object('attempt', t.attempt) else '{}'::jsonb end
+       from schellingaf.tasks t
       where t.done_post_id = f.post_id order by t.done_post_id, t.number limit 1),
+    (select ${shown}
+            || case when (select count(*) from schellingaf.task_attempts x where x.task_id = t.task_id and x.cycle = a.cycle) >= 2
+                    then jsonb_build_object('attempt', a.attempt) else '{}'::jsonb end
+       from schellingaf.task_attempts a join schellingaf.tasks t on t.task_id = a.task_id
+      where a.post_id = f.post_id order by a.post_id, a.at desc limit 1),
     (select ${shown} from schellingaf.task_checks r join schellingaf.tasks t on t.task_id = r.task_id
       where r.result_post_id = f.post_id order by r.result_post_id desc, r.checked_at desc limit 1))`;
 }

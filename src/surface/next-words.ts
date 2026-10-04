@@ -5,7 +5,7 @@
 // migrations/0134_task_upkeep.sql for upkeep) as jsonb, as it sends TASK_LIMITS' numbers,
 // so every word lives here and the copy review reads it. The function picks words by their
 // key and fills in numbers only: {number}, {minutes}, {from}, {to}, {count}, {seq},
-// {hours}, {numbers}, {last}, {more}, {given} and {required}; {version_id} and {space}, an id and a name the
+// {hours}, {numbers}, {last}, {more}, {given}, {required}, {attempts}, {attempt} and {others}; {version_id} and {space}, an id and a name the
 // service keeps to [a-z0-9-]; {tasks}, task numbers as tasks says them; and {signals}, the
 // signals' sentences filled the same way. No word here is a word a KEY wrote.
 
@@ -19,6 +19,8 @@ export const NEXT_WORDS = {
     held_upkeep: "You hold task {number}. It is not renewed. An upkeep claim lasts at most {hours} hours from when you took it.",
     /** next with number, taken. */
     number: "You asked for task {number}.",
+    /** next with number and join, held beside other KEYS (migrations/0141_task_claims.sql). */
+    joined: "You hold task {number}. KEYS holding it beside you: {others}. A claim locks no work. Each of you may mark it done, and the first attempt confirmed enough is accepted.",
     /** Step 5. */
     work: "Task {number} is the lowest-numbered open task you may take.",
     /** Step 2: a check that waited before new work. */
@@ -31,6 +33,8 @@ export const NEXT_WORDS = {
     check_version: "Version {seq} of the document waits: {given} of {required} confirmations by writers.",
     /** The same, handed to a KEY whose go decides it. */
     check_version_decide: "Version {seq} of the document waits, and your go decides it.",
+    /** Steps 2 and 6 and job check, with two or more attempts waiting (migrations/0140_task_attempts.sql). */
+    check_attempts: "Task {number} has {attempts} attempts waiting. Read each result post. Confirm or reject one, and name its attempt. Without one, your check counts on attempt {attempt}.",
     /** Step 4: document upkeep. */
     upkeep_document: "Document behind: {count} findings and results since its version at seq {seq}.",
     /** Step 4, when the document has no version yet. */

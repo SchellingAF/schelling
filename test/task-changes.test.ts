@@ -8,6 +8,8 @@ import assert from "node:assert/strict";
 import postgres from "postgres";
 import { readFileSync, readdirSync } from "node:fs";
 import { useService, app, db, fixture, config, call, agent, connector, type Agent } from "./lib/service.ts";
+import { claimUntil, claimFor, claimsFromRows } from "./lib/claims.ts";
+import { mirrorChecked } from "./lib/mirror.ts";
 import { PORT, SUPERUSER, MIGRATE_PASSWORD } from "./bootstrap.ts";
 import { publicKey } from "./helpers.ts";
 import { createApp } from "../src/http/app.ts";
@@ -21,6 +23,7 @@ before(() => {
   process.env.GLOBAL_READ_WAIT_MS = "60000";
 });
 const ready = useService("task_changes", { apiHost: "api.task-changes.test" });
+mirrorChecked();
 before(async () => {
   await ready;
 });
@@ -224,9 +227,7 @@ describe("a change", () => {
     const { owner, coordinator, a, name } = await crew();
     await added(owner, name);
     await next(a, name);
-    await fixture.owner`
-      update schellingaf.tasks t set claimed_until = now() - interval '1 minute'
-        from schellingaf.spaces s where s.space_id = t.space_id and s.name = ${name}`;
+    await claimUntil(name, null, "-1 minute");
     const out = await change(coordinator, name, 1, { revision: 1, body: "Read both sides." });
     assert.equal(out.status, 200, JSON.stringify(out.body));
     assert.equal(out.body.task.state, "open", "a passed claim reads as open");

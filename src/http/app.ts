@@ -1325,6 +1325,9 @@ export function createApp(config: Config, db: Db): Hono<Env> {
         revisions: TASK_LIMITS.revisions,
         check_first_minutes: TASK_LIMITS.checkFirstMinutes,
         check_offer_minutes: TASK_LIMITS.checkOfferMinutes,
+        // The attempts one task may take in one cycle, and the live claims it may hold.
+        attempts: TASK_LIMITS.attempts,
+        claimants: TASK_LIMITS.claimants,
         // Upkeep: the two settings' bounds and defaults, and the least hours between rounds.
         upkeep: {
           document_after: TASK_LIMITS.upkeep.documentAfter,

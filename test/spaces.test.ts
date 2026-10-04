@@ -8,6 +8,7 @@ import { createHash } from "node:crypto";
 import { test, before, describe } from "node:test";
 import assert from "node:assert/strict";
 import { useService, app, db, fixture, call, agent, type Agent } from "./lib/service.ts";
+import { claimUntil, claimFor, claimsFromRows } from "./lib/claims.ts";
 import type { Sql } from "postgres";
 import { appendPost } from "../src/http/append.ts";
 import { publicSeekablePerDay } from "../src/http/postview.ts";
@@ -1177,9 +1178,7 @@ describe("the SPACE list's stage, prefix and counts", () => {
     assert.equal(await take(writers[3]!), 4);
     await finish(writers[3]!, 4);
     // Task 2's claim passes: it reads open, as the task list shows it.
-    await fixture.owner`
-      update schellingaf.tasks t set claimed_until = now() - interval '1 minute'
-        from schellingaf.spaces s where s.space_id = t.space_id and s.name = ${name} and t.number = 2`;
+    await claimUntil(name, 2, "-1 minute");
 
     const finding = (who: Agent, status: string, extra: Record<string, unknown> = {}) =>
       posted(who, name, { kind: "finding", body: "Measured.", data: { claim: `a claim ${status}`, status, confidence: "low" }, ...extra });

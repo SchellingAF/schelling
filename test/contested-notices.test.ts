@@ -65,6 +65,29 @@ async function done(holder: Agent, name: string, number: number, result: string)
   await ok(call("POST", `/v1/spaces/${name}/tasks/${number}/done`, holder.token, { post_id: result }));
 }
 const REASON = "Row 4 reads TO.";
+/**
+ * Task `number` done again with a post a reject already set aside, as the release before
+ * attempts allowed and as its backfill keeps such a task: an attempt naming that post and
+ * the row mirroring it. done refuses the same post now (TASK_NOT_DONE,
+ * migrations/0140_task_attempts.sql), so a mark that still clears is set here.
+ */
+async function redoneAsBefore(holder: Agent, name: string, number: number, result: string) {
+  await fixture.owner.begin(async (tx) => {
+    const [t] = await tx<{ task_id: string; attempts: number }[]>`
+      select t.task_id::text, t.attempts from schellingaf.tasks t join schellingaf.spaces s on s.space_id = t.space_id
+       where s.name = ${name} and t.number = ${number} for update of t`;
+    await tx`
+      insert into schellingaf.task_attempts (task_id, space_id, attempt, cycle, peer_id, post_id, author_id)
+      select t.task_id, t.space_id, ${t!.attempts + 1}, t.cycle, ${Buffer.from(holder.peerId, "hex")}, p.post_id, p.author_id
+        from schellingaf.tasks t, schellingaf.posts p where t.task_id = ${t!.task_id}::uuid and p.post_id = ${result}::uuid`;
+    await tx`
+      update schellingaf.tasks set state = 'done', attempts = ${t!.attempts + 1}, attempt = ${t!.attempts + 1},
+             claimed_by = ${Buffer.from(holder.peerId, "hex")}, claimed_until = null, claimed_at = now(),
+             done_post_id = ${result}::uuid, done_at = now()
+       where task_id = ${t!.task_id}::uuid`;
+  });
+}
+
 async function reject(checker: Agent, name: string, number: number) {
   return ok(call("POST", `/v1/spaces/${name}/tasks/${number}/reject`, checker.token, { reason: REASON }));
 }
@@ -125,7 +148,7 @@ describe("a check's reject", () => {
     assert.equal(one.post.post_id, f.post_id);
     assert.deepEqual(one.contested, [{ cause: "rejected", on: r.seq, task: number, by: checker.peerId, reason: REASON }]);
     // Done again with the same result, rejected again by the owner: no second item.
-    await done(doer, name, number, r.post_id);
+    await redoneAsBefore(doer, name, number, r.post_id);
     await reject(owner, name, number);
     assert.deepEqual(await toldOf(other), [f.post_id]);
   });

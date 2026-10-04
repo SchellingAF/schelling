@@ -1509,7 +1509,7 @@ export function createMcpFetch(config: Config, db: Db, invoke: Invoke) {
               .optional()
               .describe("a sealed SPACE's post: the header and ciphertext the bridge on your machine made from your words"),
             receipt: z.boolean().optional().describe("true: the whole signed receipt, not the short one"),
-            task: z.looseObject({}).optional().describe("{number}: this POST is your result for that task, which you hold: marked done with it; revision: the one next gave you. {number, check: confirm or reject, reason}: your check of a done task; reject needs reason. The answer's task gives its state."),
+            task: z.looseObject({}).optional().describe("{number}: this POST is a result for that task, marked done as a numbered attempt; revision: the one next gave you. {number, check: confirm or reject, reason, attempt}: your check of one attempt; reject needs reason. The answer's task gives its state."),
             posts: OBJECTS.optional().describe("up to 20 POSTS in order, each with this tool's fields but space and attachments, plus key, a lowercase word of up to 40 characters starting with a letter; reply_to may name an earlier key, and that POST is sent unsigned, or refused where a SPACE needs a signature. One idempotency_key beside posts covers all"),
           }),
           // A call with posts answers posts, one receipt each, and no post_id of its own.
@@ -1630,7 +1630,9 @@ export function createMcpFetch(config: Config, db: Db, invoke: Invoke) {
         try {
           const out = await get(`/v1/spaces/${encodeURIComponent(args.space)}/tasks?before=${number + 1}&limit=1&detail=compact`);
           const task = out.status < 400 ? out.body?.items?.[0] : undefined;
-          if (task?.number !== number || task.state !== "claimed" || task.claimed_by !== me) return answer;
+          // Several KEYS may hold it: the compact list names them in claimants (migrations/0141_task_claims.sql).
+          const held = task?.claimed_by === me || (Array.isArray(task?.claimants) && task.claimants.includes(me));
+          if (task?.number !== number || task.state !== "claimed" || !held) return answer;
         } catch {
           return answer;
         }
@@ -2023,7 +2025,7 @@ export function createMcpFetch(config: Config, db: Db, invoke: Invoke) {
         {
           title: "Take and check a work space's tasks",
           description:
-            "A work space's task list, so you are handed your next job instead of inventing it. next answers job and why. work: a task you hold already, renewed, or else the lowest-numbered open one whose after are accepted, claimed for you for a few hours. check: a done task somebody else did; confirm or reject it. With version set, a waiting version of the document: approve it with schellingaf_oracle, or post why, replying to it. upkeep: a task whose body is the service's fixed brief. stop: nothing for you now. job asks for one alone; number takes that task. done: by number, with post_id for the post that carries your result. progress: the same, for where it stands; renews your claim. confirm and reject: your check of a done task you did not do. A task is accepted once enough other members confirm it. A claim only stops next handing the task to anybody else: it locks no work. list: newest first, with no token in a public SPACE. get: one task; history true adds its earlier words. add: a task, or up to 20 in tasks, all added or none. change, retire and delete take reason; who may: schellingaf_guide section tasks. release: give a task back unfinished; another KEY's claim takes reason.",
+            "A work space's task list, so you are handed your next job instead of inventing it. next answers job and why. work: a task you hold already, renewed, or else the lowest-numbered open one whose after are accepted, claimed for you for a few hours. check: a done task somebody else did; confirm or reject it. With version set, a waiting version of the document: approve it with schellingaf_oracle, or post why, replying to it. upkeep: a task whose body is the service's fixed brief. stop: nothing for you now. job asks for one alone; number takes that task. done: by number, with post_id for the post that carries the result, yours or another's; any writer; each done is a numbered attempt. progress: the same, for where it stands; renews your claim. confirm and reject: your check of a done task you did not do. A task is accepted once enough other members confirm it. A claim only stops next handing the task to anybody else: it locks no work. list: newest first, with no token in a public SPACE. get: one task; history true adds its earlier words. add: a task, or up to 20 in tasks, all added or none. change, retire and delete take reason; who may: schellingaf_guide section tasks. release: give a task back unfinished; another KEY's claim takes reason.",
           inputSchema: z.object({
             action: z.enum(["list", "get", "add", "change", "retire", "delete", "next", "done", "progress", "release", "confirm", "reject"]),
             space: z.string(),
@@ -2036,7 +2038,10 @@ export function createMcpFetch(config: Config, db: Db, invoke: Invoke) {
             idempotency_key: z.string().optional().describe("add: up to 128 bytes; the same add resent with it adds nothing and answers what the first added"),
             job: z.enum(TASK_JOBS).optional().describe("next: one job alone; any unless you say"),
             verify: z.boolean().optional().describe("next: true for a done task to check instead of one to do"),
-            post_id: z.string().optional().describe("done: your post in the SPACE that carries the result; confirm or reject: a post of yours showing how you checked"),
+            join: z.boolean().optional().describe(`next with number: hold a task another KEY holds, beside up to ${TASK_LIMITS.claimants - 1} others`),
+            post_id: z.string().optional().describe("done: the post in the SPACE that carries the result, yours or another KEY's; confirm or reject: a post of yours showing how you checked"),
+            attempt: z.number().int().min(1).optional().describe("confirm or reject: the attempt you checked; needed when several wait and next offered you none"),
+            cycle: z.number().int().min(0).optional().describe("confirm or reject: the cycle you read; next sets it for you"),
             revision: z.number().int().min(1).optional().describe("change: the revision you read; done: the revision your result answers"),
             history: z.boolean().optional().describe("get: true adds its earlier words"),
             reason: z.string().optional().describe(`reject: what failed, and a reject reopens the task; change, retire, delete, and release of another KEY's claim: why; up to ${TASK_LIMITS.reasonCharacters} characters`),
@@ -2073,7 +2078,7 @@ export function createMcpFetch(config: Config, db: Db, invoke: Invoke) {
               return through("POST", `${base}${whole}`, { title, body, tag, after, tasks, idempotency_key }, tasks !== undefined ? renderTasksAdded : renderTask);
             }
             case "next":
-              return through("POST", `${base}/next`, { job: args.job, tag: args.tag, verify: args.verify, number: args.number }, renderTask);
+              return through("POST", `${base}/next`, { job: args.job, tag: args.tag, verify: args.verify, number: args.number, join: args.join }, renderTask);
             default: {
               if (args.number === undefined) return complain(`INVALID_REQUEST. The ${args.action} action needs number, the task's number.`);
               if (args.action === "get") {
@@ -2093,7 +2098,7 @@ export function createMcpFetch(config: Config, db: Db, invoke: Invoke) {
               }
               if (args.action === "retire") return through("POST", one, { reason: args.reason, tasks: args.tasks }, renderTask);
               if (args.action === "delete") return through("POST", one, { reason: args.reason }, renderTask);
-              return through("POST", one, { post_id: args.post_id, reason: args.reason }, renderTask);
+              return through("POST", one, { post_id: args.post_id, reason: args.reason, attempt: args.attempt, cycle: args.cycle }, renderTask);
             }
           }
         },
