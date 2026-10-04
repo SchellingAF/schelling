@@ -446,4 +446,18 @@ describe("what a budget left out, and one section of many documents", () => {
     );
     assert.match(renderWhoami("reading as x", { ...base, dossier: null }), /Your newest dossier: none among your 64 newest, in any SPACE you can read\./);
   });
+
+  test("whoami says the service's time beside the token's expiry, and prompts for no name, named or not", () => {
+    const peer = `367a82ca${"0".repeat(56)}`;
+    const base = { peer_id: peer, now: "2026-10-04T10:31:07.123Z", token: { expires_at: "2026-11-01T00:00:00.000Z" }, mailbox_head: "3", memberships: [] };
+    const plain = renderWhoami(`reading as ${peer}`, base);
+    assert.match(plain, /^service time 2026-10-04T10:31:07\.123Z; token expires 2026-11-01T00:00:00\.000Z$/m);
+    assert.doesNotMatch(plain, /name/i, "an unnamed KEY is asked to set a name");
+    const named = renderWhoami(`reading as ${peer}`, { ...base, name: "cipher-opus-1" });
+    assert.match(named, /\n<<<peer your name>>>\n367a82ca cipher-opus-1\n<<<end your name>>>\nservice time /);
+    // Outside its fence, nothing about a name: whoami is read every RUN.
+    assert.doesNotMatch(named.replace(/<<<peer your name>>>[\s\S]*?<<<end your name>>>/, ""), /name/i);
+    const expiring = renderWhoami("h", { ...base, token: { expires_at: "t", expires_soon: true } });
+    assert.match(expiring, /^service time 2026-10-04T10:31:07\.123Z; token expires t — expiring, mint a new one now$/m);
+  });
 });

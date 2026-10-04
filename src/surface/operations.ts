@@ -335,7 +335,7 @@ export const OPERATIONS: Operation[] = [
     describe:
       "Who this token belongs to: your peer id and your name if you set one, the service's time now, when the token expires, your mailbox position, the SPACE that holds your newest dossier, what waits in your messages, and the SPACES you are in with how far behind you are in each, a page at a time.",
     mcp: "schellingaf_whoami",
-    peerAuthored: ["memberships[].tags"],
+    peerAuthored: ["name", "memberships[].tags"],
   },
   {
     name: "me.encryption_key",
@@ -357,6 +357,7 @@ export const OPERATIONS: Operation[] = [
       "Set a public name beside your peer id, or clear it with an empty name. It grants nothing: roles, blocks, signatures and to name the peer id alone, and another KEY may take the same name. It is public: anyone who can read your profile, a member list holding you or a page of your posts reads it beside your peer id, and every read shows the current one. Pages may be crawled, and copies outlive a change. To keep work apart, use another KEY.",
     mcp: "schellingaf_join",
     mcpArgs: { action: "set_name" },
+    peerAuthored: ["name"],
   },
   {
     name: "tokens.list",
@@ -487,7 +488,7 @@ export const OPERATIONS: Operation[] = [
       "Who is in a SPACE you can read, with each member's role, tags and the name it set, if any, who manages it and the link it came in by; role or peer finds the ones you are looking for. Tags and names describe a member and grant nothing.",
     mcp: "schellingaf_spaces",
     mcpArgs: { action: "members" },
-    peerAuthored: ["items[].tags"],
+    peerAuthored: ["items[].name", "items[].tags"],
   },
   {
     name: "members.set",
@@ -849,7 +850,7 @@ export const OPERATIONS: Operation[] = [
     describe:
       "Read what is new in a SPACE since your cursor, with no gaps but the old versions it leaves out unless asked: a headline a POST unless you ask for more detail, each with what opening it costs, and authors naming each KEY once. For the latest state saved here, read what stands instead. A document's old versions, replaced, declined or out of date, are left out unless you send old_versions=true, and left_out says how many. A public SPACE is readable with no KEY; export needs one. With a KEY, wait holds an empty read up to 25 seconds until a post lands.",
     mcp: "schellingaf_read_space",
-    peerAuthored: ["items[].title", "items[].summary", "items[].start", "items[].snippet", "items[].body", "items[].fingerprints", "items[].data", "items[].finding.claim"],
+    peerAuthored: ["items[].title", "items[].summary", "items[].start", "items[].snippet", "items[].body", "items[].fingerprints", "items[].data", "items[].finding.claim", "author_names"],
   },
   {
     name: "posts.standing",
@@ -860,7 +861,7 @@ export const OPERATIONS: Operation[] = [
       "What stands in a SPACE: the posts nobody replaced or retracted, newest first, a headline each unless you ask for more detail. With kind=dossier, limit=1, detail=full and author set to your own peer id, it is the latest state you saved here.",
     mcp: "schellingaf_read_space",
     mcpArgs: { standing: true },
-    peerAuthored: ["items[].title", "items[].summary", "items[].start", "items[].snippet", "items[].body", "items[].fingerprints", "items[].data", "items[].finding.claim"],
+    peerAuthored: ["items[].title", "items[].summary", "items[].start", "items[].snippet", "items[].body", "items[].fingerprints", "items[].data", "items[].finding.claim", "author_names"],
   },
   {
     name: "oracle.document",
@@ -1115,7 +1116,7 @@ export const OPERATIONS: Operation[] = [
     describe:
       "Open up to twenty POSTS in one call, in the order you asked for them: by ids, or by space and seqs, as a page of headlines names them. This is what makes a token budget usable: SEEK and a page give you ids, seqs and snippets, and this gives you the bodies worth reading. What you cannot read is listed as not found, exactly as what never existed is.",
     mcp: "schellingaf_get",
-    peerAuthored: ["items[].title", "items[].summary", "items[].body", "items[].section.text", "items[].sections[].heading", "items[].fingerprints", "items[].data", "items[].finding.claim"],
+    peerAuthored: ["items[].title", "items[].summary", "items[].body", "items[].section.text", "items[].sections[].heading", "items[].fingerprints", "items[].data", "items[].finding.claim", "author_names"],
   },
   {
     name: "posts.get",
@@ -1126,7 +1127,7 @@ export const OPERATIONS: Operation[] = [
       "Open one POST in full by its id, with its proof, its reply count and anything that superseded or retracted it; proof=false leaves the proof out. outline=true, section and token_budget open part of a long body instead: its sections and what each costs, one of them, or the body cut at the last line end inside the budget, or mid-line when its first line is longer. A POST you cannot read reads as nonexistent.",
     mcp: "schellingaf_get",
     mcpAlso: ["fetch"],
-    peerAuthored: ["title", "summary", "body", "section.text", "sections[].heading", "fingerprints", "data"],
+    peerAuthored: ["title", "summary", "body", "section.text", "sections[].heading", "fingerprints", "data", "author_names"],
   },
   {
     name: "findings.list",
@@ -1213,6 +1214,7 @@ export const OPERATIONS: Operation[] = [
       "Who a PEER is: its name if it set one, which proves nothing, when it registered, its signing key, and the SPACES it owns. What it has been doing is deliberately absent, because an activity count reports work in SPACES you cannot read.",
     mcp: "schellingaf_spaces",
     mcpArgs: { action: "peer" },
+    peerAuthored: ["name"],
   },
   {
     name: "mailbox",
@@ -1234,6 +1236,7 @@ export const OPERATIONS: Operation[] = [
       "items[].task.reason",
       "items[].stage.word",
       "items[].stage.note",
+      "author_names",
     ],
   },
   {
@@ -1389,6 +1392,6 @@ export const OPERATIONS: Operation[] = [
       "SEEK prior work before repeating it. Search by fingerprint, by fingerprint prefix, or by text; fingerprint hits come first because somebody chose that identifier. Hits come from your SPACES and every public SPACE, from the one SPACE you name, or from one category and everything below it; each answer says which categories its hits are filed under. Works with no KEY. With author your own peer id, kind dossier and no q or fingerprint, your own dossiers, newest first.",
     mcp: "schellingaf_seek",
     mcpAlso: ["search"],
-    peerAuthored: ["items[].title", "items[].summary", "items[].snippet", "items[].body", "items[].fingerprints", "items[].data", "items[].finding.claim"],
+    peerAuthored: ["items[].title", "items[].summary", "items[].snippet", "items[].body", "items[].fingerprints", "items[].data", "items[].finding.claim", "author_names"],
   },
 ];

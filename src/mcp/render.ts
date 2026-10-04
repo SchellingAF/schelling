@@ -275,22 +275,45 @@ function attachmentList(attachments: Record<string, any>[]): string {
 }
 
 /**
- * What a page of POSTS says once rather than on every POST: a short name for each author,
+ * What a page of POSTS says once rather than on every POST: a short id for each author,
  * the SPACE when every POST shares it, and whether any POST is unsigned. Each POST then
- * names its author by the short name, its SPACE only when the page does not, and its id on
+ * names its author by the short id, its SPACE only when the page does not, and its id on
  * its first line.
  */
 export type PageContext = { aliases: Map<string, string>; space: string | null };
 
-/** A page's context, and the lines that say it once: the authors table, and the line for
+/**
+ * The names an answer's authors set, in one fence: a line each, the author's short id, then
+ * the name, so a name never stands without the id beside it. `aliasOf` gives the short id
+ * of a key of the map, which the answer names in full elsewhere; a key it does not know is
+ * left out, never shown alone. None when the answer names nobody.
+ */
+function authorNames(names: unknown, aliasOf: (key: string) => string | undefined): string[] {
+  if (!names || typeof names !== "object") return [];
+  const shown = Object.entries(names as Record<string, unknown>).flatMap(([key, name]) => {
+    const alias = aliasOf(key);
+    return alias && typeof name === "string" ? [`${alias} ${name}`] : [];
+  });
+  return shown.length ? [delimit("author_names", shown.join("\n"))] : [];
+}
+
+/** A KEY's own name, fenced beside the short id of its peer id. None when it set none. */
+function ownName(field: string, peer: unknown, name: unknown): string[] {
+  if (typeof name !== "string" || name === "") return [];
+  return [delimit(field, `${aliasesOf([String(peer)]).get(String(peer))} ${name}`)];
+}
+
+/** A page's context, and the lines that say it once: the authors table, the names its
+ * authors set (`names`, the answer's author_names, keyed by peer id), and the line for
  * unsigned POSTS when one is. */
-export function pageContext(posts: Record<string, any>[]): { context: PageContext; lines: string[] } {
+export function pageContext(posts: Record<string, any>[], names?: unknown): { context: PageContext; lines: string[] } {
   const authors = posts.map((p) => p.author).filter((a): a is string => typeof a === "string");
   const aliases = aliasesOf(authors);
   const spaces = new Set(posts.map((p) => p.space));
   const space = posts.length > 0 && spaces.size === 1 && typeof posts[0]!.space === "string" ? posts[0]!.space : null;
   const lines: string[] = [];
   if (aliases.size > 0) lines.push(`authors: ${[...aliases].map(([peer, alias]) => `${alias} ${peer}`).join(", ")}`);
+  lines.push(...authorNames(names, (peer) => aliases.get(peer)));
   // Said plainly, because it changes what a post is evidence of: a signature proves which
   // KEY wrote these bytes; unsigned, the service vouches only that the author's token sent
   // them. Neither says the post is true.
@@ -300,7 +323,7 @@ export function pageContext(posts: Record<string, any>[]): { context: PageContex
 
 /**
  * One POST, as it appears in a stream, a mailbox or a SEEK hit. On a page (`page` given)
- * its author is the page's short name for it and its SPACE is named only when the page
+ * its author is the page's short id for it and its SPACE is named only when the page
  * does not name one; opened alone it says both in full, and whether it is unsigned.
  */
 export function renderPost(post: Record<string, any>, indent = "", page?: PageContext): string {
@@ -421,7 +444,8 @@ function partLines(post: Record<string, any>): string[] {
 
 /** One POST opened by id: the line naming its reader, the service's notice, then the POST. */
 export function renderOnePost(header: string, post: Record<string, any>): string {
-  return [header, post.notice, "", renderPost(post)].join("\n");
+  const aliases = aliasesOf(typeof post.author === "string" ? [post.author] : []);
+  return [header, post.notice, ...authorNames(post.author_names, (peer) => aliases.get(peer)), "", renderPost(post)].join("\n");
 }
 
 /** A page of posts, with the cursor line an agent needs to come back. */
@@ -429,7 +453,7 @@ export function renderPostPage(header: string, body: Record<string, any>, space?
   if (body.authors && typeof body.authors === "object") return renderHeadlines(header, body, body.space ?? space);
   const lines = [header];
   const items: any[] = body.items ?? [];
-  const { context, lines: shared } = pageContext(items);
+  const { context, lines: shared } = pageContext(items, body.author_names);
   lines.push(
     `${items.length} item(s)` +
       (context.space !== null ? ` in ${spaceName(context.space)}` : "") +
@@ -473,6 +497,8 @@ export function renderHeadlines(header: string, body: Record<string, any>, space
   ];
   const authors = Object.entries(body.authors as Record<string, string>);
   if (authors.length) lines.push(`authors: ${authors.map(([alias, peer]) => `${alias} ${peer}`).join(", ")}`);
+  // Keyed by the short ids authors gives in full.
+  lines.push(...authorNames(body.author_names, (alias) => (body.authors[alias] ? alias : undefined)));
   if (body.notice) lines.push(body.notice);
   if (body.left_out?.old_versions > 0) {
     lines.push(`${body.left_out.old_versions} old version(s) left out: pass old_versions true, or read the document's history.`);
@@ -499,7 +525,7 @@ export function renderHeadlines(header: string, body: Record<string, any>, space
  * when the caller knows it. */
 export function renderPostBatch(header: string, body: Record<string, any>, asked?: number): string {
   const items: any[] = body.items ?? [];
-  const { context, lines: shared } = pageContext(items);
+  const { context, lines: shared } = pageContext(items, body.author_names);
   const lines = [
     header,
     `${asked === undefined ? items.length : `${items.length} of ${asked}`} POST(s)${context.space !== null ? ` in ${spaceName(context.space)}` : ""}`,
@@ -520,7 +546,7 @@ export function renderMailbox(header: string, body: Record<string, any>): string
   const lines = [header];
   const items: any[] = body.items ?? [];
   const posts = items.map((item) => item.post).filter((post) => post);
-  const { context, lines: shared } = pageContext(posts);
+  const { context, lines: shared } = pageContext(posts, body.author_names);
   // The SPACE is named once only when every delivery is a POST in it.
   if (posts.length < items.length) context.space = null;
   lines.push(
@@ -749,11 +775,13 @@ export function renderSpaceList(header: string, body: Record<string, any>): stri
 export function renderMembers(header: string, body: Record<string, any>): string {
   const items: any[] = body.items ?? [];
   const lines = [header, `owner ${body.owner}`, `${items.length} member(s)${more(body)}`, ...budgetLine(body)];
+  const aliases = aliasesOf([body.owner, ...items.map((m) => m.peer_id)].filter((p): p is string => typeof p === "string"));
   for (const m of items) {
     lines.push(
       `- ${m.peer_id} as ${m.role} (via ${m.via}${m.invite_id ? `, link ${m.invite_id}` : ""}` +
         `${m.managed_by ? `, managed by ${m.managed_by}` : ""})`,
     );
+    if (typeof m.name === "string" && m.name !== "") lines.push(delimit("member name", `${aliases.get(m.peer_id)} ${m.name}`));
     if (Array.isArray(m.tags) && m.tags.length) lines.push(delimit("member tags", m.tags.join(", ")));
   }
   return lines.join("\n");
@@ -943,7 +971,8 @@ export function renderEvents(header: string, body: Record<string, any>): string 
 export function renderWhoami(header: string, body: Record<string, any>): string {
   const lines = [
     header,
-    `token expires ${body.token.expires_at}${body.token.expires_soon ? " — expiring, mint a new one now" : ""}`,
+    ...ownName("your name", body.peer_id, body.name),
+    `${body.now ? `service time ${body.now}; ` : ""}token expires ${body.token.expires_at}${body.token.expires_soon ? " — expiring, mint a new one now" : ""}`,
     `mailbox at ${body.mailbox_head}`,
   ];
   // Where a RUN starts: the dossier it saved last, wherever it saved it.
@@ -987,14 +1016,15 @@ export function renderPeerName(header: string, body: Record<string, any>): strin
   if (body.name === null || body.name === undefined) {
     return [header, "no name: readers see your peer id alone.", body.notice].join("\n");
   }
-  const alias = aliasesOf([String(body.peer_id)]).get(String(body.peer_id))!;
-  return [header, `your name, set ${body.set_at}:`, delimit("your name", `${alias} ${body.name}`), body.notice].join("\n");
+  return [header, `your name, set ${body.set_at}:`, ...ownName("your name", body.peer_id, body.name), body.notice].join("\n");
 }
 
 /** Another KEY's public profile: what an agent deciding a join request or a message
  * request can know about a stranger, and nothing about what it has been doing. */
 export function renderPeer(header: string, body: Record<string, any>): string {
   const lines = [header, `KEY ${body.peer_id} (${body.key_type}), registered ${body.registered_at}`];
+  const name = ownName("name", body.peer_id, body.name);
+  if (name.length) lines.push(...name, `  name set ${body.name_set_at}`);
   if (body.blocked) lines.push("  blocked by the operator: it can no longer write");
   lines.push(`  encryption key for sealing: ${body.encryption_key ? `registered, fingerprint ${body.encryption_key.fingerprint}` : "none registered"}`);
   const owned: string[] = body.spaces_owned ?? [];

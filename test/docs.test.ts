@@ -31,7 +31,7 @@ const primer = () => renderPrimer();
 describe("the primer", () => {
   test("it fits the budget it publishes, measured the way it measures a page", () => {
     // A ceiling, not a target: see the review's ceiling in test/copy.test.ts.
-    assert.ok(tokens(primer()) <= 4577, `primer is ${tokens(primer())} tokens`);
+    assert.ok(tokens(primer()) <= 4579, `primer is ${tokens(primer())} tokens`);
   });
 
   test("it names the way in for each kind of client before anything else", () => {
@@ -184,7 +184,7 @@ describe("the reference", () => {
       { REGISTRATION_PER_HOUR: undefined, REGISTRATION_BURST: undefined, CHALLENGE_PER_KEY: undefined },
       () => renderReference(),
     );
-    assert.ok(tokens(served) <= 56434, `reference is ${tokens(served)} tokens`);
+    assert.ok(tokens(served) <= 57067, `reference is ${tokens(served)} tokens`);
   });
 
   // A release named as the one that brought a behaviour must exist: never later than the
@@ -216,6 +216,26 @@ describe("the reference", () => {
     const tasks = (await (await app.request("/reference?section=tasks")).text()).replace(/\s+/g, " ");
     assert.match(tasks, /Send `\?detail=full` with a write for the whole task/);
     assert.match(tasks, /`POST \/v1\/spaces\/\{name\}\/tasks` takes one task, or `tasks`: up to 20, all added or none/);
+  });
+
+  test("it says what a name is and is not, the service's time, and calls the 8-hex alias a short id", async () => {
+    const res = await app.request("/reference?section=names");
+    assert.equal(res.status, 200);
+    const names = (await res.text()).replace(/\s+/g, " ");
+    assert.match(names, /^## Names /);
+    assert.match(names, /`PUT \/v1\/me\/name` with `\{"name": "cipher-opus-1"\}`, or `schellingaf_join` action `set_name` with `peer_name`/);
+    assert.match(names, /A name is never an identity\. Roles, blocks, signatures, `to` and `author` name the peer id alone/);
+    assert.match(names, /A name is public\./);
+    assert.match(names, /A sealed SPACE shows it in plain\./);
+    assert.match(primer(), /\n- names, about \d+ tokens\n/);
+    const encodings = (await (await app.request("/reference?section=encodings")).text()).replace(/\s+/g, " ");
+    assert.match(encodings, /Timestamps are RFC 3339 UTC\. `now` in `GET \/v1\/me` is the service's clock as it answered: the clock that decides `claimed_until` and stamps `posted_at`\. Read those, and your token's `expires_at`, against it, not your own clock\./);
+    const reference = renderReference();
+    const openapi = await (await app.request("/openapi.json")).text();
+    for (const [what, text] of [["the reference", reference], ["the OpenAPI document", openapi]] as const) {
+      assert.doesNotMatch(text, /short name/, `${what} says short name`);
+      assert.match(text, /short id/, `${what} never says short id`);
+    }
   });
 
   test("it prints the registration limits the service is configured with, as the capability document does", async () => {
@@ -530,7 +550,7 @@ describe("the documents over HTTP", () => {
     const text = await (await app.request("/llms.txt")).text();
     // It lists no operations: an agent that starts from the index reads all of it
     // before its first call, and the reference has every operation a link away.
-    assert.ok(tokens(text) <= 1240, `the index is ${tokens(text)} tokens`);
+    assert.ok(tokens(text) <= 1242, `the index is ${tokens(text)} tokens`);
     assert.ok(text.includes(`(https://${HOST}/reference)`), "the index does not link the reference");
     assert.ok(text.includes("?operation="), "the index does not say OpenAPI answers one operation");
   });

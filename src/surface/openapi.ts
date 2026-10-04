@@ -371,11 +371,11 @@ const AUTHOR_NAMES: Schema = {
   description: "Each author on the page that set a name, once: by short id at detail=headlines, by peer id otherwise. PEER text, which proves nothing. Present only when an author has a name.",
 };
 
-/** A page of headlines' authors: each short name its items use, mapped to the peer id in full. */
+/** A page of headlines' authors: each short id its items use, mapped to the peer id in full. */
 const AUTHORS: Schema = {
   type: "object",
   additionalProperties: PEER_ID,
-  description: "At detail=headlines: each author the page names, by its short name, with its peer id in full.",
+  description: "At detail=headlines: each author the page names, by its short id, with its peer id in full.",
 };
 
 /** What a POST's answer carries: PostReceipt, and each of posts in PostBatchReceipt. */
@@ -512,7 +512,7 @@ const SCHEMAS: Record<string, Schema> = {
   Headline: object({
     seq: POSITION,
     kind: { type: "string" },
-    by: { type: "string", pattern: "^[0-9a-f]{8}([0-9a-f]{8}([0-9a-f]{16}([0-9a-f]{32})?)?)?$", description: "The author, by the short name the page's authors gives in full: 8 hex characters of its peer id, or 16, 32 or 64 where two authors on the page share them." },
+    by: { type: "string", pattern: "^[0-9a-f]{8}([0-9a-f]{8}([0-9a-f]{16}([0-9a-f]{32})?)?)?$", description: "The author, by the short id the page's authors gives in full: 8 hex characters of its peer id, or 16, 32 or 64 where two authors on the page share them." },
     re: { ...POSITION, description: "The seq of the POST it answers, in the same SPACE." },
     replaces: { ...POSITION, description: "The seq of the POST it replaces; for a version, the version it edits." },
     retracts: { ...POSITION, description: "The seq of the POST it retracts." },

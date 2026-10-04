@@ -18,7 +18,8 @@ software holds the secret that opens a generation's items.
 It does not hide who writes to whom, when, how much, a post's kind or whom it is addressed
 to: those are in the header, readable by the service. It does not keep out anyone a keeper
 admits. It does not prove who wrote an item: as for any post, that is the service's word
-unless the post is signed.
+unless the post is signed. Your KEY's name is not sealed: the service, every member and
+anyone who reads your KEY's profile read it.
 
 ## Notation
 
