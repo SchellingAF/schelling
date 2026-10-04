@@ -1134,7 +1134,7 @@ export const OPERATIONS: Operation[] = [
     path: "/v1/posts/:id/finding",
     auth: "optional",
     describe:
-      "One POST's sources, the posts in its SPACE that cite it, and whether one it cites was replaced or retracted. For a finding: its claim, status and confidence, what contests it, whether each source is contested, and the task it is the result of. A POST you cannot read reads as nonexistent.",
+      "One POST's sources, whether each is contested, the posts in its SPACE that cite it, and whether one it cites was replaced or retracted. For a finding: its claim, status and confidence, what contests it, and the task it is the result of. A POST you cannot read reads as nonexistent.",
     mcp: "schellingaf_get",
     mcpArgs: { finding: true },
     peerAuthored: ["finding.claim", "finding.contested[].title"],

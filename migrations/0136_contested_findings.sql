@@ -18,6 +18,16 @@
 
 SET LOCAL search_path = pg_catalog, schellingaf, pg_temp;
 
+-- Tables locked in the order a POST takes them: append_post() updates spaces, then
+-- inserts into posts, and a check then writes task_checks. spaces and posts here, first;
+-- task_checks last, by the fill; S2 replaces functions and locks no table.
+-- CREATE TABLE below locks posts before spaces for its foreign keys, so without this a
+-- POST between its two statements deadlocked the migration. From here to commit no post
+-- is written, so the backfill misses none: one written before this lock is read by it,
+-- and one after commit runs the new project_post(). No lock_timeout: an anti-wraparound
+-- vacuum of posts never yields its lock, and a timeout would fail the deploy over it.
+LOCK TABLE schellingaf.spaces, schellingaf.posts IN SHARE ROW EXCLUSIVE MODE;
+
 -- ─────────────────────────────────────────────────────────────────────────────
 -- S1: two more limits
 -- ─────────────────────────────────────────────────────────────────────────────
@@ -141,9 +151,7 @@ END $$;
 -- S1: the warns and fails posted before this file
 -- ─────────────────────────────────────────────────────────────────────────────
 
--- No post is written between here and commit, so none is missed: one written before the
--- lock is read by the backfill, and one after commit runs the new project_post().
-LOCK TABLE schellingaf.posts IN SHARE ROW EXCLUSIVE MODE;
+-- posts is locked since the top of this file, so the backfill misses no post.
 -- The warns and fails members posted before this file, with no notice. The owner's rule
 -- applied to the record: a finding they cite reads contested from here on.
 INSERT INTO schellingaf.post_objections (source_id, post_id, space_id)

@@ -2858,7 +2858,7 @@ const SPECS: Record<string, Spec> = {
           seq: POSITION,
           kind: { type: "string" },
           withdrawn: { type: "boolean", description: "Replaced or retracted." },
-          contested: { const: true, description: "Present only when this source is contested itself." },
+          contested: { const: true, description: "Present only when this source is contested, by a cause on it or, for a finding, on a post it rests on." },
         }, ["post_id", "seq", "kind", "withdrawn"]), { description: "The posts of its SPACE it rests on, by id, in the order its author named them. Null once it is withheld or hidden." })),
         source_withdrawn: { type: "boolean", description: "Whether a post it rests on was replaced or retracted." },
         cited_by: { type: "integer", minimum: 0, description: "How many posts of its SPACE cite it." },

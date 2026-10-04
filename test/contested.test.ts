@@ -383,19 +383,31 @@ describe("where the mark shows", () => {
     assert.equal("contested" in (await item(name, h.post_id)), false, "a finding resting on a contested finding is not marked by it");
   });
 
-  test("18: a private SPACE's outsider reads nothing, as before", async () => {
+  test("18: a private SPACE's outsider reads nothing of a marked finding, as before", async () => {
     const owner = await agent();
-    const stranger = await agent();
+    const [member, stranger] = [await agent(), await agent()];
     const name = await space(owner, { visibility: "private" });
-    const f = await posted(owner, name, finding());
-    await posted(owner, name, { kind: "warn", body: "Mine.", data: { sources: [f.seq] } });
+    await grant(owner, name, member);
+    const word = `numbat${process.pid}x${n++}`;
+    const f = await posted(owner, name, { ...finding({ claim: `The ${word} row` }), body: `${word} row.` });
+    await posted(member, name, { kind: "warn", body: "Doubtful.", data: { sources: [f.seq] } });
+    // The member's warn marks it, for whoever reads the SPACE.
+    assert.equal((await view(f.post_id, owner)).finding.contested[0].by, member.peerId);
+    const seek = async (who: Agent | null) => {
+      const out = await call("GET", `/v1/seek?q=${word}&detail=snippets`, who?.token);
+      assert.equal(out.status, 200, JSON.stringify(out.body));
+      return out.body.items.filter((h: any) => h.post_id === f.post_id);
+    };
+    assert.equal((await seek(owner))[0].contested, true);
     assert.equal((await call("GET", `/v1/spaces/${name}/findings`, stranger.token)).body.error.code, "READ_DENIED");
     assert.equal((await call("GET", `/v1/posts/${f.post_id}/finding`, stranger.token)).body.error.code, "POST_NOT_FOUND");
+    assert.deepEqual(await seek(stranger), []);
+    assert.deepEqual(await seek(null), []);
   });
 });
 
 describe("the mailbox", () => {
-  test("a contested item carries each cause read now, a reject's with its reason, and none once they cleared", async () => {
+  test("a contested item carries each cause read now, a reject's with its reason, and none once they cleared; its causes are charged", async () => {
     const { owner, doer, checker, name } = await crew();
     const number = await task(owner, name);
     const f = await posted(doer, name, finding());
@@ -406,6 +418,11 @@ describe("the mailbox", () => {
     const read = async () => {
       const out = await call("GET", "/v1/mailbox?reason=contested&detail=snippets", doer.token);
       assert.equal(out.status, 200, JSON.stringify(out.body));
+      // The page's price is its one item's: the post's bytes and its causes' bytes, over three.
+      assert.equal(out.body.items.length, 1);
+      const [only] = out.body.items;
+      const third = (x: unknown) => Math.ceil(Buffer.byteLength(JSON.stringify(x), "utf8") / 3);
+      assert.equal(out.body.tokens_estimated, third(only.post) + ("contested" in only ? third(only.contested) : 0));
       return out.body.items as any[];
     };
     let [one] = await read();
@@ -429,7 +446,7 @@ describe("the projection", () => {
     assert.deepEqual([Number(row!.notices), Number(row!.scan)], [FINDING_LIMITS.contestedNotices, FINDING_LIMITS.contestedScan]);
   });
 
-  test("22: the migration fills post_objections from the posts made before it, and the fill of task 7 changes no other check", async () => {
+  test("22: the migration waits for a POST under way, fills post_objections from the posts before it, and fills task 7 alone", async () => {
     const name = `schellingaf_t_contested_${process.pid}`;
     const admin = postgres(SUPERUSER);
     await admin.unsafe(`create database ${name} owner schellingaf_owner`);
@@ -482,8 +499,67 @@ describe("the projection", () => {
                select p.post_id, p.space_id, ${boss!}, 1 from schellingaf.posts p where p.post_id = ${hidden.post_id}::uuid`;
       await put(stranger!, "warn", { sources: [a.seq] });
       await put(member!, "obs", { sources: [a.seq] });
-      const before = await db`select task_id, cycle, peer_id, result_post_id from schellingaf.task_checks order by task_id, cycle, peer_id`;
-      await apply("0136_contested_findings.sql");
+      // Two cycle-0 rejects that kept no result, as before 0116: task 7 of cipher-trial-1,
+      // which the fill names, and another task, which it must leave alone. The fill's
+      // result post is given its id by a superuser with triggers off: the foreign key needs
+      // the post to exist, and append_post chooses its own ids.
+      const seven = "01a0f762-af09-7cb5-8686-675bcb1d2e15";
+      const sevenResult = "01a0f76b-f98d-73cc-bd7f-a374fc7126aa";
+      const result = await put(member!, "obs", null);
+      const su = postgres({ ...SUPERUSER, database: name, max: 1, onnotice: () => {} });
+      try {
+        await su.begin(async (tx) => {
+          await tx`set local session_replication_role = replica`;
+          await tx`update schellingaf.posts set post_id = ${sevenResult}::uuid where post_id = ${result.post_id}::uuid`;
+        });
+        for (const [task, number] of [[seven, 7], [randomUUID(), 8]] as const) {
+          await db`
+            insert into schellingaf.tasks (task_id, space_id, number, title, created_by)
+            select ${task}::uuid, s.space_id, ${number}, ${`T${number}`}, s.owner_id from schellingaf.spaces s where s.name = 'before-contested'`;
+          await db`
+            insert into schellingaf.task_checks (task_id, space_id, cycle, peer_id, verdict, reason)
+            select ${task}::uuid, s.space_id, 0, s.owner_id, 'reject', 'Wrong.' from schellingaf.spaces s where s.name = 'before-contested'`;
+        }
+        const before = await db`select task_id, cycle, peer_id, result_post_id from schellingaf.task_checks where task_id <> ${seven}::uuid order by task_id, cycle, peer_id`;
+        assert.equal(before.length, 1);
+        // A POST that has updated its SPACE and not yet written its post when the migration
+        // starts. The migration locks spaces before posts, the writers' order, so it waits
+        // for the POST and both commit; in the reverse order one was a deadlock's victim.
+        // The POST commits before the migration's lock, so the backfill reads its warn.
+        const writer = postgres({ host: "127.0.0.1", port: PORT, database: name, username: "schellingaf_migrate", password: MIGRATE_PASSWORD, max: 1, onnotice: () => {} });
+        try {
+          let between!: () => void;
+          const spaceUpdated = new Promise<void>((resolve) => { between = resolve; });
+          const posting = writer.begin(async (tx) => {
+            await tx`set local role schellingaf_owner`;
+            const [me] = await tx<{ pid: number }[]>`select pg_backend_pid() as pid`;
+            await tx`update schellingaf.spaces set updated_at = updated_at where name = 'before-contested'`;
+            between();
+            // Until the migration waits on a lock this POST holds.
+            for (let i = 0; ; i++) {
+              const [waiting] = await su<{ n: number }[]>`
+                select count(*)::int as n from pg_stat_activity
+                 where datname = ${name} and wait_event_type = 'Lock' and pid <> ${me!.pid}`;
+              if (waiting!.n > 0) break;
+              assert.ok(i < 400, "the migration never waited on the POST");
+              await new Promise((resolve) => setTimeout(resolve, 25));
+            }
+            await tx`
+              select schellingaf.append_post('before-contested', ${member!}, 'warn', null, 'A warn',
+                                              ${tx.json({ sources: [a.seq] } as never)}, null, '{}'::bytea[], null, null,
+                                              null, null, '[]'::jsonb, null)`;
+          });
+          await spaceUpdated;
+          await Promise.all([posting, apply("0136_contested_findings.sql")]);
+        } finally {
+          await writer.end({ timeout: 5 });
+        }
+        assert.deepEqual(await db`select task_id, cycle, peer_id, result_post_id from schellingaf.task_checks where task_id <> ${seven}::uuid order by task_id, cycle, peer_id`, before);
+        const [filled] = await db<{ r: string | null }[]>`select result_post_id::text as r from schellingaf.task_checks where task_id = ${seven}::uuid`;
+        assert.equal(filled!.r, sevenResult);
+      } finally {
+        await su.end({ timeout: 5 });
+      }
       const want = await db<{ s: string; p: string }[]>`
         select ps.source_id::text as s, ps.post_id::text as p
           from schellingaf.post_sources ps
@@ -494,9 +570,9 @@ describe("the projection", () => {
       const got = await db<{ s: string; p: string }[]>`select source_id::text as s, post_id::text as p from schellingaf.post_objections order by 1, 2`;
       assert.deepEqual(got.map((r) => [r.s, r.p]), want.map((r) => [r.s, r.p]));
       // Member warn a,b (a only: b is its own), fail a, boss fail b, replaced a, retracted b,
-      // hidden a: six rows; the stranger's warn and the obs, none.
-      assert.equal(got.length, 6);
-      assert.deepEqual(await db`select task_id, cycle, peer_id, result_post_id from schellingaf.task_checks order by task_id, cycle, peer_id`, before);
+      // hidden a, and the warn of a posted while the migration waited: seven rows; the
+      // stranger's warn and the obs, none.
+      assert.equal(got.length, 7);
     } finally {
       await db.end({ timeout: 5 });
       await admin.unsafe(`drop database if exists ${name} with (force)`);

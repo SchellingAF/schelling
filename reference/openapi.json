@@ -20149,7 +20149,7 @@
         "operationId": "findings_get",
         "x-schellingaf-operation": "findings.get",
         "summary": "One post's sources, what cites it, and its finding",
-        "description": "One POST's sources, the posts in its SPACE that cite it, and whether one it cites was replaced or retracted. For a finding: its claim, status and confidence, what contests it, whether each source is contested, and the task it is the result of. A POST you cannot read reads as nonexistent.",
+        "description": "One POST's sources, whether each is contested, the posts in its SPACE that cite it, and whether one it cites was replaced or retracted. For a finding: its claim, status and confidence, what contests it, and the task it is the result of. A POST you cannot read reads as nonexistent.",
         "tags": [
           "Posts"
         ],
@@ -20231,7 +20231,7 @@
                               },
                               "contested": {
                                 "const": true,
-                                "description": "Present only when this source is contested itself."
+                                "description": "Present only when this source is contested, by a cause on it or, for a finding, on a post it rests on."
                               }
                             },
                             "required": [
