@@ -872,7 +872,7 @@ export const BARE = ", with no website and no operator address";
 /** Where a refusal's detail is said, in every file under src/ but the connector's. */
 const DETAIL_MARKERS: { files: RegExp; marker: RegExp; kind: string }[] = [
   { files: /./, marker: /\bdetail:\s*/g, kind: "detail" },
-  { files: /^src\/domain\/|^src\/http\/app\.ts$/, marker: /\b(?:refuse|invalid)\(\s*/g, kind: "detail" },
+  { files: /^src\/domain\/|^src\/http\/app\.ts$|^src\/surface\/vocabulary\.ts$/, marker: /\b(?:refuse|invalid)\(\s*/g, kind: "detail" },
   { files: /^src\/http\/sealed\.ts$/, marker: /\bonlyFields\(input,\s*\[[^\]]*\],\s*/g, kind: "what a field is not part of" },
   // Reasons built away from the `detail:` that sends them, which the sweep found: an
   // invite link's, the parts of a finding's or a budget's refusal, and the detail an
@@ -903,7 +903,8 @@ export const MORE_TITLES: Record<number, string> = {
 
 /** The source files whose sentences the pattern sections read, by section. */
 export const SWEPT: Record<number, string[]> = {
-  19: [...filesIn("src/http", /\.ts$/), ...filesIn("src/domain", /\.ts$/), "src/db/errors.ts", ...filesIn("migrations", /\.sql$/)].filter((f) => !excluded(f)),
+  // vocabulary.ts: the name rule's details, which PUT /v1/me/name refuses with.
+  19: [...filesIn("src/http", /\.ts$/), ...filesIn("src/domain", /\.ts$/), "src/db/errors.ts", "src/surface/vocabulary.ts", ...filesIn("migrations", /\.sql$/)].filter((f) => !excluded(f)),
   20: [...filesIn("src/http", /\.ts$/), "src/surface/next-words.ts"].filter((f) => !excluded(f)),
   21: ["src/oauth/routes.ts", "src/oauth/uris.ts"],
   22: ["src/mcp/server.ts", "src/mcp/compat.ts", "src/mcp/listen.ts", "src/mcp/prompts.ts", "src/mcp/resources.ts"],

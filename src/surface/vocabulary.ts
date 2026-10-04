@@ -60,6 +60,74 @@ export const RESERVED_TAGS = new Set([
 ]);
 
 /**
+ * The name a KEY sets for itself, shown beside its peer id (PUT /v1/me/name). 1 to 32
+ * characters, lowercase letters and digits with one of . _ - between them, and never 8 of
+ * 0-9 and a-f in a row, with or without a separator between them, so no name equals the
+ * 8-hex short id `aliasesOf()` gives a peer id, or a peer id. The CHECK of
+ * migrations/0136_peer_names.sql holds this source byte for byte, so it has no backslash;
+ * test/peer-names.test.ts holds the two equal. The route folds ASCII uppercase first.
+ */
+export const PEER_NAME = /^(?=.{1,32}$)(?!.*(?:[0-9a-f][._-]?){8})[a-z0-9]+(?:[._-][a-z0-9]+)*$/;
+/** A name as PUT /v1/me/name takes it: uppercase letters too, which the route stores in
+ *  lowercase. The OpenAPI document gives it as the request's pattern. */
+export const PEER_NAME_SENT = new RegExp(PEER_NAME.source.replaceAll("a-z", "a-zA-Z").replace("0-9a-f", "0-9a-fA-F"));
+/** The longest name, in characters: the pattern's own bound. */
+export const PEER_NAME_MAX = 32;
+
+/**
+ * Words a name may not read as, so a name never reads as a role, a status or the service's
+ * word. `edge`: the words the service writes as a role, the operator or a verdict. `part`:
+ * short words, roles below admin and the states the service gives a POST or a KEY.
+ * `anywhere`: the service's name. Held in peerNameRefusal() alone, as tags' are: a CHECK
+ * would need a second copy.
+ */
+export const RESERVED_NAME_WORDS = {
+  edge: ["owner", "admin", "operator", "coordinator", "moderator", "official", "verified"],
+  part: ["writer", "reader", "root", "mod", "me", "you", "null", "none", "unknown", "anonymous", "notice",
+    "warning", "system", "service", "signed", "unsigned", "sealed", "blocked", "withheld", "hidden",
+    "retracted", "trusted", "approved", "endorsed", "authorized", "authorised"],
+  anywhere: ["schelling"],
+} as const;
+export const RESERVED_NAME_RULE =
+  "Each part between . _ - is read, and the name without them. A digit reads as the letter it looks like: 0 o, 1 i or l, 3 e, 4 a, 5 s, 7 t. edge: refused when a part is the word, begins with it or ends with it. part: refused when a part is the word, alone or followed by digits. anywhere: refused anywhere in the name.";
+
+/** The digits read as the letter each looks like, for RESERVED_NAME_RULE. */
+const LOOK_ALIKES: Record<string, string> = { o: "0", i: "1", l: "1", e: "3", a: "4", s: "5", t: "7" };
+/** A word as a regular expression's body: each letter with the digit that looks like it. */
+const lookAlike = (word: string): string =>
+  [...word].map((ch) => (LOOK_ALIKES[ch] ? `[${ch}${LOOK_ALIKES[ch]}]` : ch)).join("");
+const RESERVED_NAME_TESTS: { word: string; kind: "edge" | "part" | "anywhere"; re: RegExp }[] = [
+  ...RESERVED_NAME_WORDS.anywhere.map((word) => ({ word, kind: "anywhere" as const, re: new RegExp(lookAlike(word)) })),
+  ...RESERVED_NAME_WORDS.edge.map((word) => ({ word, kind: "edge" as const, re: new RegExp(`^${lookAlike(word)}|${lookAlike(word)}$`) })),
+  ...RESERVED_NAME_WORDS.part.map((word) => ({ word, kind: "part" as const, re: new RegExp(`^${lookAlike(word)}[0-9]*$`) })),
+];
+
+/** Why a name may not be taken, the first rule it breaks; null when it may. */
+export function peerNameRefusal(name: string): { code: "PEER_NAME_INVALID" | "PEER_NAME_RESERVED"; detail: string } | null {
+  const invalid = (detail: string) => ({ code: "PEER_NAME_INVALID" as const, detail });
+  if (name.length < 1 || name.length > PEER_NAME_MAX) return invalid("name is 1 to 32 characters");
+  if (!/^[a-z0-9._-]+$/.test(name)) return invalid("name holds only a-z, 0-9 and . _ -");
+  if (!/^[a-z0-9]+(?:[._-][a-z0-9]+)*$/.test(name)) {
+    return invalid("name starts and ends with a letter or digit, and never has two of . _ - in a row");
+  }
+  if (/(?:[0-9a-f][._-]?){8}/.test(name)) {
+    return invalid("name holds 8 of 0-9 and a-f in a row, with or without . _ - between them, which reads as a peer id");
+  }
+  if (!PEER_NAME.test(name)) return invalid("name does not match limits.peer_name.pattern in GET /v1/capabilities");
+  const parts = name.split(/[._-]/);
+  const forms = parts.length > 1 ? [...parts, parts.join("")] : parts;
+  for (const { word, kind, re } of RESERVED_NAME_TESTS) {
+    if (kind === "anywhere" ? re.test(parts.join("")) : forms.some((form) => re.test(form))) {
+      return {
+        code: "PEER_NAME_RESERVED",
+        detail: kind === "anywhere" ? `name holds ${word}, the name of the service` : `name reads as ${word}, a word kept for roles, statuses and the service`,
+      };
+    }
+  }
+  return null;
+}
+
+/**
  * The roles a membership holds, highest first; the owner is on the SPACE, never a
  * membership. A coordinator, between writer and admin, brings KEYS in: writers and
  * readers, by a link, by id or by deciding a join request, and it manages the KEYS

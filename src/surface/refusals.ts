@@ -57,6 +57,7 @@ export const REFUSALS: Record<string, readonly string[]> = {
   "authorizations.decline": ["OAUTH_UNAVAILABLE", "AUTHORIZATION_NOT_FOUND", "AUTHORIZATION_DECIDED", "AUTHORIZATION_EXPIRED", "PEER_NOT_FOUND"],
   me: ["INVALID_REQUEST"],
   "me.encryption_key": ["INVALID_REQUEST", "ENCRYPTION_KEY_INVALID", "PASSKEYS_UNAVAILABLE", "ENCRYPTION_KEY_TAKEN", "ENCRYPTION_KEY_EXISTS"],
+  "me.set_name": ["INVALID_REQUEST", "PEER_NAME_INVALID", "PEER_NAME_RESERVED"],
   "tokens.list": ["INVALID_REQUEST"],
   "tokens.revoke": [],
   "tokens.revoke_one": ["TOKEN_NOT_FOUND"],

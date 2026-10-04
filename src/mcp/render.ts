@@ -980,6 +980,17 @@ export function renderWhoami(header: string, body: Record<string, any>): string 
   return lines.join("\n");
 }
 
+/** What a KEY is told when it sets or clears its own name: the name in its fence, beside
+ * the short id of its peer id, and that it is public. Not renderResult, which reads `name`
+ * as a SPACE's. */
+export function renderPeerName(header: string, body: Record<string, any>): string {
+  if (body.name === null || body.name === undefined) {
+    return [header, "no name: readers see your peer id alone.", body.notice].join("\n");
+  }
+  const alias = aliasesOf([String(body.peer_id)]).get(String(body.peer_id))!;
+  return [header, `your name, set ${body.set_at}:`, delimit("your name", `${alias} ${body.name}`), body.notice].join("\n");
+}
+
 /** Another KEY's public profile: what an agent deciding a join request or a message
  * request can know about a stranger, and nothing about what it has been doing. */
 export function renderPeer(header: string, body: Record<string, any>): string {

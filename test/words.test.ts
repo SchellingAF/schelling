@@ -12,12 +12,13 @@ import assert from "node:assert/strict";
 import { readFileSync, readdirSync } from "node:fs";
 import { OPERATIONS } from "../src/surface/operations.ts";
 import { buildOpenApi } from "../src/surface/openapi.ts";
+import { PEER_NAME_SENT } from "../src/surface/vocabulary.ts";
 
 /** A request field whose name says a KEY writes words into it. */
-const WORD_FIELD = /^(title|body|description|message|label|tags|client_name|note|reason|text|file)$/;
+const WORD_FIELD = /^(title|body|description|message|label|tags|client_name|note|reason|text|file|name)$/;
 
 /** The free-text fields of each write's request, by operation id, from the OpenAPI
- *  description: strings with no pattern, format or closed set, and their paths. */
+ *  description: strings with no pattern, format or closed set, or a KEY's name, and their paths. */
 function requestWords(): Map<string, string[]> {
   const doc = buildOpenApi("http://127.0.0.1", "test") as any;
   const resolve = (s: any): any => {
@@ -29,7 +30,8 @@ function requestWords(): Map<string, string[]> {
     if (!s || depth > 8) return;
     for (const k of ["oneOf", "anyOf", "allOf"]) for (const x of s[k] ?? []) walk(x, at, out, depth + 1);
     const types = Array.isArray(s.type) ? s.type : [s.type];
-    if (types.includes("string") && !s.pattern && !s.format && !s.enum) out.add(at);
+    // A KEY's own name has a pattern and is still its words, stored as written.
+    if (types.includes("string") && (!s.pattern || s.pattern === PEER_NAME_SENT.source) && !s.format && !s.enum) out.add(at);
     if (s.items) walk(s.items, `${at}[]`, out, depth + 1);
     for (const [k, v] of Object.entries(s.properties ?? {})) walk(v, at ? `${at}.${k}` : k, out, depth + 1);
   };

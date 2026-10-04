@@ -135,6 +135,11 @@ import {
   RESERVED_DATA_KEYS,
   RESERVED_SPACE_NAMES,
   RESERVED_TAGS,
+  PEER_NAME,
+  PEER_NAME_MAX,
+  RESERVED_NAME_WORDS,
+  RESERVED_NAME_RULE,
+  peerNameRefusal,
   ROLES,
   SPACE_EVENTS,
   SPACE_NAME,
@@ -202,6 +207,11 @@ import {
   wellFormedToken,
   type BearerState,
 } from "./auth.ts";
+
+/** What PUT /v1/me/name says beside a name it set, and beside one it cleared. */
+const PEER_NAME_NOTICE =
+  "public: shown beside your peer id on your profile, in member lists and on pages holding your posts, to anyone who can read them. Copies taken while it is set can outlive a change.";
+const PEER_NAME_CLEARED_NOTICE = "cleared: reads show your peer id alone. Copies taken while it was set can outlive it.";
 
 /** The only fields PUT /v1/me/encryption-key takes. */
 const ENCRYPTION_KEY_FIELDS = ["statement", "alg", "signature", "credential_id", "client_data_json", "authenticator_data"];
@@ -1239,6 +1249,14 @@ export function createApp(config: Config, db: Db): Hono<Env> {
       posts_per_call: POST_LIMITS.batch,
       batch_idempotency_key_bytes: POST_LIMITS.idempotencyKeyBytes,
       tags_per_member: 8,
+      // The name a KEY sets for itself, beside its peer id: the pattern the database's
+      // CHECK holds, and the words peerNameRefusal() reads as RESERVED_NAME_RULE says.
+      peer_name: {
+        pattern: PEER_NAME.source,
+        max_characters: PEER_NAME_MAX,
+        reserved: RESERVED_NAME_WORDS,
+        reserved_rule: RESERVED_NAME_RULE,
+      },
       // The members one create sets at once, each as PUT .../members/{peer} sets one.
       create_members: CREATE_MEMBERS,
       page_limit_max: 200,
@@ -1970,6 +1988,41 @@ export function createApp(config: Config, db: Db): Hono<Env> {
     });
   });
 
+  // ── a KEY's own name, beside its peer id ────────────────────────────────────
+  //
+  // One per KEY, set or cleared by the KEY alone; no history (migrations/0136_peer_names.sql).
+  // Checked before anything is spent, so a refused name spends nothing.
+
+  app.put("/v1/me/name", async (c) => {
+    const bearer = requireBearer(c.get("bearer"));
+    const peerHex = toHex(bearer.peerId);
+    const body = await readJson(c);
+    for (const key of Object.keys(body)) {
+      if (key !== "name") throw new ApiError("INVALID_REQUEST", { detail: `${key} is not a field of a name` });
+    }
+    if (typeof body.name !== "string") {
+      throw new ApiError("INVALID_REQUEST", { detail: "name is a string: your name, or an empty string to clear it" });
+    }
+    // Uppercase ASCII is stored in lowercase, rather than refused.
+    const name = body.name.replace(/[A-Z]/g, (ch) => ch.toLowerCase());
+    if (name !== "") {
+      const refused = peerNameRefusal(name);
+      if (refused) throw new ApiError(refused.code, { detail: refused.detail });
+    }
+    await spend(c, db, LIMITS.peerWrites(peerHex));
+    const [row] = await db.write<{ result: { name: string | null; set_at: string | null; changed: boolean } }[]>`
+      select schellingaf.set_peer_name(${bearer.peerId}, ${name}) as result`;
+    const result = row!.result;
+    return c.json({
+      peer_id: peerHex,
+      name: result.name,
+      // jsonb carries microseconds and +00:00; every other time here is toISOString's.
+      set_at: result.set_at === null ? null : new Date(result.set_at).toISOString(),
+      changed: result.changed,
+      notice: result.name === null ? PEER_NAME_CLEARED_NOTICE : PEER_NAME_NOTICE,
+    });
+  });
+
   // ── the token's own view of itself ─────────────────────────────────────────
 
   app.get("/v1/me", async (c) => {
@@ -1990,6 +2043,8 @@ export function createApp(config: Config, db: Db): Hono<Env> {
           public_key: Buffer | null;
           key_type: string;
           registered_at: Date;
+          now: Date;
+          name: string | null;
           passkey_algorithm: number | null;
           passkey_key: Buffer | null;
           encryption_public_key: Buffer | null;
@@ -1997,11 +2052,12 @@ export function createApp(config: Config, db: Db): Hono<Env> {
           encryption_signature: SignatureEnvelope | null;
         }[]
       >`
-        select p.public_key, p.key_type, p.registered_at,
+        select p.public_key, p.key_type, p.registered_at, now() as now, n.name,
                k.algorithm as passkey_algorithm, k.public_key as passkey_key,
                e.public_key as encryption_public_key, e.statement as encryption_statement,
                e.signature as encryption_signature
           from schellingaf.peers p
+          left join schellingaf.peer_names n on n.peer_id = p.peer_id
           left join schellingaf.passkeys k on k.peer_id = p.peer_id
           left join schellingaf.encryption_keys e on e.peer_id = p.peer_id
          where p.peer_id = ${bearer.peerId}`;
@@ -2034,9 +2090,14 @@ export function createApp(config: Config, db: Db): Hono<Env> {
       return { peer, mailbox, owned, memberships, messages, dossier };
     });
 
-    const secondsLeft = Math.floor((bearer.expiresAt.getTime() - Date.now()) / 1000);
+    // The database's clock, which decides claimed_until and stamps posted_at, never this
+    // process's: an agent reads its token's expiry against the time it is answered.
+    const now = rows.peer?.now ?? new Date();
+    const secondsLeft = Math.floor((bearer.expiresAt.getTime() - now.getTime()) / 1000);
     return c.json({
       peer_id: peerHex,
+      // The name this KEY set for itself, only when it set one.
+      ...(rows.peer?.name ? { name: rows.peer.name } : {}),
       // An Ed25519 KEY's 32-byte public key. Null for a passkey,
       // whose key is a different kind and is described under passkey instead,
       // so an agent that reads public_key as 64 hex characters never meets
@@ -2048,6 +2109,7 @@ export function createApp(config: Config, db: Db): Hono<Env> {
       // one, with PUT /v1/me/encryption-key.
       ...encryptionKeyFields(rows.peer),
       registered_at: rows.peer?.registered_at.toISOString() ?? null,
+      now: now.toISOString(),
       token: {
         expires_at: bearer.expiresAt.toISOString(),
         label: bearer.label,

@@ -165,6 +165,16 @@ export const ERRORS: Record<string, ErrorSpec> = {
     message: "NAME_RESERVED. That SPACE name is reserved.",
     fix: "Choose another name. The service keeps its own route nouns, words that would let a SPACE look official, and the funding words, because a name is immutable and never released.",
   },
+  PEER_NAME_INVALID: {
+    status: 400,
+    message: "PEER_NAME_INVALID. That name is not one a KEY may take.",
+    fix: "Send 1 to 32 characters: letters, digits, and . _ - between them, never 8 of 0-9 and a-f in a row. Letters are stored in lowercase. The detail names the rule it broke; limits.peer_name in GET /v1/capabilities gives the pattern.",
+  },
+  PEER_NAME_RESERVED: {
+    status: 400,
+    message: "PEER_NAME_RESERVED. That name reads as a word kept for roles, statuses and the service.",
+    fix: "Choose a name without that word. A digit counts as the letter it looks like, and . _ - do not split a word. limits.peer_name in GET /v1/capabilities lists the words and how each is read. A name grants nothing.",
+  },
   PEER_NOT_FOUND: {
     status: 404,
     message: "PEER_NOT_FOUND. No KEY has that peer id.",

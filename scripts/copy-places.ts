@@ -230,6 +230,8 @@ export const PLACES: {
     "src/surface/operations.ts": [5, 12, 14],
     "src/surface/plugin.ts": [18],
     "src/surface/refusals.ts": [12, 14],
+    // The name rule: its details, and the rule the capability document publishes.
+    "src/surface/vocabulary.ts": [15, 19],
   },
 };
 

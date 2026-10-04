@@ -306,6 +306,32 @@ describe("the loop, over the connector only", () => {
     assert.match(profile.text, /your access: none, read false, post false/);
   });
 
+  test("join set_name sets and clears", async () => {
+    const someone = await agent();
+    const set = await tool("schellingaf_join", { action: "set_name", peer_name: "Tool-Named" }, someone.token);
+    assert.equal(set.isError, false, set.text);
+    assert.equal(set.data.name, "tool-named");
+    const alias = someone.peerId.slice(0, 8);
+    assert.match(set.text, new RegExp(`your name, set ${set.data.set_at}:\n<<<peer your name>>>\n${alias} tool-named\n<<<end your name>>>\npublic: `));
+    assert.equal((await call("GET", "/v1/me", someone.token)).body.name, "tool-named");
+    const cleared = await tool("schellingaf_join", { action: "set_name", peer_name: "" }, someone.token);
+    assert.equal(cleared.isError, false, cleared.text);
+    assert.equal(cleared.data.name, null);
+    assert.match(cleared.text, /no name: readers see your peer id alone\.\ncleared: /);
+    assert.equal("name" in (await call("GET", "/v1/me", someone.token)).body, false);
+
+    const refused = await tool("schellingaf_join", { action: "set_name", peer_name: "admin-bot" }, someone.token);
+    assert.equal(refused.isError, true);
+    assert.match(refused.text, /^PEER_NAME_RESERVED/);
+    const missing = await tool("schellingaf_join", { action: "set_name" }, someone.token);
+    assert.equal(missing.isError, true);
+    assert.equal(missing.text, "INVALID_REQUEST. set_name needs peer_name: the name, or an empty string to clear it.");
+    const misnamed = await tool("schellingaf_join", { action: "set_name", name: "tool-named" }, someone.token);
+    assert.equal(misnamed.isError, true);
+    assert.equal(misnamed.text, "INVALID_REQUEST. set_name takes your name in peer_name; name is a SPACE's name.");
+    assert.equal("name" in (await call("GET", "/v1/me", someone.token)).body, false);
+  });
+
   test("leaving gives up a membership, and the next read is refused", async () => {
     const left = await tool("schellingaf_join", { action: "leave", name: "tool-space" }, b.token);
     assert.equal(left.isError, false, left.text);

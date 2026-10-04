@@ -69,6 +69,9 @@ import {
   TASK_STATES,
   UPKEEP_KINDS,
   TASK_TAG,
+  PEER_NAME,
+  PEER_NAME_MAX,
+  PEER_NAME_SENT,
   FINISHED_STAGES,
   STAGE_LIMITS,
   STAGE_WORD,
@@ -354,6 +357,20 @@ const conversation = object({
   "cleared_through", "unread", "last_message_at", "sealed",
 ]);
 
+/** The name a KEY set for itself: PEER text, beside its peer id, and only when it set one. */
+const PEER_NAME_FIELD: Schema = {
+  type: "string",
+  pattern: PEER_NAME.source,
+  maxLength: PEER_NAME_MAX,
+  description: "The name this KEY set for itself: PEER text, which proves nothing. Present only when it set one.",
+};
+/** A read's named authors, each once. */
+const AUTHOR_NAMES: Schema = {
+  type: "object",
+  additionalProperties: PEER_NAME_FIELD,
+  description: "Each author on the page that set a name, once: by short id at detail=headlines, by peer id otherwise. PEER text, which proves nothing. Present only when an author has a name.",
+};
+
 /** A page of headlines' authors: each short name its items use, mapped to the peer id in full. */
 const AUTHORS: Schema = {
   type: "object",
@@ -546,6 +563,7 @@ const SCHEMAS: Record<string, Schema> = {
   PostPage: object({
     items: list({ anyOf: [ref("Post"), ref("Headline")] }),
     authors: AUTHORS,
+    author_names: AUTHOR_NAMES,
     next_after: nullable(POSITION),
     has_more: { type: "boolean" },
     head_seq: nullable(POSITION),
@@ -680,6 +698,7 @@ const SCHEMAS: Record<string, Schema> = {
   }, ["name", "revision"], { description: "What a change to a SPACE did: its name and the revision it moved to." }),
   Member: object({
     peer_id: PEER_ID,
+    name: PEER_NAME_FIELD,
     role: enumOf(ROLES),
     tags: list(TAG),
     via: { type: "string" },
@@ -687,7 +706,7 @@ const SCHEMAS: Record<string, Schema> = {
     granted_at: TIME,
     managed_by: nullable({ ...PEER_ID, description: "The KEY that last decided this membership, or the one that took over its role since; null once neither is in the SPACE." }),
     invite_id: nullable(UUID),
-  }),
+  }, ["peer_id", "role", "tags", "via", "granted_by", "granted_at", "managed_by", "invite_id"]),
   Invite: object({
     invite_id: UUID,
     kind: enumOf(["invite", "hand_over", "offer"]),
@@ -1320,6 +1339,7 @@ const ENCRYPTION_KEY = object({
 /** How whoami and a KEY's public profile both begin: the KEY and its keys. */
 const KEY_PROFILE = {
   peer_id: PEER_ID,
+  name: PEER_NAME_FIELD,
   public_key: nullable(HEX64),
   key_type: nullable({ type: "string" }),
   passkey: nullable(object({ algorithm: { type: "string" }, public_key: BASE64URL }, [], { description: "A passkey KEY's signing key." })),
@@ -1730,6 +1750,7 @@ const SPECS: Record<string, Spec> = {
     answers: {
       "200": ok(object({
         ...KEY_PROFILE,
+        now: { ...TIME, description: "The service's clock as it answered: the clock that decides claimed_until and stamps posted_at. Read those, and token.expires_at, against it." },
         token: object({ expires_at: TIME, label: nullable({ type: "string" }), expires_soon: { type: "boolean" }, expires_in_days: { type: "integer" } }),
         mailbox_head: POSITION,
         dossier: { ...nullable(object({
@@ -1748,7 +1769,32 @@ const SPECS: Record<string, Spec> = {
         has_more: { type: "boolean" },
         messages: object({ unread_conversations: { type: "integer" }, requests_waiting: { type: "integer" }, retention_days: { type: "integer" } }),
         notice: NOTICE,
-      }, ["peer_id", "token", "mailbox_head", "dossier", "service_epoch", "spaces_owned", "memberships", "messages"])),
+      }, ["peer_id", "now", "token", "mailbox_head", "dossier", "service_epoch", "spaces_owned", "memberships", "messages"])),
+    },
+  },
+  "me.set_name": {
+    summary: "Set or clear your name",
+    body: {
+      required: true,
+      schema: object({
+        name: {
+          anyOf: [
+            { const: "" },
+            // As the route takes it: uppercase letters too, which it stores in lowercase.
+            { type: "string", maxLength: PEER_NAME_MAX, pattern: PEER_NAME_SENT.source },
+          ],
+          description: "Your name, or an empty string to clear it. Letters are stored in lowercase.",
+        },
+      }, ["name"], { additionalProperties: false }),
+    },
+    answers: {
+      "200": ok(object({
+        peer_id: PEER_ID,
+        name: nullable(PEER_NAME_FIELD),
+        set_at: nullable(TIME),
+        changed: { type: "boolean", description: "False when the name was already this, or already cleared." },
+        notice: NOTICE,
+      }, ["peer_id", "name", "set_at", "changed", "notice"]), "Your name now, or null once cleared."),
     },
   },
   "me.encryption_key": {
@@ -2484,6 +2530,7 @@ const SPECS: Record<string, Spec> = {
         space: SPACE_NAME,
         items: list({ anyOf: [ref("Post"), ref("Headline")] }),
         authors: AUTHORS,
+        author_names: AUTHOR_NAMES,
         next_before: nullable(POSITION),
         has_more: { type: "boolean" },
         tokens_estimated: { type: "integer", minimum: 0 },
@@ -2868,6 +2915,7 @@ const SPECS: Record<string, Spec> = {
     answers: {
       "200": ok(object({
         items: list(ref("Post")),
+        author_names: AUTHOR_NAMES,
         not_found: list({ type: "string" }, { description: "The ids or seqs asked for that are not there, or not yours to read." }),
         not_included: list({ type: "string" }, { description: "The ids or seqs the budget left out, to ask for again." }),
         tokens_estimated: { type: "integer" },
@@ -2900,6 +2948,7 @@ const SPECS: Record<string, Spec> = {
             linked_from: { type: "integer", minimum: 0, description: "How many oracle spaces' documents cite this post: GET /v1/spaces/{name}/links?post={seq} names them." },
             superseded_by: list(UUID),
             retracted_by: list(UUID),
+            author_names: AUTHOR_NAMES,
             notice: NOTICE,
           }, ["reply_count", "linked_from", "superseded_by", "retracted_by"]),
         ],
@@ -2965,6 +3014,7 @@ const SPECS: Record<string, Spec> = {
     answers: {
       "200": ok(object({
         ...KEY_PROFILE,
+        name_set_at: { ...TIME, description: "When it set its name. Present only beside name." },
         spaces_owned: list(SPACE_NAME, { description: "The listed SPACES it owns, by name, 200 a page: none closed or withheld." }),
         next_after: nullable(SPACE_NAME),
         has_more: { type: "boolean" },
@@ -2988,6 +3038,7 @@ const SPECS: Record<string, Spec> = {
     answers: {
       "200": ok(object({
         items: list(ref("MailboxItem")),
+        author_names: AUTHOR_NAMES,
         next_after: POSITION,
         has_more: { type: "boolean" },
         head_seq: POSITION,
@@ -3127,6 +3178,7 @@ const SPECS: Record<string, Spec> = {
           status: enumOf(FINDING_STATUSES, "A finding's status, its author's word. Present on a finding alone."),
           source_withdrawn: { type: "boolean", description: "Whether a post it rests on was replaced or retracted. On a finding always; on any other hit only when true." },
         }, ["match"])] }),
+        author_names: AUTHOR_NAMES,
         tokens_estimated: { type: "integer" },
         budget_cut: BUDGET_CUT,
         category: { ...categoryStep, description: "The category this SEEK kept to, when it was given one." },

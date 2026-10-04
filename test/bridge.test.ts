@@ -276,6 +276,24 @@ describe("the bridge", () => {
     assert.match(kept.token, /^schellingaf_[0-9a-f]{64}$/);
   });
 
+  test("relays set_name untouched", async () => {
+    const bridge = start();
+    try {
+      await bridge.ask("initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "test", version: "0" } });
+      const set = await bridge.ask("tools/call", { name: "schellingaf_join", arguments: { action: "set_name", peer_name: "bridged-one" } });
+      assert.equal(set.result.isError, undefined, JSON.stringify(set));
+      assert.equal(set.result.structuredContent.name, "bridged-one");
+      assert.match(set.result.content[0].text, /<<<peer your name>>>\n[0-9a-f]{8} bridged-one\n<<<end your name>>>/);
+      const kept = JSON.parse(readFileSync(join(home, "keys", "token.json"), "utf8"));
+      const me = await fetch(`${origin}/v1/me`, { headers: { Authorization: `Bearer ${kept.token}` } }).then((r) => r.json() as Promise<any>);
+      assert.equal(me.name, "bridged-one");
+      const cleared = await bridge.ask("tools/call", { name: "schellingaf_join", arguments: { action: "set_name", peer_name: "" } });
+      assert.equal(cleared.result.structuredContent.name, null);
+    } finally {
+      await bridge.stop();
+    }
+  });
+
   test("keeps the same KEY and token across runs, and says its peer id", () => {
     const before = JSON.parse(readFileSync(join(home, "keys", "token.json"), "utf8"));
     const id = spawnSync(process.execPath, [BRIDGE, "id"], { env: env(), encoding: "utf8" });

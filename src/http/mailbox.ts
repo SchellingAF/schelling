@@ -14,7 +14,7 @@ import type { Db } from "../db/sql.ts";
 import { ApiError } from "../db/errors.ts";
 import { toHex } from "../domain/keys.ts";
 import { MAILBOX_REASONS } from "../surface/vocabulary.ts";
-import { boundedNumber, budgetCut, cost, cursor, detailOr, kindsOf, postColumns, render, tokenBudget, type PostRow } from "./postview.ts";
+import { AuthorNames, authorNamesField, boundedNumber, budgetCut, cost, cursor, detailOr, kindsOf, postColumns, render, tokenBudget, type PostRow } from "./postview.ts";
 import { messageColumns, messageCost, renderMessage, type MessageRow } from "./messages.ts";
 import { floorPlace, requireBearer, type Env } from "./app.ts";
 import { mailboxStream, readWaiting, waitSeconds } from "./wait.ts";
@@ -160,7 +160,7 @@ export function mountMailbox(app: Hono<Env>, db: Db): void {
       const postIds = idsOf("post_id");
       const posts = postIds.length
         ? await sql<PostRow[]>`
-            select ${postColumns(sql, detail)}
+            select ${postColumns(sql, detail, false, true)}
              where p.post_id = any(${postIds}::uuid[])`
         : [];
 
@@ -274,6 +274,8 @@ export function mountMailbox(app: Hono<Env>, db: Db): void {
     const items: Record<string, unknown>[] = [];
     let spent = 0;
     let last: Delivery | null = null;
+    // Each named author of a POST on the page once, by peer id, priced with its first notice.
+    const names = new AuthorNames();
     for (const d of result.deliveries) {
       const post = d.post_id ? postById.get(d.post_id) : undefined;
       const request = d.request_id ? requestById.get(d.request_id) : undefined;
@@ -293,8 +295,10 @@ export function mountMailbox(app: Hono<Env>, db: Db): void {
           : closed ?? (check?.verdict === "reject" ? check.reason : null);
       // A proposal's stage counts by the bytes it adds.
       const stage = post && d.reason === "proposal" ? stageById.get(post.post_id) : undefined;
+      const author = post ? toHex(post.author_id) : null;
       const price = post
-        ? cost(post, detail) + (stage ? Math.ceil(Buffer.byteLength(JSON.stringify(stage), "utf8") / 3) : 0)
+        ? cost(post, detail) + (stage ? Math.ceil(Buffer.byteLength(JSON.stringify(stage), "utf8") / 3) : 0) +
+          Math.ceil(names.cost(author!, post.author_name) / 3)
         : request || offer
           ? REQUEST_COST
           : message
@@ -358,6 +362,7 @@ export function mountMailbox(app: Hono<Env>, db: Db): void {
       }
       items.push(envelope);
       spent += price;
+      if (post) names.add(author!, post.author_name);
       last = d;
     }
 
@@ -370,6 +375,7 @@ export function mountMailbox(app: Hono<Env>, db: Db): void {
       (narrowed ? items.length < result.deliveries.length || result.deliveries.length === limit : BigInt(last.mailbox_seq) < head);
     return c.json({
       items,
+      ...authorNamesField(names.toJSON()),
       // The first delivery is always taken, so `last` is null only on an empty page,
       // and then the cursor moves to the head: a filtered page that matched nothing
       // still advances, or an agent reading only `reason=decision` would re-scan the

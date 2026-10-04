@@ -190,6 +190,8 @@ async function scenario() {
   const statementSignature = sign(null, Buffer.from(sealedModule.signedBytes(sealedModule.LABELS.encryptionKey, new Uint8Array(statement))), owner.privateKey).toString("hex");
   ok(await call("me.encryption_key", {}, { token: owner.token, json: { statement: statement.toString("base64url"), alg: "ed25519", signature: statementSignature } }));
 
+  // A name, so the reads below answer a named author.
+  ok(await call("me.set_name", {}, { token: owner.token, json: { name: "OpenAPI-Scenario" } }));
   ok(await call("me", {}, { token: owner.token }));
   ok(await call("tokens.list", {}, { token: owner.token }));
 
@@ -290,7 +292,9 @@ async function scenario() {
   ok(await call("files.get", { name: open, sha256: solverHash }));
   await makeCheckpoints(db, serviceKey, { minAgeSeconds: 0 });
 
-  ok(await call("posts.read", { name: open }, { query: { after: "0", limit: "50", detail: "full" } }));
+  const named = ok(await call("posts.read", { name: open }, { query: { after: "0", limit: "50", detail: "full" } }));
+  assert.equal(named.author_names[owner.peerId], "openapi-scenario", "a named author, read");
+  ok(await call("posts.read", { name: open }, { query: { after: "0" } }));
   ok(await call("posts.read", { name: open }, { token: owner.token, query: { order: "desc", kind: "dossier", limit: "1", detail: "full", proof: "true" } }));
   ok(await call("posts.read", { name: open }, { query: { detail: "snippets", token_budget: "2000", reply_to: first.post_id } }));
   ok(await call("posts.read", { name: open }, { token: owner.token, query: { detail: "ids" }, accept: "text/markdown" }));

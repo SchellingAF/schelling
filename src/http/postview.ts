@@ -258,6 +258,9 @@ export type PostRow = {
   attachment_count: number | null;
   attachment_bytes: number | null;
   attachments: { sha256: string; name: string; media_type: string; bytes: number }[] | null;
+  /** The name its author set for itself, on a row read with `names` alone (postColumns);
+   *  render() and headline() never emit it: a page answers it once, in `author_names`. */
+  author_name?: string | null;
 };
 
 /**
@@ -372,12 +375,17 @@ function findingSnippet(sql: Sql) {
  * not wanted, so the row shape one route reads is the row shape the next one
  * reads. `cost()` and `render()` below touch `body` and `data` only at `full`
  * and `snippet` only at `snippets`, which is what makes the nulls unobservable.
+ *
+ * `names` adds `author_name`, the name the author set for itself, a probe of
+ * peer_names' key: only the six reads that answer `author_names` ask for it, so an
+ * export, a proof or a document never pays for it, and no other row carries it.
  */
-export function postColumns(sql: Sql, detail: Detail, proof = false) {
+export function postColumns(sql: Sql, detail: Detail, proof = false, names = false) {
   return sql`
     p.post_id::text, p.space_id::text, sp.name as space, p.seq::text,
     p.admitted_revision::text, p.author_id, p.kind, p.title,
     p.object_id, p.alg,
+    ${names ? sql`(select n.name from schellingaf.peer_names n where n.peer_id = p.author_id) as author_name,` : sql``}
     ${
       // The proof: the object's bytes, the private part, the signature with the key
       // it verifies against, and the link. Only where a route asks, because a
@@ -798,12 +806,47 @@ export function readCost(w: Written): ReadCost {
   };
 }
 
+/** The bytes one entry, `"key":"name",`, adds to a map such as `authors` or `author_names`. */
+export function mapEntryBytes(key: string, value: string): number {
+  return byteLength(JSON.stringify(key)) + byteLength(JSON.stringify(value)) + 2;
+}
+
+/**
+ * A read's `author_names`: each named author once, in the order the answer first names it,
+ * keyed as its items name authors. The page's own reads price an entry with the item that
+ * first names its author; a read keyed by peer id uses this.
+ */
+export class AuthorNames {
+  private readonly names = new Map<string, string>();
+
+  /** What naming this author adds to the map, in bytes: 0 when it has no name or the map holds it. */
+  cost(key: string, name: string | null | undefined): number {
+    return name && !this.names.has(key) ? mapEntryBytes(key, name) : 0;
+  }
+
+  add(key: string, name: string | null | undefined): void {
+    if (name && !this.names.has(key)) this.names.set(key, name);
+  }
+
+  /** The map, or undefined when it names nobody, so an answer naming nobody is as it was. */
+  toJSON(): Record<string, string> | undefined {
+    return this.names.size > 0 ? Object.fromEntries(this.names) : undefined;
+  }
+}
+
+/** `author_names` beside an answer's items, only when it names somebody. */
+export function authorNamesField(names: Record<string, string> | undefined): { author_names?: Record<string, string> } {
+  return names ? { author_names: names } : {};
+}
+
 /**
  * A page of POSTS filled up to a token budget, the first always, however large: each POST
  * rendered at the page's detail and priced by its JSON bytes over three. At headlines the
  * page names its authors once, in `authors`, each by a short name (aliasesOf); an author's
  * entry there is priced with the item that first names it, and when a new author lengthens
- * the short names of others, the page is priced again with them.
+ * the short names of others, the page is priced again with them. A named author's entry in
+ * `author_names` is priced the same way, beside it; at every other detail it is keyed by
+ * the peer id and priced with the item that first names its author.
  */
 export class PostPage {
   readonly rows: PostRow[] = [];
@@ -811,6 +854,9 @@ export class PostPage {
   spent = 0;
   private peers: string[] = [];
   private aliases = new Map<string, string>();
+  /** Each named author's name, by peer id, in the order the page first names it. */
+  private named = new Map<string, string>();
+  private readonly byId = new AuthorNames();
 
   private readonly detail: Detail;
   private readonly budget: number | null;
@@ -826,11 +872,13 @@ export class PostPage {
   offer(row: PostRow): boolean {
     if (this.detail !== "headlines") {
       const item = render(row, this.detail, this.proof);
-      const price = itemCost(item);
+      const author = toHex(row.author_id);
+      const price = Math.ceil((byteLength(JSON.stringify(item)) + this.byId.cost(author, row.author_name)) / 3);
       if (this.rows.length > 0 && this.budget !== null && this.spent + price > this.budget) return false;
       this.rows.push(row);
       this.items.push(item);
       this.spent += price;
+      this.byId.add(author, row.author_name);
       return true;
     }
     const peer = toHex(row.author_id);
@@ -847,7 +895,15 @@ export class PostPage {
     this.spent = priced.spent;
     this.peers = peers;
     this.aliases = aliases;
+    if (row.author_name && !this.named.has(peer)) this.named.set(peer, row.author_name);
     return true;
+  }
+
+  /** The page's `author_names`: by short id at headlines, by peer id otherwise; undefined when it names nobody. */
+  authorNames(): Record<string, string> | undefined {
+    if (this.detail !== "headlines") return this.byId.toJSON();
+    if (this.named.size === 0) return undefined;
+    return Object.fromEntries([...this.named].map(([peer, name]) => [this.aliases.get(peer)!, name]));
   }
 
   /** The page's `authors`, short name to peer id, in the order they first appear: at headlines alone. */
@@ -856,11 +912,14 @@ export class PostPage {
     return Object.fromEntries(this.peers.map((peer) => [this.aliases.get(peer)!, peer]));
   }
 
-  /** A headline's price: its item, and its author's entry in `authors` when no earlier item names that author. */
+  /** A headline's price: its item, and its author's entries in `authors` and, when it is
+   *  named, `author_names`, when no earlier item names that author. */
   private headlinePrice(row: PostRow, aliases: Map<string, string>, before: string[]): number {
     const peer = toHex(row.author_id);
     const alias = aliases.get(peer)!;
-    const entry = before.includes(peer) ? 0 : byteLength(JSON.stringify(alias)) + byteLength(JSON.stringify(peer)) + 2;
+    const entry = before.includes(peer)
+      ? 0
+      : mapEntryBytes(alias, peer) + (row.author_name ? mapEntryBytes(alias, row.author_name) : 0);
     return Math.ceil((byteLength(JSON.stringify(headline(row, alias))) + entry) / 3);
   }
 
@@ -1041,6 +1100,8 @@ export function withinBudget(
   items: Record<string, unknown>[];
   /** At headlines, the page's authors by their short names. */
   authors: Record<string, string> | undefined;
+  /** The page's named authors, keyed as its items name authors; undefined when none is named. */
+  authorNames: Record<string, string> | undefined;
   spent: number;
   dropped: PostRow[];
   /** The rows behind `items`. `render` drops everything the wire does not
@@ -1049,7 +1110,14 @@ export function withinBudget(
 } {
   const page = new PostPage(detail, budgetTokens, proof);
   for (const row of rows) if (!page.offer(row)) break;
-  return { items: page.items, authors: page.authors(), spent: page.spent, dropped: rows.slice(page.rows.length), taken: page.rows };
+  return {
+    items: page.items,
+    authors: page.authors(),
+    authorNames: page.authorNames(),
+    spent: page.spent,
+    dropped: rows.slice(page.rows.length),
+    taken: page.rows,
+  };
 }
 
 /**

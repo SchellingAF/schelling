@@ -18,7 +18,7 @@ import { useService, app, db, fixture, config, testConfig, send, read, call, age
 import { createApp } from "../src/http/app.ts";
 import { TOKEN_TTL_DEFAULT_SECONDS } from "../src/domain/protocol.ts";
 import { sha256 } from "../src/domain/keys.ts";
-import { newToken } from "../src/http/auth.ts";
+import { classifyBearer, newToken } from "../src/http/auth.ts";
 import { cleanName, keysOf, resolveClient, useDocumentFetcherForTests } from "../src/oauth/clients.ts";
 import { isMetadataDocumentId, redirectMatches, sameResource } from "../src/oauth/uris.ts";
 import { FetchBusy, FetchRefused, fetchJsonDocument, refusedAddress, sharedFetch, type Fetched } from "../src/oauth/fetch.ts";
@@ -357,6 +357,33 @@ describe("the way through, for an app that registered itself", () => {
       const oracle = await rpc("/mcp/connect", "tools/call", { name: "schellingaf_oracle", arguments: { action, space: "no-such-space", text: "x", name: "never-made" } }, reader);
       assert.equal(oracle.status, 403, `schellingaf_oracle ${action} writes`);
     }
+  });
+
+  test("a read-only connection is refused set_name; a writing one sets its person's name", async () => {
+    const someone = await agent();
+    const reading = (await connectApp(someone, "read")).issued.body.access_token as string;
+    const refused = await rpc("/mcp/connect", "tools/call", { name: "schellingaf_join", arguments: { action: "set_name", peer_name: "app-chosen" } }, reading);
+    assert.equal(refused.status, 403);
+    assert.match(refused.headers.get("www-authenticate") ?? "", /error="insufficient_scope"/);
+    // Under the connector's own refusal, the route refuses the same token's write as the
+    // connector's in-process call carries it.
+    const bearer = await classifyBearer(db, `Bearer ${reading}`, "127.0.0.1", CONNECT);
+    assert.equal(bearer.state, "valid");
+    const inProcess = await read(await app.request("/v1/me/name", {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: "app-chosen" }),
+    }, { schellingafReentry: { bearer, addr: "127.0.0.1" } }));
+    assert.equal(inProcess.status, 403);
+    assert.equal(inProcess.body.error.code, "INSUFFICIENT_SCOPE");
+    assert.equal("name" in (await v1("GET", "/v1/me", someone.token)).body, false);
+
+    const writing = (await connectApp(someone)).issued.body.access_token as string;
+    const set = await rpc("/mcp/connect", "tools/call", { name: "schellingaf_join", arguments: { action: "set_name", peer_name: "app-chosen" } }, writing);
+    assert.equal(set.status, 200);
+    assert.equal(set.body.result.isError, undefined, JSON.stringify(set.body));
+    assert.equal(set.body.result.structuredContent.name, "app-chosen");
+    assert.equal((await v1("GET", "/v1/me", someone.token)).body.name, "app-chosen");
   });
 
   test("the person sees the app among their tokens, and revoking that one disconnects it alone", async () => {

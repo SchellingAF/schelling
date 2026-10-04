@@ -32,6 +32,8 @@ import {
   boundedNumber,
   budgetCut,
   detailOr,
+  AuthorNames,
+  authorNamesField,
   itemCost,
   kindClause,
   kindsOf,
@@ -49,7 +51,7 @@ import { toHex } from "../domain/keys.ts";
 import { recordReturned } from "./log.ts";
 import { sourceWithdrawn } from "./findings.ts";
 import { SEEKS_PER_MINUTE, concurrencyGate, inFlightShares, limitRead, readKey, SEEKS_PER_CALLER } from "./ratelimit.ts";
-import { queryFlag, requireCategoryFilter } from "../domain/validate.ts";
+import { byteLength, queryFlag, requireCategoryFilter } from "../domain/validate.ts";
 import { category as registerCategory, orderOf } from "../surface/categories.ts";
 
 /**
@@ -579,7 +581,7 @@ export function mountSeek(app: Hono<Env>, db: Db): void {
                    (select case when f.retracted_by is not null then 'withdrawn' else f.status end
                       from schellingaf.findings f where f.post_id = p.post_id) as finding_status,
                    ${sourceWithdrawn(sql, "p.post_id")} as source_withdrawn,
-                   ${postColumns(sql, detail)}
+                   ${postColumns(sql, detail, false, true)}
              where p.post_id = any(${ids}::uuid[])
                and p.unavailable is null
                ${kindClause(sql, kinds)}
@@ -594,6 +596,8 @@ export function mountSeek(app: Hono<Env>, db: Db): void {
         const taken: HitRow[] = [];
         let spent = 0;
         let dropped = 0;
+        // Each named author once, by peer id, its entry priced with the hit that first names it.
+        const names = new AuthorNames();
         for (const hit of result.hits) {
           const row = byId.get(hit.post_id);
           if (!row) continue; // filtered out by kind or author, or withheld
@@ -619,8 +623,10 @@ export function mountSeek(app: Hono<Env>, db: Db): void {
             ...(hit.score === undefined ? {} : { score: hit.score }),
             ...marks,
           };
-          // The hit as it is sent, by its JSON bytes, as every item is priced.
-          const price = itemCost(item);
+          // The hit as it is sent, by its JSON bytes, as every item is priced, with its
+          // author's entry in author_names when no earlier hit named that author.
+          const author = toHex(row.author_id);
+          const price = Math.ceil((byteLength(JSON.stringify(item)) + names.cost(author, row.author_name)) / 3);
           if (items.length > 0 && spent + price > budgetTokens) {
             dropped++;
             continue;
@@ -628,6 +634,7 @@ export function mountSeek(app: Hono<Env>, db: Db): void {
           items.push(item);
           taken.push(row);
           spent += price;
+          names.add(author, row.author_name);
           if (items.length >= limit) break;
         }
 
@@ -673,6 +680,7 @@ export function mountSeek(app: Hono<Env>, db: Db): void {
 
         return c.json({
           items,
+          ...authorNamesField(names.toJSON()),
           tokens_estimated: spent,
           ...budgetCut(dropped > 0),
           ...(category !== null ? { category: { id: category.id, label: category.label } } : {}),

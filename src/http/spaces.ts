@@ -1243,9 +1243,12 @@ export function mountSpaces(app: Hono<Env>, config: Config, db: Db, service: Ser
           granted_at: Date;
           managed_by: Buffer | null;
           invite_id: string | null;
+          name: string | null;
         }[]
       >`
         select m.peer_id, m.role, m.tags, m.via, m.granted_by, m.granted_at,
+               -- The name the member set for itself: a probe of peer_names' key.
+               (select n.name from schellingaf.peer_names n where n.peer_id = m.peer_id) as name,
                -- The KEY sitting in the seat that manages this member now, which a
                -- hand-over changes without touching this row.
                schellingaf.seat_holder(m.space_id, m.manager_seat) as managed_by, m.invite_id::text
@@ -1273,6 +1276,8 @@ export function mountSpaces(app: Hono<Env>, config: Config, db: Db, service: Ser
     const page = itemsWithin(
       result.members.map((m) => ({
         peer_id: toHex(m.peer_id),
+        // The name it set for itself, only when it set one: PEER text, which proves nothing.
+        ...(m.name !== null ? { name: m.name } : {}),
         role: m.role,
         tags: m.tags,
         via: m.via,
@@ -1947,6 +1952,8 @@ export function mountSpaces(app: Hono<Env>, config: Config, db: Db, service: Ser
           key_type: string;
           registered_at: Date;
           blocked_at: Date | null;
+          name: string | null;
+          name_set_at: Date | null;
           passkey_algorithm: number | null;
           passkey_key: Buffer | null;
           encryption_public_key: Buffer | null;
@@ -1955,10 +1962,12 @@ export function mountSpaces(app: Hono<Env>, config: Config, db: Db, service: Ser
         }[]
       >`
         select p.peer_id, p.public_key, p.key_type, p.registered_at, p.blocked_at,
+               n.name, n.set_at as name_set_at,
                k.algorithm as passkey_algorithm, k.public_key as passkey_key,
                e.public_key as encryption_public_key, e.statement as encryption_statement,
                e.signature as encryption_signature
           from schellingaf.peers p
+          left join schellingaf.peer_names n on n.peer_id = p.peer_id
           left join schellingaf.passkeys k on k.peer_id = p.peer_id
           left join schellingaf.encryption_keys e on e.peer_id = p.peer_id
          where p.peer_id = ${target}`;
@@ -1979,6 +1988,9 @@ export function mountSpaces(app: Hono<Env>, config: Config, db: Db, service: Ser
 
     return c.json({
       peer_id: toHex(row.peer.peer_id),
+      // The name it set for itself, and when, only when it set one: PEER text, which
+      // proves nothing. Any KEY may take any name; the peer id is the identity.
+      ...(row.peer.name !== null ? { name: row.peer.name, name_set_at: row.peer.name_set_at!.toISOString() } : {}),
       // An Ed25519 SIGNING key, and only that. Null for a passkey KEY, whose
       // signing key is of another kind and is described under passkey.
       public_key: row.peer.public_key ? toHex(row.peer.public_key) : null,

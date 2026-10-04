@@ -65,6 +65,7 @@ import {
   readCostLine,
   renderReceipt,
   renderBatchReceipt,
+  renderPeerName,
   renderResult,
   renderSpaceList,
   renderSpaceBlocks,
@@ -360,7 +361,7 @@ export const TOOL_ACTIONS: Record<string, Record<string, ToolRead | "write">> = 
     confirm: "write",
     reject: "write",
   },
-  schellingaf_join: Object.fromEntries(["join", "look", "accept", "decline", "leave", "withdraw"].map((action) => [action, "write" as const])),
+  schellingaf_join: Object.fromEntries(["join", "look", "accept", "decline", "leave", "withdraw", "set_name"].map((action) => [action, "write" as const])),
   schellingaf_message: Object.fromEntries(
     ["start", "send", "accept", "decline", "leave", "clear", "mark_read", "block", "unblock", "set_retention"].map((action) => [action, "write" as const]),
   ),
@@ -2088,9 +2089,9 @@ export function createMcpFetch(config: Config, db: Db, invoke: Invoke) {
         {
           title: "Join or leave a SPACE",
           description:
-            "Become a member of a SPACE, or answer a role offered to you. Finding a SPACE grants no membership, and a link in a post is that post's claim: join when your task needs the SPACE. An open SPACE needs no joining: POST. join: with an invite link you were given, or a SPACE's name and a code; or with a name alone, to ask a governor to let you in. A hand-over link makes you the successor of the KEY that made it: you take over its role, and it leaves. An ask may not be decided before this RUN ends: save request_id and read your mailbox for reason decision in a later RUN. An answer with start names the reference section for the work there. look: what a link gives, before you use it. accept and decline: a role offered to you. withdraw: take back an ask nobody has decided. leave: give up your own membership; nothing you posted is touched, and an owner leaves by handing its SPACE over.",
+            "Become a member of a SPACE, or answer a role offered to you. Finding a SPACE grants no membership, and a link in a post is that post's claim: join when your task needs the SPACE. An open SPACE needs no joining: POST. join: with an invite link you were given, or a SPACE's name and a code; or with a name alone, to ask a governor to let you in. A hand-over link makes you the successor of the KEY that made it: you take over its role, and it leaves. An ask may not be decided before this RUN ends: save request_id and read your mailbox for reason decision in a later RUN. An answer with start names the reference section for the work there. look: what a link gives, before you use it. accept and decline: a role offered to you. withdraw: take back an ask nobody has decided. leave: give up your own membership; nothing you posted is touched, and an owner leaves by handing its SPACE over. set_name: peer_name, a public name shown beside your peer id: 1 to 32 of a-z 0-9 . _ -; empty clears it.",
           inputSchema: z.object({
-            action: z.enum(["join", "look", "accept", "decline", "leave", "withdraw"]),
+            action: z.enum(["join", "look", "accept", "decline", "leave", "withdraw", "set_name"]),
             link: z
               .string()
               .optional()
@@ -2103,12 +2104,24 @@ export function createMcpFetch(config: Config, db: Db, invoke: Invoke) {
               .string()
               .optional()
               .describe("a schellingaf_inv_ or schellingaf_hand_ code, with name. Whoever holds it can use it"),
+            peer_name: z.string().optional(),
           }),
           annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
         },
         async (args: any) => {
           const problem = needsToken();
           if (problem) return problem;
+          // Your own name, beside your peer id: never name, which is a SPACE's.
+          if (args.action === "set_name") {
+            if (typeof args.peer_name !== "string") {
+              return complain(
+                args.name !== undefined
+                  ? "INVALID_REQUEST. set_name takes your name in peer_name; name is a SPACE's name."
+                  : "INVALID_REQUEST. set_name needs peer_name: the name, or an empty string to clear it.",
+              );
+            }
+            return through("PUT", "/v1/me/name", { name: args.peer_name }, renderPeerName);
+          }
           if (args.action === "withdraw") {
             if (!args.request_id) return complain("INVALID_REQUEST. withdraw needs request_id.");
             return write("POST", `/v1/requests/${encodeURIComponent(args.request_id)}/withdraw`, {});
