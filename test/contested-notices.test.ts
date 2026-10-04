@@ -7,7 +7,7 @@
 import { test, before, describe } from "node:test";
 import assert from "node:assert/strict";
 import postgres from "postgres";
-import { useService, fixture, call, agent, db, type Agent, type Reply } from "./lib/service.ts";
+import { useService, fixture, call, send, app, agent, db, type Agent, type Reply } from "./lib/service.ts";
 import { SUPERUSER } from "./bootstrap.ts";
 import { FINDING_LIMITS } from "../src/surface/vocabulary.ts";
 import { SHARED } from "../src/http/ratelimit.ts";
@@ -527,6 +527,47 @@ describe("a member's warn or fail", () => {
       const within = key.startsWith("dm:") ? 0.01 : 0.5;
       assert.ok(Math.abs(Number(row!.tokens) - (refilled - total)) < within, `${key}: ${row!.tokens}, expected ${refilled - total}`);
     }
+  });
+});
+
+describe("the bytes of a cause", () => {
+  /** The raw JSON text of the array after `"contested":` that follows `post_id`'s item in `text`. */
+  function causesIn(text: string, postId: string): string {
+    const from = text.indexOf(`"post_id":"${postId}"`);
+    assert.ok(from >= 0, `no item for ${postId}`);
+    const start = text.indexOf(`"contested":[`, from) + `"contested":`.length;
+    let depth = 0;
+    for (let i = start; i < text.length; i++) {
+      if (text[i] === "[") depth++;
+      if (text[i] === "]" && --depth === 0) return text.slice(start, i + 1);
+    }
+    assert.fail("an unclosed contested array");
+  }
+  const rawText = async (path: string, who: Agent | null) => {
+    const res = await send(app, "GET", path, who?.token);
+    assert.equal(res.status, 200);
+    return res.text();
+  };
+
+  test("18: the list and the mailbox send each cause's keys in the spec's order: cause, on, task, by, post, title, then reason", async () => {
+    const { owner, doer, checker, other, name } = await crew();
+    const number = await task(owner, name);
+    const r = await posted(doer, name, { kind: "result", body: "Row 4 reads TA." });
+    await done(doer, name, number, r.post_id);
+    const f = await posted(other, name, finding({ sources: [r.seq] }));
+    const check = await posted(checker, name, { kind: "obs", body: "Check of task 1.", reply_to: r.post_id });
+    await ok(call("POST", `/v1/spaces/${name}/tasks/${number}/reject`, checker.token, { reason: REASON, post_id: check.post_id }));
+    const w = await posted(owner, name, warn([r.seq]));
+
+    const rejected = (extra: string) =>
+      `{"cause":"rejected","on":"${r.seq}","task":${number},"by":"${checker.peerId}","post":"${check.seq}"${extra}}`;
+    const warned = `{"cause":"warn","on":"${r.seq}","by":"${owner.peerId}","post":"${w.seq}","title":"Row 4 reads TO, not TA"}`;
+    const listed = await rawText(`/v1/spaces/${name}/findings?limit=100`, null);
+    assert.equal(causesIn(listed, f.post_id), `[${rejected("")},${warned}]`);
+    const told = await rawText("/v1/mailbox?limit=200&reason=contested", other);
+    const newest = told.lastIndexOf(`"post_id":"${f.post_id}"`);
+    assert.ok(newest >= 0, "a contested item for the finding");
+    assert.equal(causesIn(told.slice(newest), f.post_id), `[${rejected(`,"reason":"${REASON}"`)},${warned}]`);
   });
 });
 

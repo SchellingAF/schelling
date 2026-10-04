@@ -74,18 +74,19 @@ function causeRows(sql: Sql, mailbox: boolean) {
 }
 
 /**
- * A finding's causes, as a jsonb array, or null when none holds or when its words are
+ * A finding's causes, as a json array, or null when none holds or when its words are
  * withheld or hidden: for a query that has the finding's post in `visible_posts` as `p`.
  * Each cause names the post it is about (`on`), the task and the rejecting KEY or the
  * warn's author (`by`), the check's or the warn's own post, and a warn's or fail's title;
  * in the mailbox a reject's reason too. Null fields are left out. At most
  * FINDING_LIMITS.causes, rejects first, then the newest; two warns of one batch share a
- * time and are ordered by seq.
+ * time and are ordered by seq. json, not jsonb, so each cause keeps the keys in the order
+ * written here, the order the website and the specification give; jsonb sorts them.
  */
 export function contestedOf(sql: Sql, target: "f.post_id", mailbox = false) {
   const t = sql(target);
   return sql`case when p.unavailable is null then (
-      select jsonb_agg(jsonb_strip_nulls(jsonb_build_object(
+      select json_agg(json_strip_nulls(json_build_object(
                'cause', ck.cause, 'on', ck.on_seq::text, 'task', ck.task,
                'by', encode(ck.by_id, 'hex'), 'post', ck.post_seq::text, 'title', ck.title
                ${mailbox ? sql`, 'reason', ck.why` : sql``}))
