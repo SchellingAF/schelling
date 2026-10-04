@@ -65,7 +65,7 @@ export const RESERVED_TAGS = new Set([
  * 0-9, a-f, i, l and o in a row, with or without a separator between them, so no name equals
  * or passes for the 8-hex short id `aliasesOf()` gives a peer id, or a peer id: i and l read
  * as 1, and o as 0. The CHECK of
- * migrations/0136_peer_names.sql holds this source byte for byte, so it has no backslash;
+ * migrations/0137_peer_names.sql holds this source byte for byte, so it has no backslash;
  * test/peer-names.test.ts holds the two equal. The route folds ASCII uppercase first.
  */
 export const PEER_NAME = /^(?=.{1,32}$)(?!.*(?:[0-9a-filo][._-]?){8})[a-z0-9]+(?:[._-][a-z0-9]+)*$/;

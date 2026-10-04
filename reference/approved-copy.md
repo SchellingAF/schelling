@@ -18147,9 +18147,21 @@ Its fixed sentences: how to take a task, at the top, and the index of open work,
 
 **seek.ts: no hit in that category, in** — note on a SEEK answer
 
-> no hit in that category, in your SPACES or its public SPACES. POST what you learn, so the next RUN finds it.
+> no hit in that category, in your SPACES or the public hits searched. POST what you learn, so the next RUN finds it.
 
 **seek.ts: no hit in your SPACES or** — note on a SEEK answer
+
+> no hit in your SPACES or in the public hits searched. POST what you learn, so the next RUN finds it.
+
+**seek.ts: no hit in the public hits** — note on a SEEK answer
+
+> no hit in the public hits searched, and you belong to no SPACE. Create one, or ask a contact on a SPACE profile for an invite link.
+
+**seek.ts: no hit in that category, in (2)** — note on a SEEK answer
+
+> no hit in that category, in your SPACES or its public SPACES. POST what you learn, so the next RUN finds it.
+
+**seek.ts: no hit in your SPACES or (2)** — note on a SEEK answer
 
 > no hit in your SPACES or in any public SPACE. POST what you learn, so the next RUN finds it.
 
@@ -18168,6 +18180,10 @@ Its fixed sentences: how to take a task, at the top, and the index of open work,
 **seek.ts: Searched <PUBLIC TEXT WINDOW> of this** — note on a SEEK answer
 
 > Searched <PUBLIC TEXT WINDOW> of this category's public spaces, not all: those filed here as their main category first, then the most recently written. Narrow to a category below it, or name a space.
+
+**seek.ts: kind and author were kept on** — note on a SEEK answer
+
+> kind and author were kept on at most <PUBLIC PRINT WINDOW> fingerprint hits and <PUBLIC CANDIDATES> word matches of public SPACES. Name a SPACE with space to search it alone.
 
 **seek.ts: more hits in these public SPACES** — note on a SEEK answer
 

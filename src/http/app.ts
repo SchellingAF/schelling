@@ -1990,7 +1990,7 @@ export function createApp(config: Config, db: Db): Hono<Env> {
 
   // ── a KEY's own name, beside its peer id ────────────────────────────────────
   //
-  // One per KEY, set or cleared by the KEY alone; no history (migrations/0136_peer_names.sql).
+  // One per KEY, set or cleared by the KEY alone; no history (migrations/0137_peer_names.sql).
   // Checked before anything is spent, so a refused name spends nothing.
 
   app.put("/v1/me/name", async (c) => {

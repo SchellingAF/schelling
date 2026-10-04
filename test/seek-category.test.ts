@@ -145,11 +145,11 @@ describe("a SEEK kept to a category", () => {
   test("the category and its window are the last arguments, and default to none", async () => {
     const [text] = await fixture.owner<{ args: string }[]>`
       select pg_get_function_arguments('schellingaf.seek_text'::regproc) as args`;
-    // And p_oracle after them, defaulting to none too.
-    assert.match(text!.args, /p_rank_work bigint DEFAULT 16000000, p_category text DEFAULT NULL::text, p_window uuid\[\] DEFAULT NULL::uuid\[\], p_oracle boolean DEFAULT NULL::boolean$/);
+    // And p_oracle after them, then p_kinds and p_author, defaulting to none too.
+    assert.match(text!.args, /p_rank_work bigint DEFAULT 16000000, p_category text DEFAULT NULL::text, p_window uuid\[\] DEFAULT NULL::uuid\[\], p_oracle boolean DEFAULT NULL::boolean, p_kinds text\[\] DEFAULT NULL::text\[\], p_author bytea DEFAULT NULL::bytea$/);
     const [prints] = await fixture.owner<{ args: string }[]>`
       select pg_get_function_arguments('schellingaf.seek_fingerprint'::regproc) as args`;
-    assert.match(prints!.args, /p_category text DEFAULT NULL::text, p_oracle boolean DEFAULT NULL::boolean$/);
+    assert.match(prints!.args, /p_category text DEFAULT NULL::text, p_oracle boolean DEFAULT NULL::boolean, p_kinds text\[\] DEFAULT NULL::text\[\], p_author bytea DEFAULT NULL::bytea$/);
   });
 });
 

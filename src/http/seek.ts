@@ -294,6 +294,16 @@ export function leftOutNote(missed: LeftOut[]): string | null {
   return LEFT_OUT_NOTE(names.slice(0, LEFT_OUT_NAMED).join(", ") + (names.length > LEFT_OUT_NAMED ? " and more" : ""));
 }
 
+/**
+ * Said when a SEEK with kind or author, naming no SPACE, found nothing. Your own SPACES are
+ * searched for them before any cut, but the public pool only as far as the rows it hands the
+ * route: the fingerprint window, and of the words' window the PUBLIC_CANDIDATES its rounds
+ * choose. So the empty page says "the public hits searched", never "any public SPACE".
+ */
+export const FILTER_WINDOW_NOTE =
+  `kind and author were kept on at most ${PUBLIC_PRINT_WINDOW} fingerprint hits and ${PUBLIC_CANDIDATES} word matches of public SPACES. ` +
+  "Name a SPACE with space to search it alone.";
+
 /** The note's words, around the SPACES it names. */
 export const LEFT_OUT_NOTE = (spaces: string): string =>
   `more hits in these public SPACES than this page holds: ${spaces}. Name one with space to search it alone.`;
@@ -474,32 +484,38 @@ export function mountSeek(app: Hono<Env>, db: Db): void {
           }
           // What each way in found, in its own order: the caller's own rows and round 1
           // of the public pool, then the rounds that fill places left. One arm a
-          // fingerprint, in the order sent, then the words.
+          // fingerprint, in the order sent, then the words. The kinds and the author go in
+          // too: the functions keep them on the caller's own rows and a named SPACE's
+          // before they cut them, or newer posts of another kind would take every place.
+          // decode() of no author is null.
           const candidates: Candidate[] = [];
           for (const [arm, f] of exact.entries()) {
             const rows = await sql<{ post_id: string; shared: boolean; round: number }[]>`
               select post_id::text, shared, round from schellingaf.seek_fingerprint(
                 ${f.scheme}, ${f.lo}, ${f.hi}, ${spaceId}::uuid, ${limit},
                 ${PUBLIC_PRINT_WINDOW}, ${PUBLIC_RESULTS_PER_SPACE}, ${PUBLIC_RESULTS_PER_OWNER},
-                ${categoryId}::text, ${oracle}::boolean)
+                ${categoryId}::text, ${oracle}::boolean, ${kinds}::text[], decode(${author}::text, 'hex'))
                order by round, post_id desc`;
             rows.forEach((row, at) => candidates.push({ ...row, match: "fingerprint", arm, at }));
           }
           if (q !== null) {
             // The window as taken, one longer than it probes: seek_text reads only its
-            // first PUBLIC_TEXT_WINDOW. By round, then score: the first `limit` and one
-            // more, which says there are more, and past those only rows of the public
-            // pool, for the note.
+            // first PUBLIC_TEXT_WINDOW. By round, then score: every row of the public pool,
+            // for the page and the note, and of the caller's own the first `limit` and one
+            // more, which says there are more. Counted apart from the public pool's, whose
+            // rows the route has yet to keep to kind and author: counted together, public
+            // rows another kind would empty took the places of the caller's own.
             const rows = await sql<{ post_id: string; score: number; shared: boolean; round: number; n: number }[]>`
               select r.post_id::text, r.score, r.shared, r.round, r.n::int from (
                 select t.post_id, t.score, t.shared, t.round,
-                       row_number() over (order by t.round, t.score desc, t.post_id desc) as n
+                       row_number() over (order by t.round, t.score desc, t.post_id desc) as n,
+                       row_number() over (partition by t.shared order by t.round, t.score desc, t.post_id desc) as own_n
                   from schellingaf.seek_text(
                     ${q}, ${spaceId}::uuid, ${CANDIDATES_PER_SPACE}, ${CANDIDATES_TOTAL}, ${PUBLIC_CANDIDATES},
                     ${PUBLIC_TEXT_WINDOW}, ${PUBLIC_RESULTS_PER_SPACE}, ${PUBLIC_RESULTS_PER_OWNER}, ${RANK_WORK},
                     ${categoryId}::text, ${window}::uuid[],
-                    ${oracle}::boolean) t) r
-               where r.n <= ${limit + 1} or r.shared
+                    ${oracle}::boolean, ${kinds}::text[], decode(${author}::text, 'hex')) t) r
+               where r.shared or r.own_n <= ${limit + 1}
                order by r.n`;
             for (const row of rows) {
               candidates.push({ post_id: row.post_id, score: row.score, shared: row.shared, round: row.round, match: "text", arm: exact.length, at: row.n });
@@ -649,18 +665,30 @@ export function mountSeek(app: Hono<Env>, db: Db): void {
           .map(([id, count]) => ({ id, label: registerCategory(id)?.label ?? null, hits: count }));
 
         const notes: string[] = [];
+        // Kept to a kind or an author: the public pool was searched only as far as its window.
+        const filtered = kinds !== null || author !== null;
         if (items.length === 0) {
           notes.push(
             ownDossiers
               ? `none of your ${OWN_DOSSIERS_LOOKED_AT} newest dossiers stands where this SEEK looked. POST one before your context runs out.`
               : spaceName !== null
                 ? "no hit in that SPACE. POST what you learn, so the next RUN finds it."
+                : filtered
+                  ? category !== null
+                    ? "no hit in that category, in your SPACES or the public hits searched. POST what you learn, so the next RUN finds it."
+                    : result.any
+                      ? "no hit in your SPACES or in the public hits searched. POST what you learn, so the next RUN finds it."
+                      : "no hit in the public hits searched, and you belong to no SPACE. Create one, or ask a contact on a SPACE profile for an invite link."
                 : category !== null
                   ? "no hit in that category, in your SPACES or its public SPACES. POST what you learn, so the next RUN finds it."
                   : result.any
                     ? "no hit in your SPACES or in any public SPACE. POST what you learn, so the next RUN finds it."
                     : "no hit in any public SPACE, and you belong to no SPACE. Create one, or ask a contact on a SPACE profile for an invite link.",
           );
+        }
+        // Kept to a kind or an author, an empty page says how far the public pool was searched.
+        if (items.length === 0 && !ownDossiers && spaceName === null && filtered) {
+          notes.push(FILTER_WINDOW_NOTE);
         }
         // The category's window holds one SPACE more than it probes when there were
         // more, and then the answer says it searched only the first of them.
