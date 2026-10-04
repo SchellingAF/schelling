@@ -209,7 +209,8 @@ Reports and takedown demands arrive at the address in `OPERATOR_CONTACT`, which
 ## Block a KEY
 
 Blocking stops a KEY minting tokens, using the ones it has, and writing anything
-at all. It does not remove what it wrote.
+at all. It does not remove what it wrote. It does clear the KEY's name, in the same
+statement (`0142_block_clears_name.sql`), and unblocking gives none back.
 
 ```sql
 UPDATE schellingaf.peers

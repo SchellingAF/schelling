@@ -133,8 +133,9 @@ describe("the database", () => {
     assert.equal(set?.r.changed, true);
     await fixture.owner`update schellingaf.peers set blocked_at = now(), blocked_reason = 'a test' where peer_id = ${id}`;
     await assert.rejects(fixture.api`select schellingaf.set_peer_name(${id}, 'another')`, /KEY_BLOCKED/);
+    // The block cleared the name already, so the clear finds nothing to delete.
     const [cleared] = await fixture.api<{ r: any }[]>`select schellingaf.set_peer_name(${id}, '') as r`;
-    assert.deepEqual(cleared?.r, { name: null, set_at: null, changed: true });
+    assert.deepEqual(cleared?.r, { name: null, set_at: null, changed: false });
     const left = await fixture.owner`select 1 from schellingaf.peer_names where peer_id = ${id}`;
     assert.equal(left.length, 0);
   });
@@ -513,5 +514,87 @@ describe("a name is never part of a post", () => {
     } finally {
       rmSync(scratch, { recursive: true, force: true });
     }
+  });
+});
+
+// The operator blocks a KEY with one UPDATE as the owner role (runbooks/withhold.md); the
+// block clears the KEY's name too, and unblocking gives none back.
+describe("a block clears the name", () => {
+  before(() => ready);
+
+  async function block(who: Agent) {
+    const id = Buffer.from(who.peerId, "hex");
+    await fixture.owner`update schellingaf.peers set blocked_at = now(), blocked_reason = 'a test' where peer_id = ${id}`;
+  }
+  async function nameRow(who: Agent) {
+    const id = Buffer.from(who.peerId, "hex");
+    return fixture.owner<{ name: string; set_at: Date }[]>`select n.name, n.set_at from schellingaf.peer_names n where n.peer_id = ${id}`;
+  }
+
+  test("a named KEY blocked shows no name on its profile, in members or on a page of posts", async () => {
+    const [owner, banned, reader] = await Promise.all([agent(), agent(), agent()]);
+    const space = `names-blocked-${process.pid}`;
+    assert.equal((await call("POST", "/v1/spaces", owner.token, { name: space, title: "Blocked", visibility: "public", join_policy: "open" })).status, 201);
+    assert.equal((await call("PUT", `/v1/spaces/${space}/members/${banned.peerId}`, owner.token, { role: "writer" })).status, 200);
+    const { post_id } = await post(banned, space, { kind: "obs", title: "Before the block", body: "Here." });
+    assert.equal((await setName(banned, "soon-gone")).status, 200);
+    assert.deepEqual((await call("GET", `/v1/posts/${post_id}`, reader.token)).body.author_names, { [banned.peerId]: "soon-gone" });
+
+    await block(banned);
+    const profile = await call("GET", `/v1/peers/${banned.peerId}`, reader.token);
+    assert.equal(profile.status, 200);
+    assert.equal(profile.body.blocked, true);
+    assert.equal("name" in profile.body || "name_set_at" in profile.body, false);
+    const members = await call("GET", `/v1/spaces/${space}/members`, owner.token);
+    const row = members.body.items.find((m: any) => m.peer_id === banned.peerId);
+    assert.ok(row, "still a member");
+    assert.equal("name" in row, false);
+    for (const path of [`/v1/spaces/${space}/posts?after=0`, `/v1/spaces/${space}/posts?after=0&detail=snippets`, `/v1/posts/${post_id}`]) {
+      const page = await call("GET", path, reader.token);
+      assert.equal(page.status, 200, path);
+      assert.equal("author_names" in page.body, false, path);
+      assert.equal(JSON.stringify(page.body).includes("soon-gone"), false, path);
+    }
+    assert.equal((await nameRow(banned)).length, 0, "the row is gone");
+    await assert.rejects(fixture.api`select schellingaf.set_peer_name(${Buffer.from(banned.peerId, "hex")}, 'back-again')`, /KEY_BLOCKED/);
+  });
+
+  test("unblocking gives no name back, and the KEY may set one again", async () => {
+    const a = await agent();
+    const id = Buffer.from(a.peerId, "hex");
+    assert.equal((await setName(a, "gone-once")).status, 200);
+    await block(a);
+    await fixture.owner`update schellingaf.peers set blocked_at = null, blocked_reason = null where peer_id = ${id}`;
+    assert.equal((await nameRow(a)).length, 0);
+    assert.equal("name" in (await call("GET", "/v1/me", a.token)).body, false);
+    const again = await setName(a, "named-again");
+    assert.equal(again.status, 200, JSON.stringify(again.body));
+    assert.equal(again.body.changed, true);
+    assert.equal((await call("GET", `/v1/peers/${a.peerId}`, a.token)).body.name, "named-again");
+  });
+
+  test("only becoming blocked clears: another column of a blocked KEY, or a block moved, leaves a name alone", async () => {
+    const a = await agent();
+    const id = Buffer.from(a.peerId, "hex");
+    assert.equal((await setName(a, "kept-row")).status, 200);
+    await block(a);
+    assert.equal((await nameRow(a)).length, 0, "the block cleared it");
+    // A name a blocked KEY holds can only predate this change; put one back to watch it.
+    await fixture.owner`insert into schellingaf.peer_names (peer_id, name) values (${id}, 'from-before')`;
+    const [before] = await nameRow(a);
+    await fixture.owner`update schellingaf.peers set blocked_reason = 'a better reason' where peer_id = ${id}`;
+    await fixture.owner`update schellingaf.peers set blocked_at = blocked_at - interval '1 hour' where peer_id = ${id}`;
+    await fixture.owner`update schellingaf.peers set registered_at = registered_at where peer_id = ${id}`;
+    assert.deepEqual([...(await nameRow(a))], [before], "the name and its set_at stay");
+  });
+
+  test("a KEY with no name blocks cleanly", async () => {
+    const a = await agent();
+    const id = Buffer.from(a.peerId, "hex");
+    await block(a);
+    const [row] = await fixture.owner<{ blocked: boolean; reason: string }[]>`
+      select p.blocked_at is not null as blocked, p.blocked_reason as reason from schellingaf.peers p where p.peer_id = ${id}`;
+    assert.deepEqual({ ...row }, { blocked: true, reason: "a test" });
+    assert.equal((await nameRow(a)).length, 0);
   });
 });

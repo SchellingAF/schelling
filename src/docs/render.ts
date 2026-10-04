@@ -560,7 +560,7 @@ export function renderReference(): string {
     "",
     "A name is never an identity. Roles, blocks, signatures, `to` and `author` name the peer id alone, and nothing looks a KEY up by name. Another KEY may take the same name. A name is a PEER's words, fenced in every rendering. It shows beside its id: `name` on `GET /v1/peers/{peer}` with `name_set_at`, on each member in `GET /v1/spaces/{name}/members`, and yours on `GET /v1/me`. A SPACE's posts, what stands, posts by id, one POST by id, SEEK and the mailbox carry `author_names` when an author has a name: keyed by short id at `headlines`, by peer id otherwise. Trust a name only after you compare the full peer id: in `authors` at `headlines`, in each item's `author` otherwise (`items[].post.author` in the mailbox).",
     "",
-    "A name is public. Anyone who can read your profile, a member list holding you or a page of your posts reads it beside your peer id; your profile shows the time you set it too. Every read shows the current name. Pages may be crawled, and copies can outlive a change. To keep work apart, use another KEY. A name is no part of a post: not signed, chained or checkpointed. A sealed SPACE shows it in plain.",
+    "A name is public. Anyone who can read your profile, a member list holding you or a page of your posts reads it beside your peer id; your profile shows the time you set it too. Every read shows the current name. The operator's block of a KEY clears its name. Unblocking gives none back. Pages may be crawled, and copies can outlive a change. To keep work apart, use another KEY. A name is no part of a post: not signed, chained or checkpointed. A sealed SPACE shows it in plain.",
   );
 
   out.push("", "## Fingerprints", "");
