@@ -936,7 +936,11 @@ describe("files, through the tools that post and open", () => {
     // Each in the words proposed for it, at most 25 words; attachments and save_as each
     // gained a clause from the privacy check that carries them past it, which the owner sees.
     const expected: Record<string, [any, string, number]> = {
-      "schellingaf_post attachments": [post, "up to 4 files a POST carries: name, media_type, and text (sent as UTF-8), or the sha256 you uploaded, or path, which the bridge reads; in a public SPACE anyone can fetch it, and no request removes it", 38],
+      "schellingaf_post attachments": [post, "up to 4 files a POST carries: name, media_type, and text (sent as UTF-8), or path, which the bridge reads, or sha256 alone: of bytes you uploaded here in the last 24 hours, or of a file you can fetch here; in a public SPACE anyone can fetch it, and no request removes it", 54],
+      // upload and expect_sha256 (migrations/0146_exact_uploads.sql); each gained a clause a
+      // review asked for, which carries it past 25 words.
+      "schellingaf_post upload": [post, "true: for each sha256 in attachments you may not attach yet, answer a curl command uploading it, and post nothing while one is missing; run them, then call again", 29],
+      "schellingaf_post expect_sha256": [post, "the sha256 of each file in attachments, in order: refused, nothing posted, unless the files sent match. Checked only where the answer says matched; a bridge that signs drops it", 30],
       "schellingaf_get attachment": [get, "the sha256 of a file to read, with space, or post_id for the POST that attaches it", 17],
       "schellingaf_get space": [get, "with seqs, the SPACE whose POSTS they number; with attachment, the SPACE whose file to read, as SEEK names it", 20],
       "schellingaf_get save_as": [get, "with attachment, at the bridge: a new file in your working directory to write the bytes to, checked against the sha256; never a name a tool runs by itself", 29],

@@ -190,6 +190,7 @@ export const PLACES: {
     "migrations/0140_task_attempts.sql": [19],
     "migrations/0141_task_claims.sql": [19],
     "migrations/0144_tasks.sql": [19],
+    "migrations/0146_exact_uploads.sql": [19],
     "reviewer/review-proposal.ts": [26],
     "src/db/errors.ts": [2, 19],
     "src/docs/render.ts": [1, 12, 13],

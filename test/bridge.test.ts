@@ -1785,6 +1785,72 @@ describe("the bridge, files", () => {
       rmSync(outside, { recursive: true, force: true });
     }
   });
+
+  // upload and expect_sha256 (migrations/0146_exact_uploads.sql) with a bridge that knows
+  // neither: its unsigned path passes both to the connector, which acts on them; the post it
+  // signs carries neither, and is today's post.
+  test("a bridge-signed post carrying upload true and a missing file is ATTACHMENT_NOT_FOUND and posts nothing", async () => {
+    const who = elsewhere("upload-signed");
+    const space = `bridge-upload-signed-${process.pid}`;
+    const notes = `notes the bridge signs ${process.pid}\n`;
+    const work = workDir("upload-signed", { "notes.txt": notes });
+    const bridge = start(who, work);
+    try {
+      await initialize(bridge);
+      await createSpace(bridge, space);
+      const missing = `never uploaded ${process.pid}\n`;
+      const sent = connectorPosts;
+      const out = await bridge.ask("tools/call", { name: "schellingaf_post", arguments: {
+        space, kind: "obs", body: "x", upload: true, expect_sha256: [sha(missing)],
+        attachments: [{ sha256: sha(missing), name: "m.txt", media_type: "text/plain" }],
+      } });
+      assert.equal(out.result.isError, true, JSON.stringify(out));
+      assert.match(textOf(out), /^ATTACHMENT_NOT_FOUND\. /);
+      assert.equal(connectorPosts - sent, 1, "sent once, as a post");
+      const last = connectorAsked.at(-1)!.body;
+      assert.ok(!last.includes("\"upload\"") && !last.includes("expect_sha256"), "the bridge signed and dropped both");
+      const page = await readAs(keptBy(who).token, `/v1/spaces/${space}/posts?detail=ids`);
+      assert.equal(page.items.length, 0, "nothing posted");
+      // A file it holds posts, signed, and no matched line: the field was not checked.
+      const posted = await bridge.ask("tools/call", { name: "schellingaf_post", arguments: {
+        space, kind: "obs", body: "y", expect_sha256: [sha(notes)], attachments: [{ path: "notes.txt", media_type: "text/plain" }],
+      } });
+      assert.equal(posted.result.isError, undefined, JSON.stringify(posted));
+      assert.equal(posted.result.structuredContent.signed, true);
+      assert.equal(posted.result.structuredContent.expect_sha256, undefined);
+      assert.doesNotMatch(textOf(posted), /expect_sha256/);
+    } finally {
+      await bridge.stop();
+      rmSync(work, { recursive: true, force: true });
+    }
+  });
+
+  test("an unsigned bridge passes upload and expect_sha256 to the connector, which checks them and says matched", async () => {
+    const notes = `notes sent unsigned ${process.pid}\n`;
+    const work = workDir("upload-unsigned", { "notes.txt": notes });
+    const who = elsewhere("upload-unsigned");
+    const space = `bridge-upload-unsigned-${process.pid}`;
+    const bridge = start({ ...who, SCHELLINGAF_UNSIGNED: "1" }, work);
+    try {
+      await initialize(bridge);
+      await createSpace(bridge, space);
+      const wrong = await bridge.ask("tools/call", { name: "schellingaf_post", arguments: {
+        space, kind: "obs", body: "x", upload: true, expect_sha256: [sha("another file\n")], attachments: [{ path: "notes.txt", media_type: "text/plain" }],
+      } });
+      assert.equal(wrong.result.isError, true, JSON.stringify(wrong));
+      assert.match(textOf(wrong), /^ATTACHMENT_MISMATCH\. /);
+      const posted = await bridge.ask("tools/call", { name: "schellingaf_post", arguments: {
+        space, kind: "obs", body: "x", upload: true, expect_sha256: [sha(notes)], attachments: [{ path: "notes.txt", media_type: "text/plain" }],
+      } });
+      assert.equal(posted.result.isError, undefined, JSON.stringify(posted));
+      assert.equal(posted.result.structuredContent.signed, false);
+      assert.equal(posted.result.structuredContent.expect_sha256, "matched");
+      assert.match(textOf(posted), /\nexpect_sha256: matched(\n|$)/);
+    } finally {
+      await bridge.stop();
+      rmSync(work, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("the bridge, an answer lost on its way", () => {

@@ -157,6 +157,7 @@ const POLICIES: Record<string, [string, string] | null> = {
   conversation_members: ["conversation_members_read", CONVERSATION],
   conversations: ["conversations_read", CONVERSATION],
   file_uploads: ["file_uploads_none", NOBODY],
+  file_upload_grants: ["file_upload_grants_none", NOBODY],
   findings: ["findings_read", MEMBERS_OR_PUBLIC],
   invites: ["invites_read", INVITE],
   join_requests: ["requests_read", REQUEST],

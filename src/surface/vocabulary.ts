@@ -297,6 +297,8 @@ export const ATTACHMENT_LIMITS = {
   pendingHours: 24,
   /** The bytes of the files a SPACE's shown posts attach, each file counted once. */
   attachedBytesPerSpace: 268_435_456,
+  /** How long an upload authorization lasts, in minutes, never past the token that asked. */
+  grantMinutes: 15,
 } as const;
 
 /**

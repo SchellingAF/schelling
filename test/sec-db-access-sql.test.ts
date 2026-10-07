@@ -539,6 +539,11 @@ const NEITHER: Record<string, string> = {
   advance_passkey: "moves a passkey's counter forward after the route has verified an assertion; it only ever raises it",
   oauth_redeem: "the authorization code is the credential: single use, bound to its client and redirect",
   look_invite: "the invite code is the credential: it says what its link admits to whoever holds it",
+  // Upload authorizations (0146): the authorization's secret is the credential, kept as its
+  // hash; each answers or spends only the row that hash names, for the KEY that asked for it.
+  upload_grant: "the upload authorization is the credential: it says whose it is, for the file PUT that presents it",
+  put_file_granted: "the upload authorization is the credential: it stores its one file as the KEY whose token asked for it",
+  spend_upload_grant: "the upload authorization is the credential: a body that did not match its address spends it",
   // What is public by design.
   space_is_public: "answers whether a SPACE is public",
   space_contacts: "a SPACE's owner and admins are public, so a stranger can ask to join",

@@ -36,7 +36,7 @@ import { referenceParts, renderPrimer, tokens } from "../src/docs/render.ts";
 import { PROMPTS } from "../src/mcp/prompts.ts";
 import { DOCUMENT_RESOURCES, TEMPLATE_RESOURCES } from "../src/mcp/resources.ts";
 import { INSTRUCTIONS, serverIdentity } from "../src/mcp/server.ts";
-import { DRY_RUN_HINT_SECOND_LINE, DRY_RUN_STAGE_HINT, DRY_RUN_TITLE_HINT_LINE, DRY_RUN_VERSION_TITLE_HINT_LINE, HINT_FIRST_LINE, HINT_SECOND_LINE, NOTHING_POSTED, POST_HINT_FIRST_LINE, POSTED_AS_WRITTEN, STAGE_HINT, TITLE_HINT_LINE, VERSION_TITLE_HINT_LINE } from "../src/domain/voice.ts";
+import { DRY_RUN_HINT_SECOND_LINE, DRY_RUN_STAGE_HINT, DRY_RUN_TITLE_HINT_LINE, DRY_RUN_VERSION_TITLE_HINT_LINE, HINT_FIRST_LINE, HINT_SECOND_LINE, NOTHING_POSTED, POST_HINT_FIRST_LINE, POSTED_AS_WRITTEN, STAGE_HINT, TITLE_HINT_LINE, VERSION_CHANGED_HINT_FIRST_LINE, VERSION_TITLE_HINT_LINE } from "../src/domain/voice.ts";
 import { HOW_TO_TAKE_A_TASK, INDEX_LINE } from "../src/http/openwork.ts";
 import { MORE_OPEN_WORK, NOTHING_OPEN } from "../src/mcp/render.ts";
 import { createApp } from "../src/http/app.ts";
@@ -356,6 +356,10 @@ export function faceReview(): string {
     "**hint after a POST, first line** — its title counted in bytes, over 120; otherwise as the first line above",
     "",
     `> ${POST_HINT_FIRST_LINE}`,
+    "",
+    "**hint after a version that supersedes one you can read, first line** — only the sentences on lines that version lacks are counted; otherwise as the first line above",
+    "",
+    `> ${VERSION_CHANGED_HINT_FIRST_LINE}`,
     "",
     "**hint after a POST whose title ran long** — said after the first line",
     "",

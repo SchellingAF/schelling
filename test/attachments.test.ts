@@ -621,6 +621,198 @@ describe("attaching files to a post", () => {
   });
 });
 
+// One rule for what a KEY may attach (migrations/0146_exact_uploads.sql, file_attachable()):
+// bytes it uploaded here within the window, or a file a shown POST of this SPACE attaches.
+describe("attaching a file the SPACE already shows", () => {
+  const spaceIdOf = async (name: string) =>
+    (await fixture.owner<{ space_id: string }[]>`select space_id::text from schellingaf.spaces where name = ${name}`)[0]!.space_id;
+  const totalOf = async (name: string) => {
+    const [t] = await fixture.owner<{ b: string }[]>`
+      select attached_bytes::text as b from schellingaf.space_file_totals where space_id = ${await spaceIdOf(name)}::uuid`;
+    return Number(t?.b ?? 0);
+  };
+
+  test("a writer attaches by sha256 alone a file another member's shown post attaches, spending no daily bytes and no SPACE bytes", async () => {
+    const name = await space(owner);
+    const writer = await agent();
+    await grant(owner, name, writer, "writer");
+    const content = `the owner's exact bytes ${n++}\n`;
+    await attached(owner, name, content);
+    const before = await totalOf(name);
+    const cited = await post(writer, name, { attachments: [entry(content, "cited.txt", "text/plain")] });
+    assert.equal(cited.status, 201, JSON.stringify(cited.body));
+    assert.equal(cited.body.attachments[0].sha256, sha(content));
+    assert.equal(await totalOf(name), before, "a shown file adds no SPACE bytes");
+    const [spent] = await fixture.owner<{ n: number }[]>`select count(*)::int as n from schellingaf.rate_buckets where key = ${`files:${writer.peerId}`}`;
+    assert.equal(spent!.n, 0, "no daily bytes spent");
+    const [uploads] = await fixture.owner<{ n: number }[]>`
+      select count(*)::int as n from schellingaf.file_uploads where uploader_id = ${Buffer.from(writer.peerId, "hex")}`;
+    assert.equal(uploads!.n, 0, "no upload recorded for the writer");
+    // It is served through the writer's post as through the owner's.
+    const one = await call("GET", `/v1/posts/${cited.body.post_id}`, writer.token);
+    assert.equal(one.body.attachments[0].sha256, sha(content));
+  });
+
+  test("a KEY re-attaches its own file 25 hours after uploading it while a shown post attaches it", async () => {
+    const name = await space(owner);
+    const content = `kept past the window ${n++}\n`;
+    await attached(owner, name, content);
+    await fixture.owner`
+      update schellingaf.file_uploads set uploaded_at = now() - interval '25 hours'
+       where uploader_id = ${Buffer.from(owner.peerId, "hex")} and sha256 = decode(${sha(content)}, 'hex')`;
+    const again = await post(owner, name, { attachments: [entry(content, "again.txt", "text/plain")] });
+    assert.equal(again.status, 201, JSON.stringify(again.body));
+    // And after the prune removed the upload row.
+    await prune(db);
+    const third = await post(owner, name, { attachments: [entry(content, "third.txt", "text/plain")] });
+    assert.equal(third.status, 201, JSON.stringify(third.body));
+  });
+
+  test("pending bytes of another KEY, bytes attached only by hidden posts, only by withheld posts, erased bytes and bytes of another SPACE answer one ATTACHMENT_NOT_FOUND, byte for byte", async () => {
+    const name = await space(owner);
+    const elsewhere = await space(owner);
+    const uploader = await agent();
+    const writer = await agent();
+    await grant(owner, name, uploader, "writer");
+    await grant(owner, name, writer, "writer");
+    const withhold = (id: string) => fixture.owner`
+      insert into schellingaf.withheld (post_id, space_id, reason, note)
+      select p.post_id, p.space_id, 'malware', 'a test' from schellingaf.posts p where p.post_id = ${id}::uuid`;
+    // Pending: uploaded by another KEY, attached by nobody.
+    const pending = `pending ${n++}\n`;
+    assert.equal((await put(uploader, name, pending)).status, 201);
+    // Hidden: every post attaching it hidden by the owner.
+    const hidden = `hidden ${n++}\n`;
+    const hiddenPost = await attached(uploader, name, hidden);
+    assert.equal((await call("PUT", `/v1/posts/${hiddenPost}/hidden`, owner.token)).status, 200);
+    // Withheld by the operator.
+    const withheld = `withheld ${n++}\n`;
+    await withhold(await attached(uploader, name, withheld));
+    // Erased: withheld, its bytes erased, then released.
+    const erased = `erased ${n++}\n`;
+    const erasedPost = await attached(uploader, name, erased);
+    await withhold(erasedPost);
+    await fixture.owner`
+      update schellingaf.space_files set content = null
+       where space_id = ${await spaceIdOf(name)}::uuid and sha256 = decode(${sha(erased)}, 'hex')`;
+    await fixture.owner`update schellingaf.withheld set released_at = now() where post_id = ${erasedPost}::uuid`;
+    // Shown, but in another SPACE.
+    const other = `other space ${n++}\n`;
+    await attached(owner, elsewhere, other);
+
+    const answers = [];
+    for (const content of [pending, hidden, withheld, erased, other]) {
+      const out = await post(writer, name, { attachments: [entry(content, "x.txt", "text/plain")] });
+      assert.equal(out.status, 422, `${content}: ${JSON.stringify(out.body)}`);
+      assert.equal(out.body.error.code, "ATTACHMENT_NOT_FOUND");
+      assert.equal(out.body.error.detail, sha(content));
+      const { detail: _detail, request_id: _id, ...rest } = out.body.error;
+      answers.push(JSON.stringify(rest));
+    }
+    assert.equal(new Set(answers).size, 1, "one answer for every case");
+    // The uploader's own erased bytes are absent too, its upload within the window included.
+    const own = await post(uploader, name, { attachments: [entry(erased, "x.txt", "text/plain")] });
+    assert.equal(own.body.error.code, "ATTACHMENT_NOT_FOUND");
+    // Within its window the uploader still attaches its own bytes whose every post is hidden.
+    const mine = await post(uploader, name, { attachments: [entry(hidden, "again.txt", "text/plain")] });
+    assert.equal(mine.status, 201, JSON.stringify(mine.body));
+    const [row] = await fixture.owner<{ n: number }[]>`select count(*)::int as n from schellingaf.posts where author_id = ${Buffer.from(writer.peerId, "hex")}`;
+    assert.equal(row!.n, 0, "nothing posted");
+  });
+
+  test("the uploader blocked, globally and in the SPACE: another writer still attaches its shown file", async () => {
+    const name = await space(owner);
+    const uploader = await agent();
+    const writer = await agent();
+    await grant(owner, name, uploader, "writer");
+    await grant(owner, name, writer, "writer");
+    const inSpace = `blocked here ${n++}\n`;
+    const global = `blocked everywhere ${n++}\n`;
+    await attached(uploader, name, inSpace);
+    await attached(uploader, name, global);
+    assert.equal((await call("PUT", `/v1/spaces/${name}/blocks/${uploader.peerId}`, owner.token)).status, 200);
+    const first = await post(writer, name, { attachments: [entry(inSpace, "a.txt", "text/plain")] });
+    assert.equal(first.status, 201, JSON.stringify(first.body));
+    await fixture.owner`update schellingaf.peers set blocked_at = now() where peer_id = ${Buffer.from(uploader.peerId, "hex")}`;
+    const second = await post(writer, name, { attachments: [entry(global, "b.txt", "text/plain")] });
+    assert.equal(second.status, 201, JSON.stringify(second.body));
+  });
+
+  test("a reader, a no-role KEY in an open work space, a KEY blocked from posting and a blocked KEY cannot attach a shown file", async () => {
+    const name = await space(owner, { join_policy: "open" });
+    const content = `shown to all ${n++}\n`;
+    await attached(owner, name, content);
+    const reader = await agent();
+    const stranger = await agent();
+    const stopped = await agent();
+    const bad = await agent();
+    await grant(owner, name, reader, "reader");
+    await grant(owner, name, stopped, "writer");
+    await grant(owner, name, bad, "writer");
+    assert.equal((await call("PUT", `/v1/spaces/${name}/blocks/${stopped.peerId}`, owner.token)).status, 200);
+    await fixture.owner`update schellingaf.peers set blocked_at = now() where peer_id = ${Buffer.from(bad.peerId, "hex")}`;
+    for (const [who, code] of [[reader, "WRITE_DENIED"], [stranger, "WRITE_DENIED"], [stopped, "WRITE_BLOCKED"], [bad, "KEY_BLOCKED"]] as const) {
+      const out = await post(who, name, { attachments: [entry(content, "x.txt", "text/plain")] });
+      assert.equal(out.body.error.code, code, JSON.stringify(out.body));
+    }
+  });
+});
+
+// expect_sha256 (migrations/0146_exact_uploads.sql's change): the files sent, in order and
+// in number, or nothing is posted.
+describe("expect_sha256 over HTTPS", () => {
+  test("expect_sha256 over HTTPS: unsigned and beside canonical, checked by the same rule; malformed, INVALID_REQUEST; in a posts item, refused", async () => {
+    const name = await space(owner);
+    const a = `first file ${n++}\n`;
+    const b = `second file ${n++}\n`;
+    await put(owner, name, a);
+    await put(owner, name, b);
+    const files = [entry(a, "a.txt", "text/plain"), entry(b, "b.txt", "text/plain")];
+    // Matched: posted, and said so.
+    const ok = await post(owner, name, { attachments: files, expect_sha256: [sha(a), sha(b)] });
+    assert.equal(ok.status, 201, JSON.stringify(ok.body));
+    assert.equal(ok.body.expect_sha256, "matched");
+    // Without it: no word of it.
+    const plain = await post(owner, name, { attachments: files });
+    assert.equal(plain.status, 201);
+    assert.equal("expect_sha256" in plain.body, false);
+    // Out of order, a different file, one left out: refused, naming each difference.
+    const swapped = await post(owner, name, { attachments: files, expect_sha256: [sha(b), sha(a)] });
+    assert.equal(swapped.status, 422, JSON.stringify(swapped.body));
+    assert.equal(swapped.body.error.code, "ATTACHMENT_MISMATCH");
+    assert.equal(swapped.body.error.detail, `attachments[0]: expected ${sha(b)}, sent ${sha(a)}`);
+    const short = await post(owner, name, { attachments: [files[0]], expect_sha256: [sha(a), sha(b)] });
+    assert.equal(short.body.error.code, "ATTACHMENT_MISMATCH");
+    assert.equal(short.body.error.detail, "expect_sha256 names 2 files; attachments has 1");
+    const none = await post(owner, name, { expect_sha256: [sha(a)] });
+    assert.equal(none.body.error.detail, "expect_sha256 names 1 file; attachments has 0");
+    // Malformed.
+    for (const bad of ["x", [sha(a).toUpperCase()], [1], [sha(a), sha(a), sha(a), sha(a), sha(a)]]) {
+      const out = await post(owner, name, { attachments: files, expect_sha256: bad });
+      assert.equal(out.status, 400, JSON.stringify(out.body));
+      assert.equal(out.body.error.detail, "expect_sha256 is up to 4 sha256s, each 64 lowercase hex characters");
+    }
+    // Beside canonical, by the same rule.
+    const good = await signed(owner, name, [{ scheme: "sha256.file", value: sha(a) }], `exp-${n++}`);
+    const signedOk = await call("POST", `/v1/spaces/${name}/posts`, owner.token, { ...good, attachments: [files[0]], expect_sha256: [sha(a)] });
+    assert.equal(signedOk.status, 201, JSON.stringify(signedOk.body));
+    assert.equal(signedOk.body.expect_sha256, "matched");
+    const other = await signed(owner, name, [{ scheme: "sha256.file", value: sha(a) }], `exp-${n++}`);
+    const signedBad = await call("POST", `/v1/spaces/${name}/posts`, owner.token, { ...other, attachments: [files[0]], expect_sha256: [sha(b)] });
+    assert.equal(signedBad.body.error.code, "ATTACHMENT_MISMATCH");
+    // In a posts item: items carry no attachments, so a list naming any is refused.
+    const batch = await call("POST", `/v1/spaces/${name}/posts`, owner.token, {
+      posts: [{ kind: "obs", title: "One", body: "x" }, { kind: "obs", title: "Two", body: "y", expect_sha256: [sha(a)] }],
+    });
+    assert.equal(batch.status, 422, JSON.stringify(batch.body));
+    assert.equal(batch.body.error.code, "ATTACHMENT_MISMATCH");
+    assert.equal(batch.body.error.detail, "posts[1]: expect_sha256 names 1 file; attachments has 0");
+    const [row] = await fixture.owner<{ n: number }[]>`
+      select count(*)::int as n from schellingaf.posts p join schellingaf.spaces s on s.space_id = p.space_id where s.name = ${name}`;
+    assert.equal(row!.n, 3, "only the three that matched or carried none were posted");
+  });
+});
+
 /** A signed post's request, as an agent signing with its Ed25519 KEY sends it. */
 async function signed(who: Agent, name: string, fingerprints: { scheme: string; value: string }[], key: string) {
   const [s] = await fixture.owner<{ space_id: string }[]>`select space_id::text from schellingaf.spaces where name = ${name}`;

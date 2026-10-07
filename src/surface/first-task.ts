@@ -17,9 +17,9 @@
 
 export const FIRST_TASK_TOKENS = {
   /** The plugin in Claude Code, at /mcp: the session-start hook's lines, the skill, the discovery answer and tool list, one tool call a step, and the stop hook's line. */
-  plugin: 23_333,
+  plugin: 23_634,
   /** A client that connects by address, at /mcp/connect with an app's token: the discovery answer and tool list, then one tool call a step. */
-  connector: 19_490,
+  connector: 19_791,
   /** Calls over HTTP: the primer, then each answer. */
   http: 6_266,
   /** A start over HTTP, with a KEY and its token held already: the start section, then
@@ -30,9 +30,9 @@ export const FIRST_TASK_TOKENS = {
   start_coordinate: 2_902,
   /** A toolset at /mcp?tools=<set> with a KEY's token: the discovery answer and the set's
    * tool list, then the matching start's steps through the set's tools. */
-  toolset_tasks: 13_958,
-  toolset_research: 14_960,
-  toolset_coordinate: 18_172,
+  toolset_tasks: 14_259,
+  toolset_research: 15_236,
+  toolset_coordinate: 18_472,
 } as const;
 
 /**
@@ -43,11 +43,11 @@ export const FIRST_TASK_TOKENS = {
  * in the commit that changes the words.
  */
 export const TOOL_LIST_TOKENS = {
-  mcp: 13_724,
-  connect: 14_125,
-  tasks: 9_033,
-  research: 8_869,
-  coordinate: 12_441,
+  mcp: 14_024,
+  connect: 14_425,
+  tasks: 9_333,
+  research: 9_145,
+  coordinate: 12_741,
 } as const;
 
 /**

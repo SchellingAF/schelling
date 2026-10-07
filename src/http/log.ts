@@ -615,7 +615,9 @@ export function requestLog(directory: string | null): MiddlewareHandler<Env> {
     // reads to see why, so it is written, within REFUSALS_PER_MINUTE.
     const refusal = c.get("appRefusal");
     const wrapper = c.get("atConnector") === true;
-    if (heads.length === 0 && returned === undefined && refusal === undefined && (wrapper || bearer?.state !== "valid")) {
+    // An upload authorization acts as its KEY at the file PUT, and is logged as that KEY.
+    const keyed = bearer?.state === "valid" || bearer?.state === "upload";
+    if (heads.length === 0 && returned === undefined && refusal === undefined && (wrapper || !keyed)) {
       // The bounded exception, for the two events a public read surface is
       // measured by: an anonymous read that found nothing, and an anonymous
       // refusal. They are counted here and written as one rollup line a minute
@@ -657,7 +659,7 @@ export function requestLog(directory: string | null): MiddlewareHandler<Env> {
       return;
     }
 
-    const peer = bearer?.state === "valid" ? bearer.peerId.toString("hex") : null;
+    const peer = bearer?.state === "valid" || bearer?.state === "upload" ? bearer.peerId.toString("hex") : null;
     const line = JSON.stringify({
       at: now.toISOString(),
       request_id: c.get("requestId"),

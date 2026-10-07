@@ -154,6 +154,18 @@ function wholeTask(c: Context<Env>): boolean {
   throw new ApiError("INVALID_REQUEST", { detail: "detail is compact or full" });
 }
 
+/**
+ * next's answer at detail=compact: the task without its body, and body_bytes, the body's
+ * UTF-8 size, in its place; the rest as it is. An upkeep task keeps its body: the service's
+ * brief, which this very call made, so the caller has never read it.
+ */
+function withoutBody<T extends { task: Record<string, unknown> | null }>(answer: T): T {
+  const task = answer.task;
+  if (task === null || typeof task.body !== "string" || typeof task.upkeep === "string") return answer;
+  const { body, ...rest } = task;
+  return { ...answer, task: { ...rest, body_bytes: Buffer.byteLength(body as string, "utf8") } };
+}
+
 /** The fields of one task that belong inside tasks when an add sends tasks. */
 const ONE_TASK_FIELDS = ["title", "body", "tag", "after", "key"] as const;
 
@@ -471,8 +483,11 @@ export function mountTasks(app: Hono<Env>, db: Db): void {
     // out a task's words, which nobody reads in a withheld SPACE: there it is not called,
     // nothing is taken, and next is refused as the list is, in the list's own words.
     const name = c.req.param("name");
+    // detail=compact leaves the task's body out (withoutBody()); any other detail is ignored,
+    // as it always was, and the task comes whole.
+    const compactAsked = c.req.query("detail") === "compact";
     try {
-      return c.json(await write(c, me.hex, true, (sql) => sql<Row[]>`
+      const out = await write(c, me.hex, true, (sql) => sql<Row[]>`
         with w as (select ${withheldNow(sql, name)} as withheld)
         select case when w.withheld then null
                     else schellingaf.next_job(${name}, ${me.peerId}, ${job}, ${tag}, ${number},
@@ -481,7 +496,8 @@ export function mountTasks(app: Hono<Env>, db: Db): void {
                                               ${TASK_LIMITS.notAcceptedPerSpace}, ${TASK_LIMITS.upkeep.documentGapHours},
                                               ${TASK_LIMITS.upkeep.reviewGapHours}, ${join}, ${TASK_LIMITS.claimants}) end as out,
                w.withheld
-          from w`));
+          from w`);
+      return c.json(compactAsked ? withoutBody(out) : out);
     } catch (error) {
       if (!(error instanceof WithheldSpace)) throw error;
       throw await db.readTx(me.hex, async (sql) => {

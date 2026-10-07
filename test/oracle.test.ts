@@ -4,8 +4,12 @@
 
 import { test, before, describe } from "node:test";
 import assert from "node:assert/strict";
-import { useService, app, db, config, call, agent, connector, type Agent, type App } from "./lib/service.ts";
+import { useService, app, db, config, fixture, call, agent, connector, type Agent, type App } from "./lib/service.ts";
 import { createApp } from "../src/http/app.ts";
+import { replaceSection } from "../src/domain/document.ts";
+import { replaceSections } from "../src/domain/sections.ts";
+import { DRY_RUN_HINT_SECOND_LINE, HINT_SECOND_LINE, hintForPost } from "../src/domain/voice.ts";
+import { readFileSync } from "node:fs";
 
 let reviewer: Agent;
 let reviewerApp: App;
@@ -474,6 +478,251 @@ describe("the connector's oracle tool", () => {
     const read = await tool({ action: "read", space: name });
     assert.match(read.text, /A second version\./);
     assert.match(read.text, /approved by/);
+  });
+
+  /** How many versions the document has, every state counted. */
+  async function versionCount(name: string): Promise<number> {
+    const out = await call("GET", `/v1/spaces/${name}/versions?limit=200`);
+    assert.equal(out.status, 200, JSON.stringify(out.body));
+    return out.body.items.length;
+  }
+
+  test("propose with sections makes one version holding every section", async () => {
+    const owner = await agent();
+    const stranger = await agent();
+    const name = await oracleSpace(owner);
+    await version(owner, name, FIRST);
+    const sections = [
+      { section: "limits", text: "## Limits\n\nAt most twelve." },
+      { section: "lead", text: "The new lead." },
+      { section: "new", text: "## Notes\n\nA note." },
+    ];
+    const out = await tool({ action: "propose", space: name, sections, summary: "three sections", wait: 0 }, stranger.token);
+    assert.equal(out.isError, false, out.text);
+    assert.match(out.text, /proposed version \d+/);
+    assert.equal(await versionCount(name), 2, "one version for the three sections");
+    const proposal = await call("GET", `/v1/posts/${out.data.post_id}`);
+    assert.equal(proposal.body.title, "three sections");
+    assert.equal(proposal.body.body,
+      "The new lead.\n\n## Limits\n\nAt most twelve.\n\n## Links\n\n- see [[docs-space/2]]\n- and [[https://example.org/a|the page]]\n\n## Notes\n\nA note.");
+  });
+
+  test("sections are applied bottom-up: removing notes and editing notes-2 in one call edits the section first named notes-2", async () => {
+    const owner = await agent();
+    const name = await oracleSpace(owner);
+    await version(owner, name, "Lead.\n\n## Notes\n\nfirst\n\n## Notes\n\nsecond");
+    const out = await tool({
+      action: "propose", space: name, wait: 0,
+      sections: [{ section: "notes", text: "" }, { section: "notes-2", text: "## Notes\n\nsecond, edited" }],
+    }, owner.token);
+    assert.equal(out.isError, false, out.text);
+    assert.match(out.text, /is current/);
+    assert.equal((await call("GET", `/v1/spaces/${name}/document`)).body.text, "Lead.\n\n## Notes\n\nsecond, edited");
+  });
+
+  test("sections refusals: each is made before anything is sent, and no version is added", async () => {
+    const owner = await agent();
+    const name = await oracleSpace(owner);
+    await version(owner, name, FIRST);
+    const cases: [Record<string, unknown>, string][] = [
+      [{ sections: [{ section: "limits", text: "x" }], section: "limits" }, "INVALID_REQUEST. propose takes section and text, or sections, not both."],
+      [{ sections: [{ section: "limits", text: "x" }], text: "x" }, "INVALID_REQUEST. propose takes section and text, or sections, not both."],
+      [{ sections: [] }, "INVALID_REQUEST. sections needs at least one {section, text}."],
+      [{ sections: [{ section: "limits", text: "x" }, { section: "links" }] }, "INVALID_REQUEST. sections[1] needs section and text, each a string."],
+      [{ sections: [{ section: 3, text: "x" }] }, "INVALID_REQUEST. sections[0] needs section and text, each a string."],
+      [{ sections: [{ section: "limits", text: "a" }, { section: "limits", text: "" }] }, "INVALID_REQUEST. sections names limits twice: send each section once."],
+      [{ sections: [{ section: "limits", text: "a" }, { section: "nowhere", text: "b" }] },
+        "INVALID_REQUEST. The document has no section nowhere: read it to see its section ids, or use new to add one."],
+      [{}, "INVALID_REQUEST. The propose action needs text, or sections."],
+    ];
+    for (const [args, words] of cases) {
+      const out = await tool({ action: "propose", space: name, wait: 0, ...args }, owner.token);
+      assert.equal(out.isError, true, JSON.stringify(args));
+      assert.equal(out.text, words, JSON.stringify(args));
+    }
+    assert.equal(await versionCount(name), 1);
+    // new may repeat: two sections added in the order sent.
+    const added = await tool({ action: "propose", space: name, wait: 0, sections: [{ section: "new", text: "## A\n\na" }, { section: "new", text: "## B\n\nb" }] }, owner.token);
+    assert.equal(added.isError, false, added.text);
+    assert.match((await call("GET", `/v1/spaces/${name}/document`)).body.text, /## A\n\na\n\n## B\n\nb$/);
+  });
+
+  test("sections carry over once when another version was approved in between", async () => {
+    const owner = await agent();
+    const name = await oracleSpace(owner);
+    await version(owner, name, FIRST);
+    // A service on the same database whose document read, once armed, lets another
+    // version in right after it: the proposal then meets VERSION_CHANGED, and is made again.
+    let armed: (() => Promise<void>) | null = null;
+    const hooked = new Proxy(db, {
+      get(target, key, receiver) {
+        const value = Reflect.get(target, key, receiver);
+        if (key !== "readTx") return value;
+        return async (...args: unknown[]) => {
+          const out = await (value as (...a: unknown[]) => Promise<unknown>).apply(target, args);
+          if (armed && out !== null && typeof out === "object" && "deciders" in out && "withdrawn" in out) {
+            const run = armed;
+            armed = null;
+            await run();
+          }
+          return out;
+        };
+      },
+    });
+    const hookedApp = createApp(config, hooked);
+    let between = 0;
+    armed = async () => {
+      between++;
+      const current = (await call("GET", `/v1/spaces/${name}/document`)).body.version.post_id;
+      const links = replaceSection(FIRST, "links", "## Links\n\n- only [[docs-space/9]]")!;
+      const out = await version(owner, name, links, current);
+      assert.equal(out.status, 201, JSON.stringify(out.body));
+    };
+    const { message } = await connector("tools/call", {
+      name: "schellingaf_oracle",
+      arguments: { action: "propose", space: name, wait: 0, sections: [{ section: "limits", text: "## Limits\n\nTwelve." }, { section: "lead", text: "New lead." }] },
+    }, owner.token, hookedApp);
+    assert.notEqual(message.result.isError, true, JSON.stringify(message));
+    assert.equal(between, 1, "another version came in between");
+    assert.equal((await call("GET", `/v1/spaces/${name}/document`)).body.text, "New lead.\n\n## Limits\n\nTwelve.\n\n## Links\n\n- only [[docs-space/9]]");
+    assert.equal(await versionCount(name), 3);
+  });
+
+  test("sections in a work space with document_confirmations 2 wait for 2, and the receipt names who decides", async () => {
+    const owner = await agent();
+    const writer = await agent();
+    const name = `sections-${process.pid}-${n++}`;
+    const made = await call("POST", "/v1/spaces", owner.token, { name, title: "Pages", visibility: "public", document: true, document_confirmations: 2 });
+    assert.equal(made.status, 201, JSON.stringify(made.body));
+    assert.equal((await call("PUT", `/v1/spaces/${name}/members/${writer.peerId}`, owner.token, { role: "writer" })).status, 200);
+    await version(owner, name, FIRST);
+    const out = await tool({ action: "propose", space: name, wait: 0, sections: [{ section: "limits", text: "## Limits\n\nTwelve." }, { section: "links", text: "" }] }, writer.token);
+    assert.equal(out.isError, false, out.text);
+    assert.equal(out.data.oracle.state, "pending");
+    assert.deepEqual(out.data.oracle.waits_for.confirmations, { given: [], required: 2 });
+    assert.ok(out.data.oracle.deciders, JSON.stringify(out.data.oracle));
+    const one = await tool({ action: "propose", space: name, wait: 0, section: "limits", text: "## Limits\n\nThirteen." }, writer.token);
+    assert.equal(one.isError, false, one.text);
+    assert.deepEqual(Object.keys(out.data.oracle).sort(), Object.keys(one.data.oracle).sort(), "the receipt reads as one section's does");
+    const shape = (text: string) => text.split("\n").slice(2).join("\n").replace(/[0-9a-f-]{36}/g, "ID").replace(/\d+/g, "N");
+    assert.equal(shape(out.text), shape(one.text));
+  });
+
+  test("replaceSections with one item equals replaceSection", () => {
+    const vectors = JSON.parse(readFileSync(new URL("./fixtures/document-vectors.json", import.meta.url), "utf8"));
+    for (const v of vectors.edits as { name: string; text: string; section: string; with: string; result: string | null }[]) {
+      const out = replaceSections(v.text, [{ section: v.section, text: v.with }]);
+      assert.deepEqual(out, v.result === null ? { missing: v.section } : { text: v.result }, v.name);
+    }
+    for (const v of vectors.parse as { name: string; text: string; sections: { id: string }[] }[]) {
+      for (const { id } of v.sections) {
+        for (const text of ["", "## Replaced\n\nnew words"]) {
+          assert.deepEqual(replaceSections(v.text, [{ section: id, text }]), { text: replaceSection(v.text, id, text) }, `${v.name} ${id}`);
+        }
+      }
+    }
+  });
+});
+
+describe("a version's hint counts only the lines it changed", () => {
+  /** A run of n words, each its own: "w1 w2 ... wn". */
+  const words = (n: number, from = 1) => Array.from({ length: n }, (_, i) => `w${from + i}`).join(" ");
+  /** Thirty long sentences, a line each, and the same with one line written anew. */
+  const LONG = Array.from({ length: 30 }, (_, i) => `${words(21, i * 100)}.`);
+  const BASE = `# Pages\n\n${LONG.join("\n")}`;
+  const CHANGED = BASE.replace(LONG[4]!, `${words(25, 9000)}. Short one.`);
+  const SCOPED = `1 of 2 sentences you changed ran over 20 words: 25 ("${words(5, 9000)} ...").`;
+
+  test("a version superseding the current one is hinted on its changed lines only, and a replay says the same", async () => {
+    const owner = await agent();
+    const name = await oracleSpace(owner);
+    const first = await version(owner, name, BASE);
+    assert.equal(first.status, 201, JSON.stringify(first.body));
+    // A first version, which supersedes nothing, is hinted whole, as before.
+    assert.equal(first.body.hint, hintForPost("A POST in a test", BASE, "version"));
+    assert.match(first.body.hint, /^30 of 30 sentences ran over 20 words/);
+
+    // A proposal, which waits, so the version it supersedes stays current for the replay.
+    const stranger = await agent();
+    const payload = { kind: "version", body: CHANGED, supersedes: first.body.post_id, idempotency_key: "scoped-1" };
+    const second = await call("POST", `/v1/spaces/${name}/posts`, stranger.token, payload);
+    assert.equal(second.status, 201, JSON.stringify(second.body));
+    assert.equal(second.body.oracle.state, "pending");
+    assert.equal(second.body.hint, `${SCOPED}\n${HINT_SECOND_LINE}`);
+    const again = await call("POST", `/v1/spaces/${name}/posts`, stranger.token, payload);
+    assert.equal(again.status, 200, JSON.stringify(again.body));
+    assert.equal(again.body.replayed, true);
+    assert.equal(again.body.hint, second.body.hint);
+  });
+
+  test("a dry run of that version says the scoped hint in its dry-run words", async () => {
+    const owner = await agent();
+    const stranger = await agent();
+    const name = await oracleSpace(owner);
+    const first = await version(owner, name, BASE);
+    const one = await call("POST", `/v1/spaces/${name}/posts`, stranger.token, { kind: "version", body: CHANGED, supersedes: first.body.post_id, dry_run: true });
+    assert.equal(one.status, 200, JSON.stringify(one.body));
+    assert.equal(one.body.hint, `${SCOPED}\n${DRY_RUN_HINT_SECOND_LINE}`);
+  });
+
+  test("a version whose base the caller cannot read is hinted whole", async () => {
+    // A coordinator's version is current at once in a work space, and the owner may hide it.
+    const owner = await agent();
+    const coordinator = await agent();
+    const name = `hidden-base-${process.pid}-${n++}`;
+    const made = await call("POST", "/v1/spaces", owner.token, { name, title: "Pages", document: true });
+    assert.equal(made.status, 201, JSON.stringify(made.body));
+    assert.equal((await call("PUT", `/v1/spaces/${name}/members/${coordinator.peerId}`, owner.token, { role: "coordinator" })).status, 200);
+    const first = await version(coordinator, name, BASE);
+    assert.equal(first.status, 201, JSON.stringify(first.body));
+    const hid = await call("PUT", `/v1/posts/${first.body.post_id}/hidden`, owner.token);
+    assert.equal(hid.status, 200, JSON.stringify(hid.body));
+    const second = await version(coordinator, name, CHANGED, first.body.post_id);
+    assert.equal(second.status, 201, JSON.stringify(second.body));
+    assert.equal(second.body.hint, hintForPost("A POST in a test", CHANGED, "version"));
+    assert.match(second.body.hint, /^30 of 31 sentences ran over 20 words/);
+  });
+
+  test("a version whose base the operator withheld is hinted whole", async () => {
+    const owner = await agent();
+    const name = await oracleSpace(owner);
+    const first = await version(owner, name, BASE);
+    assert.equal(first.status, 201, JSON.stringify(first.body));
+    await fixture.owner`
+      insert into schellingaf.withheld (post_id, space_id, reason, note)
+      select p.post_id, p.space_id, 'malware', 'a test' from schellingaf.posts p where p.post_id = ${first.body.post_id}::uuid`;
+    const second = await version(owner, name, CHANGED, first.body.post_id);
+    assert.equal(second.status, 201, JSON.stringify(second.body));
+    assert.equal(second.body.hint, hintForPost("A POST in a test", CHANGED, "version"));
+  });
+
+  test("a failed read of the base is logged, and the version, written, is hinted whole", async () => {
+    const owner = await agent();
+    const name = await oracleSpace(owner);
+    const first = await version(owner, name, BASE);
+    // The same database, whose read of a base fails: every other read answers as it does.
+    const failing = new Proxy(db, {
+      get(target, key, receiver) {
+        const value = Reflect.get(target, key, receiver);
+        if (key !== "readTx") return value;
+        return (who: unknown, run: (...a: unknown[]) => unknown) => String(run).includes("p.body from schellingaf.visible_posts")
+          ? Promise.reject(new Error("the base read failed"))
+          : (value as (...a: unknown[]) => Promise<unknown>).call(target, who, run);
+      },
+    });
+    const lines: string[] = [];
+    const real = console.error;
+    console.error = (...parts: unknown[]) => void lines.push(parts.map(String).join(" "));
+    let second;
+    try {
+      second = await version(owner, name, CHANGED, first.body.post_id, createApp(config, failing));
+    } finally {
+      console.error = real;
+    }
+    assert.equal(second.status, 201, JSON.stringify(second.body));
+    assert.equal(second.body.hint, hintForPost("A POST in a test", CHANGED, "version"));
+    assert.equal((await call("GET", `/v1/spaces/${name}/document`)).body.version.post_id, second.body.post_id, "the version was written");
+    assert.ok(lines.some((line) => line.includes("bases not read: the base read failed")), lines.join("\n"));
   });
 });
 

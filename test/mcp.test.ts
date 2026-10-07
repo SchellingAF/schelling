@@ -5,12 +5,13 @@
 
 import { test, before, describe } from "node:test";
 import assert from "node:assert/strict";
-import { createHash, sign } from "node:crypto";
+import { createHash, randomUUID, sign } from "node:crypto";
 import { TEST_CATEGORY } from "./helpers.ts";
 import { useService, app, fixture, agent, call, connector, send, requestsDuring, type Agent } from "./lib/service.ts";
 import { COMPATIBILITY_TOOLS, MCP_TOOLS, NO_DRY_RUN_HERE, serverIdentity } from "../src/mcp/server.ts";
 import { ERRORS } from "../src/db/errors.ts";
 import { buildPostObject, signaturePreimageOf } from "../src/domain/objects.ts";
+import * as sealed from "../content/sealed.mjs";
 
 useService("mcp");
 
@@ -733,6 +734,110 @@ describe("files, over the connector", () => {
       if (typeof expected === "string") assert.equal(out.text, expected);
       else assert.match(out.text, expected, JSON.stringify(args));
     }
+  });
+
+  // upload true and expect_sha256 (migrations/0146_exact_uploads.sql; test/uploads.test.ts
+  // runs the command upload true answers).
+  test("upload true with no sha256 attachment, or beside posts, is refused; in a sealed SPACE SEALED_NO_FILES", async () => {
+    const needs = "INVALID_REQUEST. upload true needs at least one attachment named by sha256. Nothing was sent.";
+    const text = `typed ${n++}\n`;
+    for (const attachments of [undefined, [{ name: "t.txt", media_type: "text/plain", text }]]) {
+      const out = await tool("schellingaf_post", { space, kind: "obs", body: "x", upload: true, ...(attachments ? { attachments } : {}) }, owner.token);
+      assert.equal(out.text, needs);
+    }
+    assert.equal(await held(sha(text)), 0);
+    const batch = await tool("schellingaf_post", { space, upload: true, posts: [{ kind: "obs", title: "x", body: "x" }] }, owner.token);
+    assert.equal(batch.isError, true);
+    assert.match(batch.text, /^INVALID_REQUEST\. .*\(upload is for a POST sent alone with attachments, not posts\)/);
+    const item = await tool("schellingaf_post", { space, posts: [{ kind: "obs", title: "x", body: "x", upload: true }] }, owner.token);
+    assert.match(item.text, /\(posts\[0\]: upload is for a POST sent alone with attachments, not in posts\)/);
+    // A sealed SPACE: the authorization route refuses, in its words.
+    const keeper = await agent({ encryptionKey: true });
+    const sealedName = `files-sealed-${process.pid}`;
+    const spaceId = randomUUID();
+    const container = sealed.spaceContainer(spaceId);
+    const g1 = await sealed.newGeneration(container, 1);
+    const me = new Uint8Array(Buffer.from(keeper.peerId, "hex"));
+    const lock = await sealed.sealLock({ container, g: 1, recipient: me, sender: me, commitment: g1.commitment, secret: g1.secret, pkR: keeper.enc!.pk, skS: keeper.enc!.sk });
+    const made = await call("POST", "/v1/spaces", keeper.token, {
+      name: sealedName, title: "Sealed", visibility: "sealed",
+      sealed: { space_id: spaceId, commitment: Buffer.from(g1.commitment).toString("hex"), lock: Buffer.from(lock).toString("hex") },
+    });
+    assert.equal(made.status, 201, JSON.stringify(made.body));
+    const out = await tool("schellingaf_post", { space: sealedName, kind: "obs", body: "x", upload: true, attachments: [{ name: "s.txt", media_type: "text/plain", sha256: sha("s") }] }, keeper.token);
+    assert.match(out.text, /^SEALED_NO_FILES\. /);
+  });
+
+  test("expect_sha256: a text with one character changed is ATTACHMENT_MISMATCH naming both hashes and the bytes, and nothing is uploaded or posted", async () => {
+    const meant = `box 1093 holds 7 ${n++}\n`;
+    const typed = meant.replace("1093", "1091");
+    const before = await tool("schellingaf_read_space", { space, detail: "ids" }, owner.token);
+    const out = await tool("schellingaf_post", {
+      space, kind: "result", title: "Box 1093", body: "x",
+      attachments: [{ name: "boxes.txt", media_type: "text/plain", text: typed }],
+      expect_sha256: [sha(meant)],
+    }, owner.token);
+    assert.equal(out.isError, true);
+    assert.equal(out.text, `${ERRORS.ATTACHMENT_MISMATCH!.message} (attachments[0]: expected ${sha(meant)}, sent ${sha(typed)} (${Buffer.byteLength(typed)} bytes)) ${ERRORS.ATTACHMENT_MISMATCH!.fix}`);
+    assert.equal(await held(sha(typed)), 0, "nothing uploaded");
+    const after = await tool("schellingaf_read_space", { space, detail: "ids" }, owner.token);
+    assert.equal(after.text, before.text, "nothing posted");
+  });
+
+  test("expect_sha256 naming two files with one attachment is refused, naming both counts", async () => {
+    const one = `one ${n++}\n`;
+    const out = await tool("schellingaf_post", {
+      space, kind: "obs", body: "x",
+      attachments: [{ name: "one.txt", media_type: "text/plain", text: one }],
+      expect_sha256: [sha(one), sha("dropped\n")],
+    }, owner.token);
+    assert.match(out.text, /^ATTACHMENT_MISMATCH\. .*\(expect_sha256 names 2 files; attachments has 1\)/);
+    assert.equal(await held(sha(one)), 0);
+    // And with no attachments at all, refused before anything is read.
+    const none = await tool("schellingaf_post", { space, kind: "obs", body: "x", expect_sha256: [sha(one)] }, owner.token);
+    assert.match(none.text, /^ATTACHMENT_MISMATCH\. .*\(expect_sha256 names 1 file; attachments has 0\)/);
+    const malformed = await tool("schellingaf_post", { space, kind: "obs", body: "x", expect_sha256: ["ABC"] }, owner.token);
+    assert.match(malformed.text, /^INVALID_REQUEST\. .*\(expect_sha256 is up to 4 sha256s, each 64 lowercase hex characters\)/);
+  });
+
+  test("expect_sha256 that matches posts and says matched; a call without it answers byte for byte as before", async () => {
+    const text = `matched ${n++}\n`;
+    const posted = await tool("schellingaf_post", {
+      space, kind: "obs", body: "x", attachments: [{ name: "m.txt", media_type: "text/plain", text }], expect_sha256: [sha(text)],
+    }, owner.token);
+    assert.equal(posted.isError, false, posted.text);
+    assert.equal(posted.data.expect_sha256, "matched");
+    assert.match(posted.text, /\nexpect_sha256: matched(\n|$)/);
+    const plain = await tool("schellingaf_post", { space, kind: "obs", body: "x", attachments: [{ name: "m.txt", media_type: "text/plain", text: `${text}plain\n` }] }, owner.token);
+    assert.equal(plain.isError, false, plain.text);
+    // The whole answer, with what differs between two posts set aside (ids, seqs, hashes,
+    // sizes and times): the one without expect_sha256 is the other without its one line
+    // and its one field.
+    const same = (s: string) => s
+      .replace(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/g, "<uuid>")
+      .replace(/[0-9a-f]{64,128}/g, "<hex>")
+      .replace(/\d{4}-\d\d-\d\dT[\d:.]+Z/g, "<time>")
+      .replace(/\d+/g, "<n>");
+    assert.equal(same(plain.text), same(posted.text.split("\n").filter((l) => l !== "expect_sha256: matched").join("\n")));
+    const { expect_sha256: _matched, ...rest } = posted.data;
+    assert.equal(same(JSON.stringify(plain.data)), same(JSON.stringify(rest)));
+  });
+
+  test("a bridge-shaped unsigned call (sha256 entries and expect_sha256) is checked at the connector", async () => {
+    const content = Buffer.from(`sent by a bridge ${n++}\n`);
+    assert.equal((await upload(owner, space, content)).status, 201);
+    // What a bridge's unsigned path sends: entries by sha256, their fingerprints, and the
+    // agent's own fields, expect_sha256 and upload among them.
+    const shaped = {
+      space, kind: "obs", body: "x", upload: true,
+      attachments: [{ sha256: sha(content), name: "b.txt", media_type: "text/plain" }],
+      fingerprints: [{ scheme: "sha256.file", value: sha(content) }],
+    };
+    const wrong = await tool("schellingaf_post", { ...shaped, expect_sha256: [sha("other\n")] }, owner.token);
+    assert.match(wrong.text, /^ATTACHMENT_MISMATCH\. /);
+    const right = await tool("schellingaf_post", { ...shaped, expect_sha256: [sha(content)] }, owner.token);
+    assert.equal(right.isError, false, right.text);
+    assert.equal(right.data.expect_sha256, "matched");
   });
 });
 

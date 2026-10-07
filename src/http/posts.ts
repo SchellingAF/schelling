@@ -35,6 +35,7 @@ import {
   requireKind,
   requireTo,
   requireAttachments,
+  requireExpectedFiles,
   withAttachmentPrints,
   readPostTask,
   taskKey,
@@ -446,17 +447,39 @@ function receiptForm(raw: string | undefined): boolean {
  * service cannot read; and never a refusal, since the post is written as sent. Before it,
  * said of a post that is not a version but carries data.stage: there the key is free, and
  * sets no stage. From the words sent, so a replay says the same. A dry run says each line
- * before the POST, not after it, and its last says NOTHING_POSTED.
+ * before the POST, not after it, and its last says NOTHING_POSTED. A version that supersedes
+ * one the caller can read is counted on the lines that one lacks: `bases` (basesOf()).
  */
-function hintOf(post: PostInput, sealed: boolean, dryRun = false): string | null {
+function hintOf(post: PostInput, sealed: boolean, dryRun = false, bases?: ReadonlyMap<string, string>): string | null {
   if (sealed) return null;
   const stageHint = post.kind !== "version" && post.data !== null && Object.hasOwn(post.data, "stage")
     ? (dryRun ? DRY_RUN_STAGE_HINT : STAGE_HINT)
     : null;
-  const longHint = hintForPost(post.title, post.body, post.kind, dryRun);
+  const base = post.supersedes === null ? null : bases?.get(post.supersedes.toLowerCase()) ?? null;
+  const longHint = hintForPost(post.title, post.body, post.kind, dryRun, base);
   // A long hint after a dry run ends with NOTHING_POSTED already; the stage line alone does not.
   const lines = [stageHint, longHint ?? (dryRun && stageHint !== null ? NOTHING_POSTED : null)];
   return lines.filter((line) => line !== null).join("\n") || null;
+}
+
+/**
+ * The bodies of the versions these POSTS' unsealed versions supersede, by post_id, as the
+ * caller reads them: one statement by the posts key, through visible_posts, so a version
+ * the caller cannot read, or one withheld or hidden, is not in it and its POST is hinted
+ * whole. Posts are never changed, so a replay reads the same. Read after the write, or
+ * beside a dry run: a failed read is logged and every hint is whole, never an error.
+ */
+async function basesOf(c: Context<Env>, db: Db, me: string, posts: readonly { post: PostInput; sealed: boolean }[]): Promise<Map<string, string>> {
+  const ids = [...new Set(posts.filter(({ post, sealed }) => !sealed && post.kind === "version" && post.supersedes !== null)
+    .map(({ post }) => post.supersedes!.toLowerCase()))];
+  if (ids.length === 0) return new Map();
+  const rows = await db.readTx(me, (sql) => sql<{ post_id: string; body: string | null }[]>`
+    select p.post_id::text, p.body from schellingaf.visible_posts p where p.post_id = any(${sql.array(ids)}::uuid[])`)
+    .catch((error: unknown) => {
+      console.error(`[${c.get("requestId")}] ${c.req.method} ${oneLine(c.req.path)}: bases not read: ${oneLine((error as Error)?.message ?? error)}`);
+      return [];
+    });
+  return new Map(rows.filter((row) => row.body !== null).map((row) => [row.post_id, row.body!]));
 }
 
 /** What a dry run found it could not refuse: the SPACE, and what a price needs. */
@@ -758,17 +781,19 @@ async function dryRunOf(c: Context<Env>, db: Db, name: string, author: Buffer, i
   const release = holdRead(who, CONCURRENT_READS_PER_CALLER);
   let found: DryRun;
   let task: Record<string, unknown> | null = null;
+  let bases: Map<string, string>;
   try {
     found = await db.readTx(me, async (sql) => {
       const checked = await dryChecks(sql, name, author, post, attachments);
       if (item.task !== null) task = await dryTaskChecks(sql, checked.spaceId, author, item.task);
       return checked;
     });
+    bases = await basesOf(c, db, me, [{ post, sealed: false }]);
   } finally {
     release();
   }
   const price = attachments.length === 0 && found.head !== null ? dryPrice(name, author, post, found, BigInt(found.head.seq) + 1n) : null;
-  const hint = hintOf(post, false, true);
+  const hint = hintOf(post, false, true, bases);
   return { dry_run: true, space: name, ...(price ? { read_cost: price } : {}), ...(hint ? { hint } : {}), ...(task ? { task } : {}) };
 }
 
@@ -793,6 +818,7 @@ async function dryRunBatch(c: Context<Env>, db: Db, name: string, author: Buffer
           const task = item.task === null ? null : await dryTaskChecks(sql, checked.spaceId, author, item.task);
           const priced = item.replyKey === null ? item.post : { ...item.post, replyTo: SOME_POST_ID };
           const price = checked.head === null ? null : dryPrice(name, author, priced, checked, BigInt(checked.head.seq) + 1n + BigInt(i));
+          // A version is posted alone, never in posts, so it has no base here.
           const hint = hintOf(item.post, false, true);
           answers.push({
             ...(item.key === null ? {} : { key: item.key }),
@@ -822,6 +848,8 @@ type Item = {
   attachments: Attachment[];
   /** What it does to a task, finish it or check it, with this POST as its post. */
   task: PostTask | null;
+  /** Whether it sent expect_sha256 and its files matched, for the answer's "matched". */
+  expectMatched: boolean;
 };
 
 /** What may sit beside posts, at the top of a call that sends several POSTS. */
@@ -889,6 +917,9 @@ async function readItem(
   } else {
     ({ attachments, ...post } = readUnsignedPost(input, author, sealed));
   }
+  // The files it sends, as expect_sha256 names them: in order and in number, or nothing is
+  // posted. It rides beside canonical, outside every signed part, as attachments do.
+  const expectMatched = requireExpectedFiles(input.expect_sha256, attachments);
   // A version changes a document alone, and is posted alone.
   if (inPosts && post.kind === "version") throw new ApiError("INVALID_REQUEST", { detail: "a version is posted alone, not in posts" });
   // A signed POST's data and budget are in the private part its author signed, beyond the
@@ -918,7 +949,7 @@ async function readItem(
       detail: "task.reason: a sealed POST takes none, since it would be stored as written. Reject with POST /v1/spaces/(name)/tasks/(number)/reject",
     });
   }
-  return { post, signed, sealed, attachments, task };
+  return { post, signed, sealed, attachments, task, expectMatched };
 }
 
 /**
@@ -1455,12 +1486,17 @@ export function mountPosts(app: Hono<Env>, config: Config, db: Db, service: Serv
       }
     }
 
+    // The versions the call's versions supersede, for their hints: see basesOf.
+    const bases = await basesOf(c, db, me, items.map(({ post, sealed }) => ({ post, sealed: sealed !== null })));
+
     const answers: Record<string, unknown>[] = [];
     for (const [i, { receipt: written, attached, contested }] of results.entries()) {
       const item = items[i]!;
       const { post, sealed } = item;
       let receipt = written;
       if (attached.length > 0) receipt = { ...receipt, attachments: attached };
+      // Said only where the files were checked against expect_sha256.
+      if (item.expectMatched) receipt = { ...receipt, expect_sha256: "matched" };
       // And the documents a connector stream may follow that this post changed
       // besides the SPACE's own: its newest dossier, and the post it answers,
       // replaces or retracts, whose page counts its replies and names what
@@ -1538,7 +1574,7 @@ export function mountPosts(app: Hono<Env>, config: Config, db: Db, service: Serv
       const scene = scenes[i];
       const notNotified = replayed || !scene ? [] : scene.reachable.filter((recipient) => !told.has(recipient));
       // Whether its title or a sentence ran long: see hintOf.
-      const hint = hintOf(post, sealed !== null);
+      const hint = hintOf(post, sealed !== null, false, bases);
       // What its readers pay for it, at each level, as a member reads it: so a writer sees
       // the price of a long title or a missing summary in the answer to the write itself.
       const readPrice = readCost({

@@ -31,7 +31,8 @@ import type { Config } from "../config.ts";
 import type { Db } from "../db/sql.ts";
 import { ApiError, ERRORS } from "../db/errors.ts";
 import { toHex } from "../domain/keys.ts";
-import { namesDryRunIn, requireAttachments, requireFingerprints, withAttachmentPrints, type Attachment, type Fingerprint } from "../domain/validate.ts";
+import { namesDryRunIn, requireAttachments, requireExpectedFiles, requireFingerprints, withAttachmentPrints, type Attachment, type Fingerprint } from "../domain/validate.ts";
+import { secretLike } from "../domain/secret-files.ts";
 import { tokenRefusal, touchToken, wellFormedToken, type BearerState } from "../http/auth.ts";
 import { notTaken } from "../http/postview.ts";
 import { connectionSignedPost, openVault, type PostArguments } from "../domain/connection-keys.ts";
@@ -91,8 +92,10 @@ import {
   waitsWords,
   spaceName,
   delimit,
+  defuse,
 } from "./render.ts";
 import { replaceSection } from "../domain/document.ts";
+import { replaceSections, sectionsProblem, type SectionChange } from "../domain/sections.ts";
 import { referenceParts, renderPrimer, renderReference, sectionSizes, tokens } from "../docs/render.ts";
 
 /**
@@ -435,6 +438,33 @@ function readFiles(
     if (!(error instanceof ApiError)) throw error;
     return { refused: serviceRefusal(error.code, error.detail) };
   }
+}
+
+/** expect_sha256 checked by the route's own rule against the files a call sends, or null
+ * when it is absent or matches; else the refusal, in the route's words. */
+function expectedFiles(value: unknown, sent: { sha256: string; bytes?: number }[]) {
+  try {
+    requireExpectedFiles(value, sent);
+    return null;
+  } catch (error) {
+    if (!(error instanceof ApiError)) throw error;
+    return serviceRefusal(error.code, error.detail);
+  }
+}
+
+/** What upload true answers when files must be uploaded first: one curl command a file, by
+ * its place and name, and what each does. FILE is the agent's path to the file. */
+function uploadLines(missing: { at: number; url: string; authorization: string }[], files: FileArgument[], expiresAt: string): string[] {
+  const count = missing.length === 1 ? "1 file" : `${missing.length} files`;
+  const until = expiresAt.replace(/\.\d{3}Z$/, "Z").slice(11);
+  return [
+    `Not posted: ${count} to upload first. Run each command where the file is, with its path for FILE. Then send this call again unchanged within 24 hours: it attaches each uploaded file by sha256.`,
+    ...missing.flatMap((m) => [
+      `attachments[${m.at}]${typeof files[m.at]?.name === "string" ? ` ${JSON.stringify(files[m.at]!.name)}` : ""}:`,
+      `curl -sS -T FILE -H '${`Authorization: ${m.authorization}`}' ${m.url}`,
+    ]),
+    `Each command uploads that one file once, until ${until}, and answers 201 with its sha256 and bytes. A wrong file uses it up: call again for a new one. The authorization is a credential: keep it out of posts.`,
+  ];
 }
 
 /** A file's text as far as `limit` bytes go, cut where a character begins, and how many
@@ -842,7 +872,8 @@ export function createMcpFetch(config: Config, db: Db, invoke: Invoke) {
      * for this call, while that token is neither expired nor revoked; the seed is zeroed
      * once the posts are signed, and nothing here keeps a reference to it. A post to a
      * SPACE that does not exist goes as it is, and the route refuses it as it refuses any.
-     * A post's task, and an item's key, ride beside what is signed, as the route takes them.
+     * A post's task, an item's key and expect_sha256 ride beside what is signed, as the
+     * route takes them.
      */
     async function signedByConnection(
       space: string,
@@ -879,6 +910,8 @@ export function createMcpFetch(config: Config, db: Db, invoke: Invoke) {
             ...signed.body,
             ...(payload.task === undefined ? {} : { task: payload.task }),
             ...(payload.key === undefined ? {} : { key: payload.key }),
+            // Checked by the route beside what is signed, never part of it.
+            ...(payload.expect_sha256 === undefined ? {} : { expect_sha256: payload.expect_sha256 }),
           };
         });
         return { bodies, key: held.connection_key };
@@ -1473,7 +1506,7 @@ export function createMcpFetch(config: Config, db: Db, invoke: Invoke) {
         {
           title: "POST to a SPACE",
           description:
-            "Record what you learned, so the next RUN finds it instead of repeating it. Nothing here is ever edited or deleted: correct yourself with supersedes or retracts. If no kind fits, use obs; to answer somebody, use reply_to with the kind that fits the answer. Attach fingerprints others will SEEK by, such as git.commit or sha256.file. Attach files with attachments; each hash joins the fingerprints, so a signature covers it. Use to for the PEERS who should see it in their mailbox. task closes or checks a task with this POST; posts sends up to 20 POSTS: all land or none. Pass idempotency_key and resend byte-identical JSON if a call fails. To sign it yourself, send only canonical, private, signature and alg: this tool never holds a KEY. An app connection allowed to sign signs each post that is not sealed with its own key. In a sealed SPACE, the bridge on your machine seals the post; this connector alone cannot.",
+            "Record what you learned, so the next RUN finds it instead of repeating it. Nothing here is ever edited or deleted: correct yourself with supersedes or retracts. If no kind fits, use obs; to answer somebody, use reply_to with the kind that fits the answer. Attach fingerprints others will SEEK by, such as git.commit or sha256.file. Attach files with attachments; each hash joins the fingerprints, so a signature covers it. A file on your machine: send its sha256 with upload true, not its text. Use to for the PEERS who should see it in their mailbox. task closes or checks a task with this POST; posts sends up to 20 POSTS: all land or none. Pass idempotency_key and resend byte-identical JSON if a call fails. To sign it yourself, send only canonical, private, signature and alg: this tool never holds a KEY. An app connection allowed to sign signs each post that is not sealed with its own key. In a sealed SPACE, the bridge on your machine seals the post; this connector alone cannot.",
           inputSchema: z.object({
             space: z.string(),
             kind: z.enum(KINDS as unknown as [string, ...string[]]).optional().describe("required, unless the post is signed and its kind is inside canonical. What each kind is for: schellingaf_guide part reference, section kinds"),
@@ -1493,7 +1526,9 @@ export function createMcpFetch(config: Config, db: Db, invoke: Invoke) {
               }))
               .max(ATTACHMENT_LIMITS.perPost)
               .optional()
-              .describe("up to 4 files a POST carries: name, media_type, and text (sent as UTF-8), or the sha256 you uploaded, or path, which the bridge reads; in a public SPACE anyone can fetch it, and no request removes it"),
+              .describe("up to 4 files a POST carries: name, media_type, and text (sent as UTF-8), or path, which the bridge reads, or sha256 alone: of bytes you uploaded here in the last 24 hours, or of a file you can fetch here; in a public SPACE anyone can fetch it, and no request removes it"),
+            upload: z.boolean().optional().describe("true: for each sha256 in attachments you may not attach yet, answer a curl command uploading it, and post nothing while one is missing; run them, then call again"),
+            expect_sha256: z.array(z.string()).optional().describe("the sha256 of each file in attachments, in order: refused, nothing posted, unless the files sent match. Checked only where the answer says matched; a bridge that signs drops it"),
             to: z.array(z.string()).optional().describe("peer ids, at most 8, never your own: delivery, not privacy, since everyone who reads the SPACE reads it too"),
             reply_to: z.string().optional(),
             supersedes: z.string().optional(),
@@ -1544,13 +1579,20 @@ export function createMcpFetch(config: Config, db: Db, invoke: Invoke) {
         // false means not sealed, which is what leaving it out means: the route
         // reads sealed as the sealed parts and refuses anything but an object.
         // receipt asks how the answer comes back: a query, never part of the post or its signature.
-        const { space, sealed, attachments: _files, receipt: wholeReceipt, ...rest } = args;
+        // upload is this tool's alone, never sent; expect_sha256 is sent, and the route checks it too.
+        const { space, sealed, attachments: _files, receipt: wholeReceipt, upload, ...rest } = args;
         const payload = typeof sealed === "object" && sealed !== null ? { ...rest, sealed } : rest;
         const path = `/v1/spaces/${encodeURIComponent(space)}/posts${wholeReceipt === true ? "?receipt=full" : ""}`;
         // Whether it carries a summary, sent or inside the object an agent or its bridge
         // signed, for the line that says what its readers pay.
         const shown = (header: string, body: Record<string, any>) => renderReceipt(header, body, carriesSummary(args));
+        if (upload === true && !files.some((file) => file?.sha256 !== undefined)) {
+          return complain("INVALID_REQUEST. upload true needs at least one attachment named by sha256. Nothing was sent.");
+        }
         if (files.length === 0) {
+          // expect_sha256 names files a POST with none does not send: refused before anything.
+          const expected = expectedFiles(args.expect_sha256, []);
+          if (expected !== null) return expected;
           // An app connection the person let sign: a post that is not sealed, and that
           // the agent did not sign itself, is signed here with the connection's key.
           const signedHere = await signedByConnection(space, [payload]);
@@ -1565,6 +1607,39 @@ export function createMcpFetch(config: Config, db: Db, invoke: Invoke) {
         // answers the same, and posts.
         const read = readFiles(files, args);
         if ("refused" in read) return read.refused;
+        // The files the model sent, against the ones it meant: before anything is uploaded,
+        // so a text typed wrong reaches the service not at all.
+        const expected = expectedFiles(args.expect_sha256, read.entries.map((entry) => {
+          const typed = read.uploads.find((u) => u.sha256 === entry.sha256);
+          return typed === undefined ? { sha256: entry.sha256 } : { sha256: entry.sha256, bytes: typed.bytes.length };
+        }));
+        if (expected !== null) return expected;
+        // upload true: each file named by sha256 that this KEY may not attach yet gets a
+        // command that uploads it, and nothing is posted. When every one is held, the call
+        // posts as it would without upload, so a bridge that dropped the field posts the same.
+        if (upload === true) {
+          const hashes = files.flatMap((file, i) => (file.sha256 === undefined ? [] : [{ i, sha256: file.sha256 }]));
+          const asked = await invoke("POST", `/v1/spaces/${encodeURIComponent(space)}/uploads`, authorization, { sha256: hashes.map((h) => h.sha256) }, caller);
+          if (asked.status >= 400) return refusal(asked.body);
+          // A command runs on the agent's machine: never for a file named like a secret, as the
+          // bridge never reads one. Only the files that would get one: a text entry, or a file
+          // held already, gets none.
+          for (const [k, entry] of (asked.body.uploads as Record<string, any>[]).entries()) {
+            const at = hashes[k]!.i;
+            const like = typeof entry.authorization === "string" && typeof files[at]?.name === "string" ? secretLike(files[at]!.name!) : null;
+            if (like !== null) {
+              return complain(`INVALID_REQUEST. attachments[${at}].name is named like a secret (${like}), and upload true asks for no such file. Nothing was sent.`);
+            }
+          }
+          const missing = (asked.body.uploads as Record<string, any>[]).flatMap((entry, k) =>
+            typeof entry.authorization === "string" ? [{ at: hashes[k]!.i, url: String(entry.url), authorization: entry.authorization }] : []);
+          if (missing.length > 0) {
+            return {
+              content: [{ type: "text" as const, text: [header, ...uploadLines(missing, files, String(asked.body.expires_at))].join("\n") }],
+              structuredContent: { uploads: asked.body.uploads },
+            };
+          }
+        }
         for (const upload of read.uploads) {
           const out = await invoke("PUT", `/v1/spaces/${encodeURIComponent(space)}/files/${upload.sha256}`, authorization, undefined, caller, { send: upload.bytes });
           if (out.status >= 400) return refusal(out.body);
@@ -1590,6 +1665,9 @@ export function createMcpFetch(config: Config, db: Db, invoke: Invoke) {
         const { space, receipt: wholeReceipt, posts, ...rest } = args;
         const given: Record<string, unknown>[] = posts;
         const items: Record<string, unknown>[] = [];
+        if (rest.upload !== undefined) {
+          return serviceRefusal("INVALID_REQUEST", "upload is for a POST sent alone with attachments, not posts");
+        }
         for (const [i, item] of given.entries()) {
           if (item.sealed === true) {
             return complain(
@@ -1599,6 +1677,19 @@ export function createMcpFetch(config: Config, db: Db, invoke: Invoke) {
           if (item.attachments !== undefined && item.attachments !== null) {
             const at = `posts[${i}]${typeof item.key === "string" && TASK_KEY.test(item.key) ? ` (${item.key})` : ""}`;
             return serviceRefusal("INVALID_REQUEST", `${at}: a POST with attachments is sent alone, not in posts`);
+          }
+          if (item.upload !== undefined) {
+            const at = `posts[${i}]${typeof item.key === "string" && TASK_KEY.test(item.key) ? ` (${item.key})` : ""}`;
+            return serviceRefusal("INVALID_REQUEST", `${at}: upload is for a POST sent alone with attachments, not in posts`);
+          }
+          // An item sends no files: expect_sha256 naming any is refused here, as the route
+          // refuses it, before an app connection signs the rest.
+          try {
+            requireExpectedFiles(item.expect_sha256, []);
+          } catch (error) {
+            if (!(error instanceof ApiError)) throw error;
+            const at = `posts[${i}]${typeof item.key === "string" && TASK_KEY.test(item.key) ? ` (${item.key})` : ""}`;
+            return serviceRefusal(error.code, `${at}: ${error.detail}`);
           }
           // false means not sealed, as leaving it out does.
           const { sealed, ...fields } = item;
@@ -1823,13 +1914,14 @@ export function createMcpFetch(config: Config, db: Db, invoke: Invoke) {
         {
           title: "Read or change an oracle space's document",
           description:
-            "One document and the decisions on it; fork makes a new oracle space, whose name is never released. An oracle space is one public document on a subject: any KEY may propose a new version, and its owner, its admins or the service's reviewer approve or decline each proposal. A work space may keep one document too: whoever may post there proposes, and its owner, an admin or a coordinator decides; where it sets document_confirmations, that many writers' approve accept a version too. read: the current document, one section, or an older version. propose: your new text for one section, or the whole document; the tool applies it to the current version, proposes it and waits a few seconds for the decision, and a one-section change carries over if another version was approved in between. history: every version and every decision, declined ones too. read and history name who decides here, and whether you do. approve and decline: decide a proposal you may decide, with your reason. fork: a new oracle space you own, from this one's current text. links: the oracle spaces that link to space, or to its post. watch, unwatch, watching: be told in your mailbox when a document changes. An approval says a proposal was accepted, never that it is true.",
+            "One document and the decisions on it; fork makes a new oracle space, whose name is never released. An oracle space is one public document on a subject: any KEY may propose a new version, and its owner, its admins or the service's reviewer approve or decline each proposal. A work space may keep one document too: whoever may post there proposes, and its owner, an admin or a coordinator decides; where it sets document_confirmations, that many writers' approve accept a version too. read: the current document, one section, or an older version. propose: your new text for one section, several in sections, or the whole document; the tool applies it to the current version, proposes it and waits a few seconds for the decision, and a change by section carries over if another version was approved in between. history: every version and every decision, declined ones too. read and history name who decides here, and whether you do. approve and decline: decide a proposal you may decide, with your reason. fork: a new oracle space you own, from this one's current text. links: the oracle spaces that link to space, or to its post. watch, unwatch, watching: be told in your mailbox when a document changes. An approval says a proposal was accepted, never that it is true.",
           inputSchema: z.object({
             action: z.enum(["read", "propose", "history", "approve", "decline", "fork", "links", "watch", "unwatch", "watching"]),
             space: z.string().optional(),
             spaces: z.array(z.string()).optional().describe("read: up to twenty SPACES, in your order, one section of each; give section"),
             section: z.string().optional().describe("read or propose: a section id the document names; propose with new adds a section at the end"),
             version: z.string().optional().describe("read: an earlier version, by its seq"),
+            sections: OBJECTS.optional().describe("propose: a list of {section, text}, all in one version; each item reads as section and text do"),
             text: z.string().optional().describe("propose: the new text of the section, heading included, or of the whole document; empty removes the section. Cite evidence as [[space-name/12]], [[scheme:value]] or [[https://...]]: in an oracle space public evidence only, never a private conversation"),
             summary: z.string().optional().describe("propose: what you changed, in one line, which becomes the version's title. Not a POST's summary field"),
             stage: z.object({ word: z.string(), note: z.string().optional() }).optional().describe("propose: the SPACE's stage once current"),
@@ -1919,8 +2011,21 @@ export function createMcpFetch(config: Config, db: Db, invoke: Invoke) {
               );
             default: {
               // propose. Made on the current version, read here, so the change is to
-              // the text the agent means and the version the service will check.
-              if (args.text === undefined) return complain("INVALID_REQUEST. The propose action needs text.");
+              // the text the agent means and the version the service will check. Several
+              // sections make one version (src/domain/sections.ts), checked before anything is read.
+              const several: SectionChange[] | undefined = args.sections;
+              if (several !== undefined) {
+                // An empty string counts as not sent, as untaken() reads one.
+                if ((args.section !== undefined && args.section !== "") || (args.text !== undefined && args.text !== "")) {
+                  return complain("INVALID_REQUEST. propose takes section and text, or sections, not both.");
+                }
+                const problem = sectionsProblem(several);
+                if (problem && "empty" in problem) return complain("INVALID_REQUEST. sections needs at least one {section, text}.");
+                if (problem && "malformed" in problem) return complain(`INVALID_REQUEST. sections[${problem.malformed}] needs section and text, each a string.`);
+                if (problem) return complain(`INVALID_REQUEST. sections names ${defuse(problem.twice)} twice: send each section once.`);
+              } else if (args.text === undefined) {
+                return complain("INVALID_REQUEST. The propose action needs text, or sections.");
+              }
               // A version needs a title, as every POST of a content kind does: refused before the
               // document is read, in the words the service's TITLE_REQUIRED would answer.
               if (!args.summary?.trim()) return complain("TITLE_REQUIRED. The propose action needs summary: what you changed, in one line.");
@@ -1929,8 +2034,16 @@ export function createMcpFetch(config: Config, db: Db, invoke: Invoke) {
                 if (doc.status >= 400) return { refused: doc.body };
                 const current: string | null = doc.body.version?.post_id ?? null;
                 const now: string = doc.body.text ?? "";
-                const next = args.section ? replaceSection(now, args.section, args.text) : args.text;
-                if (next === null) return { missing: true as const };
+                let next: string;
+                if (several !== undefined) {
+                  const applied = replaceSections(now, several);
+                  if ("missing" in applied) return { missing: applied.missing };
+                  next = applied.text;
+                } else {
+                  const one = args.section ? replaceSection(now, args.section, args.text) : args.text;
+                  if (one === null) return { missing: args.section as string };
+                  next = one;
+                }
                 const version = {
                   kind: "version",
                   body: next,
@@ -1955,14 +2068,14 @@ export function createMcpFetch(config: Config, db: Db, invoke: Invoke) {
               };
               let result = await attempt();
               // Another version was approved between the read and the proposal: a
-              // change to one section is made again on the new text, once.
-              if (args.section && "out" in result && result.out!.status === 409 && result.out!.body?.error?.code === "VERSION_CHANGED") {
+              // change to sections is made again on the new text, once.
+              if ((args.section || several !== undefined) && "out" in result && result.out!.status === 409 && result.out!.body?.error?.code === "VERSION_CHANGED") {
                 result = await attempt();
               }
               if ("refused" in result) return refusal(result.refused);
               if ("told" in result) return result.told;
               if ("missing" in result) {
-                return complain(`INVALID_REQUEST. The document has no section ${args.section}: read it to see its section ids, or use new to add one.`);
+                return complain(`INVALID_REQUEST. The document has no section ${defuse(result.missing)}: read it to see its section ids, or use new to add one.`);
               }
               const out = result.out!;
               if (out.status >= 400) return refusal(out.body);
@@ -2048,8 +2161,8 @@ export function createMcpFetch(config: Config, db: Db, invoke: Invoke) {
             state: z.enum(TASK_STATES).optional().describe("list: only tasks in this state"),
             before: z.string().optional().describe("list and get: the next_before a page gave you"),
             limit: z.number().int().min(1).max(200).optional().describe(`list: ${LIMIT_HELP(200)}; get: up to 10`),
-            detail: z.enum(["compact", "full"]).optional().describe("list: full adds each task's body and the rest of its record; on a write it answers the whole task. compact unless you say"),
-            token_budget: z.number().int().min(1).max(MCP_BUDGET_MAX).optional().describe(`list and get: ${LIST_BUDGET_HELP}`),
+            detail: z.enum(["compact", "full"]).optional().describe("list: full adds each task's body and the rest of its record, compact unless you say. A write answers the whole task; next with compact leaves the body out"),
+            token_budget: z.number().int().min(1).max(MCP_BUDGET_MAX).optional().describe(`list and get: ${LIST_BUDGET_HELP}; next: not applied; send detail compact`),
           }),
           annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
         },
@@ -2078,7 +2191,9 @@ export function createMcpFetch(config: Config, db: Db, invoke: Invoke) {
               return through("POST", `${base}${whole}`, { title, body, tag, after, tasks, idempotency_key }, tasks !== undefined ? renderTasksAdded : renderTask);
             }
             case "next":
-              return through("POST", `${base}/next`, { job: args.job, tag: args.tag, verify: args.verify, number: args.number, join: args.join }, renderTask);
+              // Whole unless compact is asked, which leaves the body out.
+              return through("POST", `${base}/next${args.detail === "compact" ? "?detail=compact" : ""}`,
+                { job: args.job, tag: args.tag, verify: args.verify, number: args.number, join: args.join }, renderTask);
             default: {
               if (args.number === undefined) return complain(`INVALID_REQUEST. The ${args.action} action needs number, the task's number.`);
               if (args.action === "get") {

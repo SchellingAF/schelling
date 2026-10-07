@@ -539,3 +539,56 @@ describe("the weekly report counts the readers the log now keeps", () => {
     assert.match(out, /4 searches and 1 opens were counted but not written/, out);
   });
 });
+
+// An upload authorization travels in Authorization, never in a path, so no log holds it
+// (migrations/0146_exact_uploads.sql, src/http/files.ts).
+describe("an upload authorization reaches no log", () => {
+  test("an upload by authorization, and one forced to INTERNAL, write neither the authorization nor its hex to any log file", async () => {
+    const dir = logDir("upload-grant");
+    // The write pool, failing only the store under an authorization, as a fault would.
+    const failing = new Proxy(db.write, {
+      apply(target, self, args: unknown[]) {
+        const text = Array.isArray(args[0]) ? (args[0] as string[]).join("") : "";
+        if (text.includes("put_file_granted") && failing.armed) {
+          return Promise.reject(Object.assign(new Error("a fault in the store"), { code: "XX000" }));
+        }
+        return Reflect.apply(target as unknown as (...a: unknown[]) => unknown, self, args);
+      },
+    }) as typeof db.write & { armed?: boolean };
+    const logged = createApp({ ...config, logDir: dir }, { ...db, write: failing });
+    const who = await agent({ on: logged });
+    assert.equal((await call(logged, who, "POST", "/v1/spaces", { name: "upload-log", title: "Uploads" })).status, 201);
+    const sha = (b: string) => sha256(b).toString("hex");
+    const secrets: string[] = [];
+    const real = console.error;
+    let exceptions = "";
+    console.error = (...parts: unknown[]) => {
+      exceptions += parts.map(String).join(" ") + "\n";
+    };
+    try {
+      for (const [i, armed] of [[0, false], [1, true]] as const) {
+        const content = `logged ${i} ${randomBytes(4).toString("hex")}\n`;
+        const asked = await call(logged, who, "POST", "/v1/spaces/upload-log/uploads", { sha256: [sha(content)] });
+        assert.equal(asked.status, 201, await asked.clone().text());
+        const authorization = ((await asked.json()) as any).uploads[0].authorization as string;
+        secrets.push(authorization.slice("Bearer ".length));
+        failing.armed = armed;
+        const res = await logged.request(`/v1/spaces/upload-log/files/${sha(content)}`, {
+          method: "PUT", headers: { authorization, "content-length": String(Buffer.byteLength(content)) }, body: content,
+        });
+        failing.armed = false;
+        assert.equal(res.status, armed ? 500 : 201, await res.text());
+      }
+    } finally {
+      console.error = real;
+    }
+    assert.ok(exceptions.length > 0, "the INTERNAL wrote its line");
+    const written = readdirSync(dir).map((f) => readFileSync(path.join(dir, f), "utf8")).join("\n") + exceptions;
+    assert.ok((await lines(dir)).some((l) => l.path === "/v1/spaces/:name/files/:sha256" && l.peer === who.peerId), "the upload's line names its KEY");
+    for (const secret of secrets) {
+      for (const part of [secret, secret.slice(-64), sha256(secret).toString("hex")]) {
+        assert.ok(!written.includes(part), "a log holds the authorization");
+      }
+    }
+  });
+});

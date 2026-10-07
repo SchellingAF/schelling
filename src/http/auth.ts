@@ -159,7 +159,16 @@ export type BearerState =
       clientId: string | null;
       /** When its KEY registered: a KEY's first day has smaller allowances. */
       registeredAt: Date;
-    };
+    }
+  /**
+   * An upload authorization, presented at the file PUT, the one route that looks one up
+   * (migrations/0146_exact_uploads.sql): it uploads `sha256` to the SPACE `spaceId`, named
+   * `spaceName`, once,
+   * as its KEY. Never a token: requireBearer() refuses it, and it holds no token's hash.
+   */
+  | { state: "upload"; peerId: Buffer; grant: Buffer; registeredAt: Date; spaceId: string; spaceName: string; sha256: Buffer }
+  /** An upload authorization that was used, expired, or whose token ended. */
+  | { state: "upload_expired" };
 
 /**
  * The code a request is refused with for its token, or null when the token is
@@ -179,7 +188,11 @@ export function tokenRefusal(bearer: BearerState): string | null {
     case "blocked":
       return "KEY_BLOCKED";
     case "invalid":
+    // An upload authorization is a bearer at the file PUT alone, which reads it itself.
+    case "upload":
       return "TOKEN_INVALID";
+    case "upload_expired":
+      return "UPLOAD_EXPIRED";
   }
 }
 
@@ -208,6 +221,27 @@ export function wellFormedToken(header: string | undefined): string | null {
   return presented;
 }
 
+/** The prefix of an upload authorization: a token's prefix and a word no token's tail holds,
+ * so wellFormedToken() reads one as no token, and every route but the file PUT as invalid. */
+export const UPLOAD_PREFIX = `${TOKEN_PREFIX}upload_`;
+
+/** The presented upload authorization when the header is shaped like one, else null. */
+export function wellFormedGrant(header: string | undefined): string | null {
+  if (!header) return null;
+  const match = /^Bearer\s+(\S+)$/.exec(header);
+  if (!match) return null;
+  const presented = match[1]!;
+  if (!presented.startsWith(UPLOAD_PREFIX)) return null;
+  if (fromHex(presented.slice(UPLOAD_PREFIX.length), 32) === null) return null;
+  return presented;
+}
+
+/** A new upload authorization: the secret, said once in an answer, and the hash kept. */
+export function newGrant(): { secret: string; hash: Buffer } {
+  const secret = UPLOAD_PREFIX + toHex(randomBytes(32));
+  return { secret, hash: sha256(secret) };
+}
+
 /**
  * Deliberately distinguishes expired, revoked and invalid. A silent downgrade to
  * anonymous would produce a "not found" an agent cannot diagnose, and the whole
@@ -228,8 +262,12 @@ export async function classifyBearer(
    * not exist is. Refusing it as unknown would count a real token as a guess.
    */
   audience: string | null = null,
+  /** Whether this request may carry an upload authorization: the file PUT alone. */
+  uploads = false,
 ): Promise<BearerState> {
   if (!header) return { state: "none" };
+  const grant = uploads ? wellFormedGrant(header) : null;
+  if (grant !== null) return classifyGrant(db, grant, addr);
   const presented = wellFormedToken(header);
   if (presented === null) return { state: "invalid" };
 
@@ -286,6 +324,29 @@ export async function classifyBearer(
     clientId: row.client_id,
     registeredAt: row.registered_at,
   };
+}
+
+/**
+ * An upload authorization, looked up as a token is: inside the same guess window, on the
+ * read pool, by its hash. Unknown is invalid and counted as a guess; used, expired or with
+ * its token ended, upload_expired; its KEY blocked, blocked.
+ */
+async function classifyGrant(db: Db, presented: string, addr: string): Promise<BearerState> {
+  const hash = sha256(presented);
+  const hex = toHex(hash);
+  const may = mayLookUpToken(addr, hex);
+  if (!may.allowed) throw new ApiError("RATE_LIMITED", { retryAfter: may.retryAfter, shared: true });
+  const rows = await db.read<
+    { state: string; peer_id: Buffer; blocked_at: Date | null; registered_at: Date; space_id: string; sha256: Buffer; space_name: string }[]
+  >`
+    select g.state, g.peer_id, g.blocked_at, g.registered_at, g.space_id::text as space_id, g.sha256, g.space_name
+      from schellingaf.upload_grant(${hash}) g`;
+  const row = rows[0];
+  noteTokenLookup(addr, hex, row !== undefined);
+  if (!row) return { state: "invalid" };
+  if (row.blocked_at) return { state: "blocked", peerId: row.peer_id };
+  if (row.state !== "valid") return { state: "upload_expired" };
+  return { state: "upload", peerId: row.peer_id, grant: hash, registeredAt: row.registered_at, spaceId: row.space_id, spaceName: row.space_name, sha256: row.sha256 };
 }
 
 /** Whether a KEY registered in the last day, which gets the smaller first-day allowances. */

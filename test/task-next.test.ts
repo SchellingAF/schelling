@@ -317,6 +317,63 @@ describe("next with one job", () => {
   });
 });
 
+describe("next with detail=compact", () => {
+  const BODY = "Read page 3 of the 1614 tables. Transcribe every row, then post the rows as a result.";
+
+  test("next with number and detail=compact answers no body, body_bytes, revision and cycle; done with that revision is accepted", async () => {
+    const { owner, a, name } = await crew();
+    await added(owner, name, { body: BODY });
+    const out = await call("POST", `/v1/spaces/${name}/tasks/next?detail=compact`, a.token, { number: 1 });
+    assert.equal(out.status, 200, JSON.stringify(out.body));
+    const t = out.body.task;
+    assert.equal("body" in t, false);
+    assert.equal(t.body_bytes, Buffer.byteLength(BODY, "utf8"));
+    assert.equal(t.title, "Transcribe page 3");
+    assert.equal(typeof t.cycle, "number");
+    assert.equal(out.body.job, "work");
+    assert.equal(out.body.why, why("number", { number: 1 }));
+    // Everything else the whole answer carries is there.
+    const whole = await job(a, name, { number: 1 });
+    assert.deepEqual(Object.keys(t).filter((k) => k !== "body_bytes").sort(), Object.keys(whole.task).filter((k) => k !== "body").sort());
+    assert.deepEqual(Object.keys(out.body).filter((k) => k !== "renewed").sort(), Object.keys(whole).filter((k) => k !== "renewed").sort());
+    const done = await act(a, name, 1, "done", { post_id: await result(a, name), revision: whole.task.revision ?? 1 });
+    assert.equal(done.status, 200, JSON.stringify(done.body));
+  });
+
+  test("next without detail, with detail=full, and with an unknown detail answers the whole task, as before", async () => {
+    const { owner, a, b, doer, name } = await crew();
+    await added(owner, name, { body: BODY });
+    await added(owner, name, { body: BODY });
+    await added(owner, name, { body: BODY });
+    const plain = await job(a, name, { number: 1 });
+    const full = (await call("POST", `/v1/spaces/${name}/tasks/next?detail=full`, b.token, { number: 2 }));
+    assert.equal(full.status, 200, JSON.stringify(full.body));
+    // An unknown detail is ignored, as it always was: never refused, and the task is taken.
+    const other = (await call("POST", `/v1/spaces/${name}/tasks/next?detail=summary`, doer.token, { number: 3 }));
+    assert.equal(other.status, 200, JSON.stringify(other.body));
+    for (const out of [plain, full.body, other.body]) {
+      assert.equal(out.task.body, BODY);
+      assert.equal("body_bytes" in out.task, false);
+      assert.equal(out.task.state, "claimed");
+    }
+    assert.deepEqual(Object.keys(full.body.task).sort(), Object.keys(plain.task).sort());
+    assert.deepEqual(Object.keys(other.body.task).sort(), Object.keys(plain.task).sort());
+  });
+
+  test("a check handed with detail=compact keeps its cycle and attempt, without the body", async () => {
+    const { owner, doer, a, name } = await crew();
+    await added(owner, name, { body: BODY });
+    await did(doer, name, 1);
+    const out = await call("POST", `/v1/spaces/${name}/tasks/next?detail=compact`, a.token, { job: "check" });
+    assert.equal(out.status, 200, JSON.stringify(out.body));
+    assert.equal(out.body.job, "check");
+    assert.equal("body" in out.body.task, false);
+    assert.equal(out.body.task.body_bytes, Buffer.byteLength(BODY, "utf8"));
+    const confirmed = await act(a, name, 1, "confirm", { post_id: await result(a, name), cycle: out.body.task.cycle });
+    assert.equal(confirmed.status, 200, JSON.stringify(confirmed.body));
+  });
+});
+
 describe("the offer cap", () => {
   test("ten KEYS at once, one done task an hour old needing 2 confirmations, ten open tasks: exactly 2 are sent to check", async () => {
     const owner = await agent();
@@ -490,6 +547,29 @@ describe("the words", () => {
     assert.deepEqual(answer.job.enum, ["work", "check", "upkeep", "stop"]);
     assert.ok(answer.why);
   });
+
+  test("the operation and the OpenAPI document say detail=compact leaves the body out, and an upkeep task keeps it", async () => {
+    const op = OPERATIONS.find((o) => o.name === "tasks.next")!;
+    assert.ok(op.describe.endsWith("With detail=compact, the task comes without its body, and body_bytes gives its size; an upkeep task keeps its body."), op.describe);
+    const doc = (await (await app.request("/openapi.json")).json()) as any;
+    const detail = doc.paths["/v1/spaces/{name}/tasks/next"].post.parameters.find((p: any) => p.name === "detail");
+    assert.deepEqual(detail.schema.enum, ["compact", "full"]);
+    assert.equal(detail.schema.default, "full");
+    assert.equal(detail.in, "query");
+    const schemas = doc.components.schemas;
+    assert.ok(schemas.Task.required.includes("body"), "every route's whole task has its body");
+    assert.equal(schemas.Task.properties.body_bytes, undefined);
+    assert.deepEqual(schemas.TaskWithoutBody.properties.body.not, {}, "a body is never present");
+    assert.equal(schemas.TaskWithoutBody.required.includes("body"), false);
+    assert.equal(schemas.TaskWithoutBody.properties.body_bytes.type, "integer");
+    assert.ok(schemas.TaskWithoutBody.required.includes("body_bytes"));
+    const answer = doc.paths["/v1/spaces/{name}/tasks/next"].post.responses["200"].content["application/json"].schema;
+    assert.equal(answer.$ref, "#/components/schemas/TaskNextAnswer");
+    assert.deepEqual(schemas.TaskNextAnswer.properties.task.anyOf[0].oneOf.map((s: any) => s.$ref),
+      ["#/components/schemas/Task", "#/components/schemas/TaskWithoutBody"]);
+    // Every other task write still answers TaskAnswer, whose whole task keeps its body.
+    assert.equal(doc.paths["/v1/spaces/{name}/tasks/{number}/done"].post.responses["200"].content["application/json"].schema.$ref, "#/components/schemas/TaskAnswer");
+  });
 });
 
 describe("the connector", () => {
@@ -514,6 +594,20 @@ describe("the connector", () => {
     assert.equal(work.text.split("\n")[1], `job: work. ${why("work", { number: 2 })}`);
     const stop = await tool(owner, { action: "next", space: name, job: "upkeep" });
     assert.deepEqual(stop.text.split("\n").slice(1), [`job: stop. ${NEXT_WORDS.why.stop_upkeep}`]);
+  });
+
+  test("next with detail compact prints the body's size, not the body", async () => {
+    const { owner, a, name } = await crew();
+    await added(owner, name, { body: "Read page 3. Transcribe every row." });
+    const out = await tool(a, { action: "next", space: name, number: 1, detail: "compact" });
+    assert.equal(out.isError, false, out.text);
+    assert.equal(out.json.task.body_bytes, 34);
+    assert.match(out.text, /\n {2}task body: 34 bytes, left out; read it with get\n/);
+    assert.doesNotMatch(out.text, /Transcribe every row/);
+    // Without it, the body comes whole, as before.
+    const whole = await tool(a, { action: "next", space: name, number: 1 });
+    assert.match(whole.text, /Transcribe every row/);
+    assert.doesNotMatch(whole.text, /left out/);
   });
 
   test("an answer with no job, from a service before 0.4, renders as it did", () => {

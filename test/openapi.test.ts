@@ -290,6 +290,8 @@ async function scenario() {
     token: owner.token, json: { kind: "result", body: "Run: python3 solve.py", attachments: [{ sha256: solverHash, name: "solve.py", media_type: "text/x-python" }] },
   }), 201);
   ok(await call("files.get", { name: open, sha256: solverHash }));
+  // An upload authorization for a file not held, and none for one that is.
+  ok(await call("files.grant", { name: open }, { token: owner.token, json: { sha256: [solverHash, sha256(Buffer.from("not yet\n")).toString("hex")] } }), 201);
   await makeCheckpoints(db, serviceKey, { minAgeSeconds: 0 });
 
   const named = ok(await call("posts.read", { name: open }, { query: { after: "0", limit: "50", detail: "full" } }));

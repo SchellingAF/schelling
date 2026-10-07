@@ -980,6 +980,71 @@ describe("a file's fetch and attach_files() find their rows through an index", (
     const walks = plans.filter((p) => walked(p.Plan).length).map((p) => `${walked(p.Plan).join(", ")} in: ${p["Query Text"].replace(/\s+/g, " ")}`);
     assert.deepEqual(walks, []);
   });
+
+  test("file_attachable() finds a shown file by its keys, and upload_grant() and grant_file_uploads() find authorizations by theirs", async () => {
+    // Authorizations enough that a walk of their table shows: a thousand, of the owner's
+    // token, for planned-space's files. Then each function runs as the service calls it,
+    // under a generic plan, logged by auto_explain: file_attachable() for a KEY that
+    // uploaded nothing, so the shown-file branch runs.
+    const stranger = await agent();
+    await fixture.owner`
+      insert into schellingaf.file_upload_grants (grant_hash, token_hash, peer_id, space_id, sha256, expires_at)
+      select sha256(convert_to('grant ' || g, 'UTF8')), sha256(convert_to(${owner.token}, 'UTF8')), decode(${owner.peerId}, 'hex'),
+             s.space_id, sha256(convert_to('file ' || g, 'UTF8')), now() + interval '15 minutes'
+        from schellingaf.spaces s cross join generate_series(1, 1000) g
+       where s.name = 'planned-space'`;
+    await fixture.owner`vacuum analyze schellingaf.file_upload_grants`;
+    const hash = createHash("sha256").update("file 400").digest();
+    const grant = createHash("sha256").update("grant 400").digest();
+
+    type PlanNode = { [field: string]: any; Plans?: PlanNode[] };
+    const nodesOf = (plan: PlanNode): PlanNode[] => [plan, ...(plan.Plans ?? []).flatMap(nodesOf)];
+    const logged: string[] = [];
+    const su = postgres({ ...SUPERUSER, database: fixture.name, onnotice: (n) => logged.push(n.message ?? "") });
+    try {
+      await su`load 'auto_explain'`;
+      for (const setting of ["log_min_duration = 0", "log_nested_statements = on", "log_format = json", "log_level = notice"]) {
+        await su.unsafe(`set auto_explain.${setting}`);
+      }
+      await su
+        .begin(async (tx) => {
+          await tx.unsafe("set local plan_cache_mode = force_generic_plan");
+          const [space] = await tx<{ id: string }[]>`select space_id::text as id from schellingaf.spaces where name = 'planned-space'`;
+          const [shown] = await tx<{ ok: boolean }[]>`
+            select schellingaf.file_attachable(${space!.id}::uuid, decode(${stranger.peerId}, 'hex'), ${hash}, 24) as ok`;
+          assert.equal(shown!.ok, true);
+          await tx.unsafe("set local role schellingaf_api");
+          const [row] = await tx<{ state: string }[]>`select g.state from schellingaf.upload_grant(${grant}) g`;
+          assert.equal(row!.state, "valid");
+          await tx`select schellingaf.grant_file_uploads('planned-space', decode(${owner.peerId}, 'hex'),
+                                                         sha256(convert_to(${owner.token}, 'UTF8')),
+                                                         ${tx.array([createHash("sha256").update("not held").digest()])}::bytea[],
+                                                         ${tx.array([createHash("sha256").update("a new grant").digest()])}::bytea[], 15, 24)`;
+          throw new Error("roll back");
+        })
+        .catch((error: Error) => {
+          if (error.message !== "roll back") throw error;
+        });
+    } finally {
+      await su.end({ timeout: 5 });
+    }
+    const plans = logged
+      .filter((m) => m.includes("{"))
+      .map((m) => JSON.parse(m.slice(m.indexOf("{"))) as { "Query Text": string; Plan: PlanNode });
+    const nodes = plans.flatMap((p) => nodesOf(p.Plan));
+    const read = new Set(nodes.map((n) => n["Relation Name"]).filter(Boolean));
+    for (const table of ["space_files", "file_uploads", "post_attachments", "file_upload_grants", "tokens"]) {
+      assert.ok(read.has(table), `read no ${table}: ${[...read].join(", ")}`);
+    }
+    const walked = (plan: PlanNode) =>
+      nodesOf(plan)
+        // tokens is left out: this database holds a handful, which the planner reads whole
+        // whatever its key; the probes name it by its primary key.
+        .filter((n) => n["Node Type"] === "Seq Scan" && ["space_files", "file_uploads", "post_attachments", "file_upload_grants", "posts"].includes(n["Relation Name"]))
+        .map((n) => n["Relation Name"]);
+    const walks = plans.filter((p) => walked(p.Plan).length).map((p) => `${walked(p.Plan).join(", ")} in: ${p["Query Text"].replace(/\s+/g, " ")}`);
+    assert.deepEqual(walks, []);
+  });
 });
 
 describe("a contest's notices find whom to tell through an index", () => {

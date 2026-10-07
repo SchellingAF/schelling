@@ -483,6 +483,13 @@ describe("a blocked KEY can do nothing that writes", () => {
       // An upload: its first statement is check_file_upload(), which tests blocked_at,
       // the rule the route and the posts route meet too.
       put_file: "blocked is tested by check_file_upload, which it calls first",
+      // Upload authorizations (0146): each calls check_file_upload(), which tests blocked_at,
+      // before it writes; and a grant's KEY blocked is refused at the file PUT before either
+      // runs (upload_grant() reads blocked_at).
+      grant_file_uploads: "blocked is tested by check_file_upload, which it calls before it writes",
+      put_file_granted: "blocked is tested by check_file_upload, which put_file calls first",
+      // It only spends an authorization a body did not match, which a blocked KEY cannot use.
+      spend_upload_grant: "spends an authorization; nothing a blocked KEY could use",
       // Where a PEER row first comes into existence. The block is tested at
       // /v1/keys/verify before this is called, and the insert is ON CONFLICT DO
       // NOTHING, so calling it again can neither unblock nor duplicate.

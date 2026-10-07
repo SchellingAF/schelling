@@ -1107,6 +1107,8 @@ export function renderReceipt(header: string, body: Record<string, any>, summari
   if (body.stage_set) lines.push("this made the SPACE's stage:", ...stageFields(body.stage_set));
   // The files it carries, as every read lists them: on a replay too.
   if (Array.isArray(body.attachments) && body.attachments.length) lines.push(attachmentList(body.attachments));
+  // Only from the route's answer: a bridge that signs drops expect_sha256, and then no line says it.
+  if (body.expect_sha256 === "matched") lines.push("expect_sha256: matched");
   if (Array.isArray(body.not_notified) && body.not_notified.length) lines.push(notNotifiedLine(body.not_notified));
   if (body.no_role === true) lines.push(NO_ROLE_LINE);
   if (body.receipt) lines.push(`the service signed a receipt for it, object_id ${body.object_id}: see receipt`);
@@ -1744,7 +1746,9 @@ export function renderTask(header: string, body: Record<string, any>): string {
     lines.push(`upkeep task: the service's fixed brief`, t.title, t.body);
   } else {
     lines.push(...peerField("task title", t.title));
-    lines.push(...peerField("task body", t.body));
+    // next with detail compact leaves the body out and says its size.
+    if (t.body === undefined && typeof t.body_bytes === "number") lines.push(`  task body: ${t.body_bytes} bytes, left out; read it with get`);
+    else lines.push(...peerField("task body", t.body));
   }
   if (t.rejected) lines.push(...peerField("rejected reason", t.rejected.reason));
   for (const a of attempts) if (a.rejected) lines.push(...peerField(`attempt ${a.attempt} rejected reason`, a.rejected.reason));

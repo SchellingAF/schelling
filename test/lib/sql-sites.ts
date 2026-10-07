@@ -803,6 +803,7 @@ export type Traced = { value: Value; trail: string[] };
 export const AUTHENTICATED: Record<string, { kind: "holder" | "key"; how: string }> = {
   requireBearer: { kind: "holder", how: "the request's valid token (requireBearer)" },
   optionalBearer: { kind: "key", how: "the request's valid token, or none (optionalBearer)" },
+  requireUploader: { kind: "holder", how: "the request's valid token, or an upload authorization a token of its KEY asked for (requireUploader in files.ts)" },
   verifyChallenge: { kind: "holder", how: "a KEY that signed this request's challenge (verifyChallenge)" },
 };
 

@@ -750,6 +750,93 @@ describe("a post through an app connection with a key", () => {
     assert.ok(["done", "accepted"].includes(out.result.structuredContent.task.state), JSON.stringify(out.result.structuredContent));
   });
 
+  // expect_sha256 and upload true (migrations/0146_exact_uploads.sql) through a connection
+  // that signs: the signed body is rebuilt from named fields, so both are carried beside it.
+  test("expect_sha256 through a signing connection is checked, with files, with attachments empty or left out, and on a posts item", async () => {
+    const work = await makeSpace(person);
+    const sha = (b: string) => createHash("sha256").update(b).digest("hex");
+    const text = `exact through the app ${randomUUID()}\n`;
+    const file = { name: "f.txt", media_type: "text/plain", text };
+    const ok = await postThrough(connection.appToken, { space: work.name, kind: "obs", body: "x", attachments: [file], expect_sha256: [sha(text)] });
+    assert.equal(ok.result.isError, undefined, JSON.stringify(ok.body));
+    assert.equal(ok.result.structuredContent.signed, true);
+    assert.equal(ok.result.structuredContent.expect_sha256, "matched");
+    assert.ok(ok.result.content[0].text.split("\n").includes("expect_sha256: matched"));
+    const typed = { ...file, text: text.replace("exact", "exacT") };
+    const wrong = await postThrough(connection.appToken, { space: work.name, kind: "obs", body: "x", attachments: [typed], expect_sha256: [sha(text)] });
+    assert.equal(wrong.result.isError, true);
+    assert.match(wrong.result.content[0].text, /^ATTACHMENT_MISMATCH\. /);
+    // No files: refused when it names one, whether attachments is empty or left out.
+    for (const attachments of [undefined, []]) {
+      const out = await postThrough(connection.appToken, { space: work.name, kind: "obs", body: "x", expect_sha256: [sha(text)], ...(attachments ? { attachments } : {}) });
+      assert.match(out.result.content[0].text, /^ATTACHMENT_MISMATCH\. .*\(expect_sha256 names 1 file; attachments has 0\)/);
+    }
+    // Naming none: the route checks it beside the signed body, and says so.
+    const empty = await postThrough(connection.appToken, { space: work.name, kind: "obs", body: "x", attachments: [], expect_sha256: [] });
+    assert.equal(empty.result.isError, undefined, JSON.stringify(empty.body));
+    assert.equal(empty.result.structuredContent.signed, true);
+    assert.equal(empty.result.structuredContent.expect_sha256, "matched");
+    // A posts item sends no files.
+    const batch = await postThrough(connection.appToken, { space: work.name, posts: [{ kind: "obs", title: "x", body: "x", expect_sha256: [sha(text)] }] });
+    assert.match(batch.result.content[0].text, /^ATTACHMENT_MISMATCH\. .*\(posts\[0\]: expect_sha256 names 1 file; attachments has 0\)/);
+    const items = await postThrough(connection.appToken, { space: work.name, posts: [{ kind: "obs", title: "x", body: "x", expect_sha256: [] }] });
+    assert.equal(items.result.isError, undefined, JSON.stringify(items.body));
+    assert.equal(items.result.structuredContent.posts[0].signed, true);
+    assert.equal(items.result.structuredContent.posts[0].expect_sha256, "matched");
+  });
+
+  test("upload true with every file held posts at once, signed by the app connection where allowed", async () => {
+    const work = await makeSpace(person);
+    const sha = (b: string) => createHash("sha256").update(b).digest("hex");
+    const held = `held already ${randomUUID()}\n`;
+    const put = (authorization: string, content: string) => app.request(`/v1/spaces/${work.name}/files/${sha(content)}`, {
+      method: "PUT", headers: { authorization, "content-length": String(Buffer.byteLength(content)) }, body: content,
+    });
+    assert.equal((await put(`Bearer ${person.token}`, held)).status, 201);
+    const once = await postThrough(connection.appToken, {
+      space: work.name, kind: "obs", body: "x", upload: true, expect_sha256: [sha(held)],
+      attachments: [{ sha256: sha(held), name: "h.txt", media_type: "text/plain" }],
+    });
+    assert.equal(once.result.isError, undefined, JSON.stringify(once.body));
+    assert.equal(once.result.structuredContent.signed, true);
+    assert.equal(once.result.structuredContent.expect_sha256, "matched");
+    // A file not held: a command, bound to the app's token, then the same call posts, signed.
+    const missing = `on the agent's machine ${randomUUID()}\n`;
+    const args = {
+      space: work.name, kind: "obs", body: "y", upload: true, idempotency_key: `up-${randomUUID()}`,
+      attachments: [{ sha256: sha(missing), name: "m.txt", media_type: "text/plain" }],
+    };
+    const asked = await postThrough(connection.appToken, args);
+    assert.equal(asked.result.isError, undefined, JSON.stringify(asked.body));
+    const authorization = asked.result.structuredContent.uploads[0].authorization as string;
+    const [grant] = await fixture.owner<{ token_hash: Buffer }[]>`
+      select token_hash from schellingaf.file_upload_grants where grant_hash = ${sha256(authorization.slice("Bearer ".length))}`;
+    assert.deepEqual(grant!.token_hash, sha256(connection.appToken));
+    assert.equal((await put(authorization, missing)).status, 201);
+    const posted = await postThrough(connection.appToken, args);
+    assert.equal(posted.result.isError, undefined, JSON.stringify(posted.body));
+    assert.equal(posted.result.structuredContent.signed, true);
+    assert.equal(posted.result.structuredContent.attachments[0].sha256, sha(missing));
+  });
+
+  test("an app allowed only to read asks for no upload authorization", async () => {
+    const clientId = await registerApp();
+    const { requestId, verifier } = await startRequest(clientId, "read");
+    const approved = await approve(person, requestId);
+    assert.equal(approved.status, 200, JSON.stringify(approved.body));
+    const code = new URL(approved.body.redirect_to).searchParams.get("code")!;
+    const issued = await trade({ grant_type: "authorization_code", code, redirect_uri: REDIRECT, client_id: clientId, code_verifier: verifier, resource: CONNECT });
+    assert.equal(issued.status, 200, JSON.stringify(issued.body));
+    const before = await fixture.owner<{ n: number }[]>`select count(*)::int as n from schellingaf.file_upload_grants where token_hash = ${sha256(issued.body.access_token)}`;
+    const out = await postThrough(issued.body.access_token, {
+      space: space.name, kind: "obs", body: "x", upload: true,
+      attachments: [{ sha256: "ab".repeat(32), name: "r.txt", media_type: "text/plain" }],
+    });
+    assert.equal(out.status, 403, JSON.stringify(out.body));
+    const after = await fixture.owner<{ n: number }[]>`select count(*)::int as n from schellingaf.file_upload_grants where token_hash = ${sha256(issued.body.access_token)}`;
+    assert.equal(after[0]!.n, before[0]!.n);
+  });
+
   test("the tool takes no alg but ed25519 from an agent, so connection cannot be named through it", async () => {
     const out = await postThrough(connection.appToken, { space: space.name, kind: "obs", alg: "connection", canonical: "e30", signature: "00".repeat(64) });
     assert.equal(out.result.isError, true);

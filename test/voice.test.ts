@@ -11,7 +11,10 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { randomUUID, sign } from "node:crypto";
 import { useService, call, agent, connector, type Agent } from "./lib/service.ts";
-import { HINT_FIRST_LINE, HINT_SECOND_LINE, HOW_TO_WRITE, LONG_WORDS, POSTED_AS_WRITTEN, TITLE_HINT_LINE, hintFor, hintForMany, sentences, wordsIn } from "../src/domain/voice.ts";
+import {
+  DRY_RUN_HINT_SECOND_LINE, HINT_FIRST_LINE, HINT_SECOND_LINE, HOW_TO_WRITE, LONG_WORDS, POSTED_AS_WRITTEN, TITLE_HINT_LINE, VERSION_CHANGED_HINT_FIRST_LINE,
+  VERSION_TITLE_HINT_LINE, changedLines, hintFor, hintForMany, hintForPost, sentences, wordsIn,
+} from "../src/domain/voice.ts";
 import { buildPostObject, signaturePreimageOf } from "../src/domain/objects.ts";
 import { renderPrimer } from "../src/docs/render.ts";
 
@@ -134,6 +137,51 @@ describe("the hint's words", () => {
     assert.match(said[0]!, pattern);
     assert.equal(said[1], HINT_SECOND_LINE);
     assert.equal(said.length, 2);
+  });
+
+  test("a version's hint counts only lines its base lacks", () => {
+    const base = [words(21), words(22, 101), "Short."].join("\n");
+    const body = [words(21), words(22, 101), `${words(23, 201)}. Short one.`, "Short."].join("\n");
+    assert.equal(hintForPost(null, body, "version", false, base), `1 of 2 sentences you changed ran over 20 words: ${named(23, 201)}.\n${HINT_SECOND_LINE}`);
+    // The lines are a multiset: a line the base holds once and the version twice is changed once.
+    const twice = [words(21), words(21), "Short."].join("\n");
+    assert.equal(hintForPost(null, twice, "version", false, [words(21), "Short."].join("\n")), `1 of 1 sentences you changed ran over 20 words: ${named(21)}.\n${HINT_SECOND_LINE}`);
+    // Compared trimmed: a line indented anew is not new writing.
+    assert.equal(hintForPost(null, `  ${words(21)}  `, "version", false, words(21)), null);
+    // A dry run says the same first line, then its own.
+    assert.equal(hintForPost(null, body, "version", true, base), `1 of 2 sentences you changed ran over 20 words: ${named(23, 201)}.\n${DRY_RUN_HINT_SECOND_LINE}`);
+    // Only on a version: another kind with a base is counted whole.
+    assert.equal(hintForPost(null, body, "result", false, base), hintForPost(null, body, "result"));
+    // The first line is the recorded template.
+    const pattern = new RegExp(
+      "^" + VERSION_CHANGED_HINT_FIRST_LINE.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+        .replace("Title ran <n> bytes; ", "")
+        .replace('\\("<first five words of that sentence> \\.\\.\\."\\)', '\\("[^"]+ \\.\\.\\."\\)')
+        .replace(/, <w2>.*$/, "")
+        .replace(/<[mk]>|<w\d>/g, "\\d+") + "\\.$",
+    );
+    assert.match(hintForPost(null, body, "version", false, base)!.split("\n")[0]!, pattern);
+  });
+
+  test("a changed line inside an unchanged fence is not prose", () => {
+    const base = ["```", "old", "```", "Short."].join("\n");
+    const body = ["```", words(30), "```", "Short."].join("\n");
+    assert.equal(hintForPost(null, body, "version", false, base), null);
+    assert.deepEqual([...changedLines(body, base)], [1]);
+  });
+
+  test("a version identical to its base gets no sentence hint; a long title still hints", () => {
+    const body = [words(21), words(22, 101)].join("\n");
+    assert.equal(hintForPost("What changed", body, "version", false, body), null);
+    assert.equal(hintForPost("t".repeat(130), body, "version", false, body), `Title ran 130 bytes.\n${VERSION_TITLE_HINT_LINE}\n${POSTED_AS_WRITTEN}`);
+  });
+
+  test("without a base the hint is byte for byte today's", () => {
+    const body = ["Short first.", words(21), words(22, 101)].join("\n");
+    const today = `2 of 3 sentences ran over 20 words: ${named(21)}, ${named(22, 101)}.\n${HINT_SECOND_LINE}`;
+    assert.equal(hintForPost(null, body, "version"), today);
+    assert.equal(hintForPost(null, body, "version", false, null), today);
+    assert.equal(hintForPost(null, body, "version", false, undefined), today);
   });
 
   test("several texts: the recorded first line for each that ran long, after its label, at most three, and how many more", () => {

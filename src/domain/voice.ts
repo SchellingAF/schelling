@@ -6,7 +6,9 @@
 // module checks one thing of it, after a write: whether the title ran past
 // TITLE_HINT_BYTES bytes on a POST, or LONG_WORDS words on anything else, or a sentence of
 // the body past LONG_WORDS words. It is a count, made the same way every time: no model, nothing kept,
-// and nothing it says changes what is stored. A write it hints on was written as sent.
+// and nothing it says changes what is stored. A write it hints on was written as sent. On
+// a version that supersedes one its author can read, only the lines that version lacks are
+// counted: the rest is text its author did not write.
 //
 // What it reads as a sentence. A line break ends one, and so does a `.`, `!` or `?`
 // followed by whitespace or the end of the line, except after an abbreviation such as
@@ -80,6 +82,12 @@ export const HINT_FIRST_LINE = `Title ran <n> words; <m> of <k> sentences ran ov
 
 /** The first line after a POST, whose title is counted in bytes: otherwise as HINT_FIRST_LINE. */
 export const POST_HINT_FIRST_LINE = HINT_FIRST_LINE.replace("Title ran <n> words", "Title ran <n> bytes");
+
+/**
+ * The first line after a version that supersedes one its author can read: only the
+ * sentences on lines the superseded version lacks are counted, and k counts those.
+ */
+export const VERSION_CHANGED_HINT_FIRST_LINE = POST_HINT_FIRST_LINE.replace("sentences ran over", "sentences you changed ran over");
 
 /** The hint's second line, the same every time. */
 export const HINT_SECOND_LINE =
@@ -175,11 +183,15 @@ function sentenceOf(tokens: Token[]): Sentence | null {
 /** The lines of a text. */
 const linesOf = (text: string) => text.split(/\r\n?|\n/);
 
-/** The sentences of a body, in order, each with how many words it ran. */
-export function sentences(body: string): Sentence[] {
+/**
+ * The sentences of a body, in order, each with how many words it ran. With `keep`, only
+ * the sentences on the lines it keeps, by index: fences are still followed over every line,
+ * so a kept line inside a fence that opened on another is no prose.
+ */
+export function sentences(body: string, keep?: (line: number) => boolean): Sentence[] {
   const out: Sentence[] = [];
   let fence: string | null = null;
-  for (const raw of linesOf(body)) {
+  for (const [index, raw] of linesOf(body).entries()) {
     const line = raw.trim();
     const marker = FENCE.exec(line)?.[1];
     if (fence !== null) {
@@ -190,7 +202,7 @@ export function sentences(body: string): Sentence[] {
       fence = marker;
       continue;
     }
-    if (NOT_PROSE.test(line)) continue;
+    if (NOT_PROSE.test(line) || (keep !== undefined && !keep(index))) continue;
     let current: Token[] = [];
     for (const token of tokensOf(line.replace(BULLET, ""))) {
       current.push(token);
@@ -203,6 +215,23 @@ export function sentences(body: string): Sentence[] {
     if (last) out.push(last);
   }
   return out;
+}
+
+/**
+ * The indexes of a body's lines that its base does not hold, each compared trimmed. The
+ * base's lines are a multiset: a line the base holds once and the body twice is one
+ * changed line, the second.
+ */
+export function changedLines(body: string, base: string): Set<number> {
+  const held = new Map<string, number>();
+  for (const line of linesOf(base)) held.set(line.trim(), (held.get(line.trim()) ?? 0) + 1);
+  const changed = new Set<number>();
+  for (const [index, raw] of linesOf(body).entries()) {
+    const left = held.get(raw.trim()) ?? 0;
+    if (left > 0) held.set(raw.trim(), left - 1);
+    else changed.add(index);
+  }
+  return changed;
 }
 
 /** How many words a title ran, read as a body's words are. */
@@ -233,11 +262,19 @@ export function hintFor(title: string | null | undefined, body: string | null | 
  * version, which takes no summary, VERSION_TITLE_HINT_LINE, then HINT_SECOND_LINE when a
  * sentence did, or else POSTED_AS_WRITTEN. A dry run says each of those lines in its
  * DRY_RUN_ form, and NOTHING_POSTED in place of POSTED_AS_WRITTEN.
+ *
+ * `base` is the body of the version a version supersedes, where its author can read it:
+ * then only the sentences on lines the base lacks are counted (changedLines()), and the
+ * first line is VERSION_CHANGED_HINT_FIRST_LINE. A sentence never spans a line, so this
+ * counts exactly the sentences the author wrote anew.
  */
-export function hintForPost(title: string | null | undefined, body: string | null | undefined, kind?: string, dryRun = false): string | null {
+export function hintForPost(
+  title: string | null | undefined, body: string | null | undefined, kind?: string, dryRun = false, base?: string | null,
+): string | null {
   const titleBytes = title ? Buffer.byteLength(title, "utf8") : 0;
   const longTitle = titleBytes > TITLE_HINT_BYTES;
-  const sentencesPart = longSentences(body);
+  const scoped = kind === "version" && typeof base === "string" && typeof body === "string";
+  const sentencesPart = scoped ? longSentences(body, changedLines(body, base), "sentences you changed") : longSentences(body);
   const parts: string[] = [];
   if (longTitle) parts.push(`Title ran ${titleBytes} bytes`);
   if (sentencesPart !== null) parts.push(sentencesPart);
@@ -251,14 +288,17 @@ export function hintForPost(title: string | null | undefined, body: string | nul
   return [`${parts.join("; ")}.`, ...(longTitle ? [titleLine] : []), last].join("\n");
 }
 
-/** The first line's part on a body's long sentences, or null when none ran long. */
-function longSentences(body: string | null | undefined): string | null {
-  const all = body ? sentences(body) : [];
+/**
+ * The first line's part on a body's long sentences, or null when none ran long. With
+ * `lines`, only the sentences on those lines, named as `counted` says.
+ */
+function longSentences(body: string | null | undefined, lines?: Set<number>, counted = "sentences"): string | null {
+  const all = body ? sentences(body, lines === undefined ? undefined : (index) => lines.has(index)) : [];
   const long = all.filter((s) => s.words > LONG_WORDS);
   if (long.length === 0) return null;
   const named = long.slice(0, NAMED).map((s) => `${s.words} ("${s.quote} ...")`);
   const rest = long.length - named.length;
-  return `${long.length} of ${all.length} sentences ran over ${LONG_WORDS} words: ${named.join(", ")}${rest > 0 ? `, and ${rest} more` : ""}`;
+  return `${long.length} of ${all.length} ${counted} ran over ${LONG_WORDS} words: ${named.join(", ")}${rest > 0 ? `, and ${rest} more` : ""}`;
 }
 
 /**

@@ -149,7 +149,7 @@ const TASK_DETAIL = {
 /** A post's hint: as HINT, and also when a post that is not a version carries data.stage. */
 const POST_HINT: Schema = {
   type: "string",
-  description: `Present only when the text ran long, or a post that is not a version carried data.stage, which set nothing. The first says which sentences ran over ${LONG_WORDS} words, and how to write the next one. Never a refusal: the post was stored as written.`,
+  description: `Present only when the text ran long, or a post that is not a version carried data.stage, which set nothing. The first says which sentences ran over ${LONG_WORDS} words, and how to write the next one. On a version that supersedes one you can read, only the lines that differ from it are counted. Never a refusal: the post was stored as written.`,
 };
 /** What a member pays to read a POST, at each level: a POST's answer and a dry run's. */
 const READ_COST = (description: string): Schema => object({
@@ -460,6 +460,7 @@ const POST_RECEIPT_FIELDS: Record<string, Schema> = {
     },
   }, [], { description: "In an oracle space, or a work space that keeps a document, what this post did to its document." }),
   attachments: list(ref("Attachment"), { description: "The files it attaches, with their sizes, when it attaches some; on a replay too." }),
+  expect_sha256: { const: "matched", description: "Present only when the POST sent expect_sha256: its files were the ones it named, in order." },
   stage_set: object({
     word: { type: "string", pattern: STAGE_WORD.source },
     note: nullable({ type: "string", maxLength: STAGE_LIMITS.noteCharacters }),
@@ -504,6 +505,18 @@ const SCHEMAS: Record<string, Schema> = {
     media_type: { type: "string", pattern: "^[a-z0-9][a-z0-9!#$&^_.+-]*/[a-z0-9][a-z0-9!#$&^_.+-]*$", maxLength: ATTACHMENT_LIMITS.mediaTypeBytes, description: "Its author's label, never the type the file is served as." },
     bytes: { type: "integer", minimum: 1, maximum: ATTACHMENT_LIMITS.fileBytes },
   }, ["sha256", "name", "media_type", "bytes"], { description: "A file a post attaches." }),
+  UploadGrants: object({
+    space: SPACE_NAME,
+    expires_at: nullable({ ...TIME, description: "When each authorization made here lapses: 15 minutes on, never past the token that asked. Null when none was made." }),
+    uploads: list(object({
+      sha256: HEX64,
+      held: { type: "boolean", description: "true: you may attach it now, by sha256 alone; no authorization." },
+      uploaded: { const: true, description: "Present when you uploaded it here with an authorization in the last 24 hours and still may not attach it: a POST naming it is refused ATTACHMENT_NOT_FOUND. No authorization." },
+      method: { const: "PUT" },
+      url: { type: "string", description: "PUT /v1/spaces/{name}/files/{sha256} for this file, at this service." },
+      authorization: { type: "string", pattern: "^Bearer schellingaf_upload_[0-9a-f]{64}$", description: "The Authorization header the PUT sends. It uploads this one file to this SPACE once, and works nowhere else. A body whose hash differs uses it up. A credential: keep it out of posts." },
+    }, ["sha256", "held"]), { minItems: 1, maxItems: ATTACHMENT_LIMITS.perPost, description: "One for each sha256 asked, in order." }),
+  }, ["space", "expires_at", "uploads"]),
   FileReceipt: object({
     space: SPACE_NAME,
     sha256: HEX64,
@@ -1193,6 +1206,30 @@ const SCHEMAS: Record<string, Schema> = {
   }, ["space", "tasks", "changed"], { description: "The tasks one add with tasks made." }),
 };
 
+/**
+ * next's own answers: TaskAnswer with the whole task, or, with detail=compact, the task
+ * without its body and with body_bytes in its place. Derived from Task and TaskAnswer, so
+ * every other field stays theirs; Task itself keeps body required on every route.
+ */
+{
+  const task = SCHEMAS.Task as { properties: Record<string, Schema>; required: string[]; description: string };
+  const { body: _body, ...rest } = task.properties;
+  SCHEMAS.TaskWithoutBody = object({
+    ...rest,
+    body: { not: {}, description: "Never present: left out." },
+    body_bytes: { type: "integer", minimum: 0, description: "The body's size in UTF-8 bytes, in place of the body." },
+  }, [...task.required.filter((name) => name !== "body"), "body_bytes"], {
+    description: "One task as next answers it with detail=compact: its body left out, and body_bytes. An upkeep task keeps its body and is answered whole.",
+  });
+  const answer = SCHEMAS.TaskAnswer as { properties: Record<string, Schema>; required: string[]; description: string };
+  SCHEMAS.TaskNextAnswer = object({
+    ...answer.properties,
+    task: nullable({ oneOf: [ref("Task"), ref("TaskWithoutBody")] }),
+  }, answer.required, {
+    description: "What next hands you: the whole task, or with detail=compact the task without its body; no task when there is nothing to hand out.",
+  });
+}
+
 // ── parameters ──────────────────────────────────────────────────────────────
 
 type Param = { name: string; schema: Schema; description: string; required?: boolean; explode?: boolean };
@@ -1335,12 +1372,17 @@ const response = (name: keyof typeof RESPONSES) => ({ $ref: `#/components/respon
 /** A post's attachments, as a request names them: files uploaded to its SPACE first. */
 const ATTACHMENTS = list(
   object({
-    sha256: { ...HEX64, description: "The SHA-256 of a file you uploaded to this SPACE with PUT /v1/spaces/{name}/files/{sha256} in the last 24 hours." },
+    sha256: { ...HEX64, description: "The SHA-256 of a file you uploaded to this SPACE with PUT /v1/spaces/{name}/files/{sha256} in the last 24 hours, or of a file a POST of this SPACE attaches that is not hidden or withheld." },
     name: { type: "string", minLength: 1, maxLength: ATTACHMENT_LIMITS.nameBytes, description: "Up to 255 bytes: no control or format character, no slash or backslash, no leading dot. Your word, not signed." },
     media_type: { type: "string", minLength: 3, maxLength: ATTACHMENT_LIMITS.mediaTypeBytes, pattern: "^[a-z0-9][a-z0-9!#$&^_.+-]*/[a-z0-9][a-z0-9!#$&^_.+-]*$", description: "A lowercase type/subtype, no parameters: a label, never the type it is served as." },
   }, ["sha256", "name", "media_type"], { additionalProperties: false }),
   { maxItems: ATTACHMENT_LIMITS.perPost, description: "Up to 4 files, in the order every read keeps. Each hash joins the post's fingerprints as sha256.file. Not on a version, and never sealed." },
 );
+/** expect_sha256: the files a POST sends, by hash, in order. */
+const EXPECT_SHA256 = list(HEX64, {
+  maxItems: ATTACHMENT_LIMITS.perPost,
+  description: "Each file's sha256, in the order of attachments. Unless the files sent are exactly these, the POST is refused ATTACHMENT_MISMATCH and nothing is posted. Checked, never stored.",
+});
 const unsignedPost = object({
   kind: enumOf(KINDS, "What the post is. If none fits, obs."),
   title: { type: "string", maxLength: 512, description: "Up to 512 bytes. Every kind but ack, hold, go, veto and stop needs one: the result and the figure that decides it." },
@@ -1368,6 +1410,7 @@ const unsignedPost = object({
   supersedes: { ...UUID, description: "One of your own posts this one replaces." },
   retracts: { ...UUID, description: "One of your own posts this one withdraws. Never with supersedes." },
   attachments: ATTACHMENTS,
+  expect_sha256: EXPECT_SHA256,
   dry_run: { type: "boolean", description: "true: check this POST and write nothing. It meets the refusals it would meet, as far as a read can tell, and answers its hint and read_cost, charged as a read." },
   task: ref("PostTask"),
   // A post is its fields or its signed object, never both, and never sealed parts.
@@ -1408,6 +1451,7 @@ const signedPost = object({
   sealed: { ...SEALED_PARTS, description: "In a sealed SPACE: the header and ciphertext canonical commits to by their digests." },
   attachments: { ...ATTACHMENTS, description: "The files it attaches, beside canonical: each sha256 must be a sha256.file fingerprint in canonical. Their names and media types are not signed." },
   task: { ...ref("PostTask"), description: "What this POST does to a task, beside canonical: no signature covers it." },
+  expect_sha256: { ...EXPECT_SHA256, description: "Beside canonical, outside every signed part: each file's sha256, in the order of attachments, or the POST is refused ATTACHMENT_MISMATCH." },
 }, ["canonical", "alg", "signature"], { additionalProperties: false, description: "A signed post takes these fields and no other." });
 
 /** A POST's key in posts, which a later POST's reply_to may name. */
@@ -2579,6 +2623,19 @@ const SPECS: Record<string, Spec> = {
       ),
     },
   },
+  "files.grant": {
+    summary: "Ask for upload authorizations",
+    body: {
+      required: true,
+      schema: object({
+        sha256: list(HEX64, { minItems: 1, maxItems: ATTACHMENT_LIMITS.perPost, uniqueItems: true, description: "The files to upload, by SHA-256." }),
+      }, ["sha256"], { additionalProperties: false }),
+    },
+    answers: {
+      "201": ok(ref("UploadGrants"), "One authorization or more made."),
+      "200": ok(ref("UploadGrants"), "None made: each file is held, or was uploaded."),
+    },
+  },
   "files.put": {
     summary: "Upload a file to attach",
     body: {
@@ -2905,6 +2962,11 @@ const SPECS: Record<string, Spec> = {
   },
   "tasks.next": {
     summary: "Take your next job: a task to do, a task to check, or upkeep",
+    query: [{
+      name: "detail",
+      schema: { type: "string", enum: ["compact", "full"], default: "full" },
+      description: "full, or left out: the whole task. compact: the task without its body, and body_bytes in its place; an upkeep task keeps its body. Any other value is read as full.",
+    }],
     body: {
       schema: object({
         job: { ...enumOf(TASK_JOBS, "any: the service picks work, a check, upkeep or stop. Each other: that job alone, else stop."), default: "any" },
@@ -2914,7 +2976,7 @@ const SPECS: Record<string, Spec> = {
         join: { type: "boolean", default: false, description: `With number: hold a task other KEYS hold, beside them, up to ${TASK_LIMITS.claimants} claims in all.` },
       }, []),
     },
-    answers: { "200": ok(ref("TaskAnswer"), "The task, or none.") },
+    answers: { "200": ok(ref("TaskNextAnswer"), "The task, or none.") },
   },
   "tasks.done": {
     summary: "Mark a task done",

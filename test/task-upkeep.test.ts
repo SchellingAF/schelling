@@ -206,6 +206,18 @@ describe("document upkeep", () => {
     assert.equal(compact.body.items.find((i: any) => i.number === 1).upkeep, undefined);
   });
 
+  test("next with detail=compact keeps an upkeep task's body: the service's brief, which the caller never read", async () => {
+    const { a, name } = await crew();
+    await results(a, name, 3);
+    const out = await call("POST", `/v1/spaces/${name}/tasks/next?detail=compact`, a.token, { job: "upkeep" });
+    assert.equal(out.status, 200, JSON.stringify(out.body));
+    assert.equal(out.body.job, "upkeep");
+    assert.equal(out.body.task.upkeep, "document");
+    assert.equal(typeof out.body.task.body, "string");
+    assert.ok(out.body.task.body.length > 0);
+    assert.equal("body_bytes" in out.body.task, false);
+  });
+
   test("a document with no version yet gets the first-version brief", async () => {
     const { a, name } = await crew();
     await results(a, name, 3);

@@ -677,8 +677,20 @@ export const ERRORS: Record<string, ErrorSpec> = {
   },
   ATTACHMENT_NOT_FOUND: {
     status: 422,
-    message: "ATTACHMENT_NOT_FOUND. An attachment names bytes you have not uploaded to this SPACE in the last 24 hours.",
-    fix: "The detail is the sha256. Upload the file with PUT /v1/spaces/<name>/files/<sha256>, then POST again with the same JSON. Nothing was posted.",
+    message: "ATTACHMENT_NOT_FOUND. An attachment names bytes you may not attach in this SPACE.",
+    fix: "The detail is the sha256. You may attach bytes you uploaded here in the last 24 hours, or a file you can fetch here. Upload it with PUT /v1/spaces/<name>/files/<sha256>, at the connector with upload true, or with the bridge by path, then POST again with the same JSON. Nothing was posted.",
+  },
+  // expect_sha256 and upload authorizations (migrations/0146_exact_uploads.sql). Each is met
+  // only by a caller that sent the field or holds an authorization.
+  ATTACHMENT_MISMATCH: {
+    status: 422,
+    message: "ATTACHMENT_MISMATCH. The files sent are not the ones expect_sha256 names.",
+    fix: "The detail names each difference. Send each file's exact bytes: upload it and name its sha256, or at the connector use upload true. Nothing was posted.",
+  },
+  UPLOAD_EXPIRED: {
+    status: 401,
+    message: "UPLOAD_EXPIRED. This upload authorization expired, was used, or its token ended.",
+    fix: "Ask for a new one: schellingaf_post with upload true, or POST /v1/spaces/<name>/uploads. Nothing was stored.",
   },
   SEALED_NO_FILES: {
     status: 409,

@@ -774,7 +774,9 @@ export function createApp(config: Config, db: Db): Hono<Env> {
       return next();
     }
     try {
-      c.set("bearer", await classifyBearer(db, c.req.header("Authorization"), clientAddress(c), audience));
+      // The file PUT alone takes an upload authorization in place of a token (files.ts).
+      const uploads = c.req.method === "PUT" && FILE_PATH.test(c.req.path);
+      c.set("bearer", await classifyBearer(db, c.req.header("Authorization"), clientAddress(c), audience, uploads));
     } catch (error) {
       // Only the guess window's refusal is carried: anything else would reach a
       // connector caller as an accusation of token guessing, with a wait nothing
@@ -2265,7 +2267,7 @@ export function createApp(config: Config, db: Db): Hono<Env> {
   mountSealed(app, config, db);
   mountOAuth(app, config, db);
   mountPosts(app, config, db, service);
-  mountFiles(app, db);
+  mountFiles(app, config, db);
   mountProofs(app, db, service);
   mountMailbox(app, db);
   mountMessages(app, config, db);

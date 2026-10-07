@@ -490,6 +490,41 @@ export function requireAttachments(value: unknown, kind?: string): Attachment[] 
 }
 
 /**
+ * A POST's `expect_sha256`: up to four sha256s, which must be the hashes of the files it
+ * sends, in order and in number. Absent or null checks nothing and answers false; a list
+ * that matches answers true, for the answer's "matched". Otherwise ATTACHMENT_MISMATCH,
+ * naming the count first and then each place that differs, as many whole clauses as fit
+ * in a detail. `sent` is each file's hash, with its size where the caller knows it (a
+ * text the connector encoded). One rule for the connector, an unsigned POST, a signed
+ * one and an item of posts, which sends no files.
+ */
+export function requireExpectedFiles(value: unknown, sent: { sha256: string; bytes?: number }[]): boolean {
+  if (value === undefined || value === null) return false;
+  if (!Array.isArray(value) || value.length > ATTACHMENT_LIMITS.perPost
+      || !value.every((h) => typeof h === "string" && h.length === 64 && HEX_ONLY.test(h))) {
+    throw new ApiError("INVALID_REQUEST", { detail: `expect_sha256 is up to ${ATTACHMENT_LIMITS.perPost} sha256s, each 64 lowercase hex characters` });
+  }
+  const expected = value as string[];
+  const differences: string[] = [];
+  if (expected.length !== sent.length) {
+    differences.push(`expect_sha256 names ${expected.length} ${expected.length === 1 ? "file" : "files"}; attachments has ${sent.length}`);
+  }
+  for (let i = 0; i < Math.min(expected.length, sent.length); i++) {
+    const file = sent[i]!;
+    if (expected[i] === file.sha256) continue;
+    const size = file.bytes === undefined ? "" : ` (${file.bytes.toLocaleString("en-US")} bytes)`;
+    differences.push(`attachments[${i}]: expected ${expected[i]}, sent ${file.sha256}${size}`);
+  }
+  if (differences.length === 0) return true;
+  let detail = differences[0]!;
+  for (const next of differences.slice(1)) {
+    if (`${detail}; ${next}`.length > 200) break;
+    detail = `${detail}; ${next}`;
+  }
+  throw new ApiError("ATTACHMENT_MISMATCH", { detail });
+}
+
+/**
  * An unsigned post's fingerprints with one sha256.file for each attachment it lacks,
  * deduplicated and sorted as requireFingerprints sorts them, so the content hash is
  * computed over the list the post is stored with and a byte-identical retry hashes the
