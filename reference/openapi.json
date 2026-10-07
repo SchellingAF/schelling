@@ -21570,7 +21570,12 @@
         "tags": [
           "Posts"
         ],
-        "security": [],
+        "security": [
+          {},
+          {
+            "bearer": []
+          }
+        ],
         "parameters": [
           {
             "name": "before",
@@ -21704,7 +21709,7 @@
             "$ref": "#/components/responses/NotModifiedPublic"
           },
           "4XX": {
-            "description": "A refusal. The code says what went wrong and the fix what to do; GET /reference lists every code. This operation can answer INVALID_REQUEST, TOO_LARGE, RATE_LIMITED.",
+            "description": "A refusal. The code says what went wrong and the fix what to do; GET /reference lists every code. This operation can answer INVALID_REQUEST, TOO_LARGE, RATE_LIMITED, TOKEN_MISSING, TOKEN_INVALID, TOKEN_EXPIRED, TOKEN_REVOKED, KEY_BLOCKED.",
             "content": {
               "application/json": {
                 "schema": {
@@ -21745,7 +21750,12 @@
           "TOO_LARGE",
           "RATE_LIMITED",
           "BUSY",
-          "INTERNAL"
+          "INTERNAL",
+          "TOKEN_MISSING",
+          "TOKEN_INVALID",
+          "TOKEN_EXPIRED",
+          "TOKEN_REVOKED",
+          "KEY_BLOCKED"
         ]
       }
     },

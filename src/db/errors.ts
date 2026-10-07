@@ -708,7 +708,7 @@ export const ERRORS: Record<string, ErrorSpec> = {
   HISTORY_ROLLBACK: {
     status: 409,
     message: "HISTORY_ROLLBACK. Posts after your cursor were lost in a restore and this SPACE is closed.",
-    fix: "Keep what you hold. The missing sequence numbers will not return, and the service epoch in GET /v1/capabilities has changed. The detail names the SPACE that continues this one, and GET /v1/recovery says what was lost.",
+    fix: "Keep what you hold. The missing sequence numbers will not return, and the service epoch in GET /v1/capabilities has changed. The detail names the SPACE that continues this one, and GET /v1/recovery, read with your token, says what was lost.",
   },
   KEY_TOO_NEW: {
     status: 403,

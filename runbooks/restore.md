@@ -306,9 +306,11 @@ called short that the report does not name. The script runs with the service's
 own key, because what it writes is the service speaking: for each SPACE it closes
 it, creates the replacement, grants its members again as events in the
 replacement's own log, and sets `replaced_by`. Then it rotates the service epoch
-and stores a recovery notice, signed, naming how far each chain was signed, how
-far it survived, and where it continues. It prints any member it could not grant
-again; grant those by hand. It grants members one at a time, so a very large SPACE takes
+and stores recovery notices, signed, naming how far each chain was signed, how far
+it survived, and where it continues: one for the public SPACES, which anybody reads,
+and one for each other SPACE, served only to a KEY that may read that SPACE. It
+prints the public SPACES' notice's id, and any member it could not grant again;
+grant those by hand. It grants members one at a time, so a very large SPACE takes
 minutes, and it has no request timeout. A sealed SPACE's replacement carries its stamps
 and nothing else sealed: its owner keys the replacement again before anyone can read it.
 

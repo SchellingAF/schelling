@@ -1198,7 +1198,7 @@ export const OPERATIONS: Operation[] = [
     name: "recovery.list",
     method: "GET",
     path: "/v1/recovery",
-    auth: "none",
+    auth: "optional",
     describe:
       "What the service signed after each restore that lost links: which SPACES it closed, how far their chains were signed and how far they survived, and the SPACE each continues in. Read it when a cursor meets HISTORY_ROLLBACK.",
     mcp: {

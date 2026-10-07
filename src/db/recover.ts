@@ -26,6 +26,7 @@ import type { ChainFinding } from "./restore-check.ts";
 import { currentEpoch, registerServiceKey } from "./checkpoints.ts";
 
 export type Recovery = {
+  /** The notice of the public SPACES, which everybody reads; each other SPACE has its own. */
   notice_id: string;
   service_epoch: string;
   spaces: { space_id: string; name: string; replacement: { space_id: string; name: string }; not_granted: unknown[] }[];
@@ -40,10 +41,15 @@ export async function recover(sql: postgres.Sql, key: ServiceKey, findings: Chai
     for (const f of findings) bySpace.set(f.space_id, [...(bySpace.get(f.space_id) ?? []), f]);
 
     const spaces: Recovery["spaces"] = [];
+    // The public SPACES are described in one notice everybody reads. A SPACE that is not
+    // public keeps its name, its id and how far its chains reached to its readers, so each
+    // one has a notice of its own naming it by space_id, which GET /v1/recovery serves
+    // only to a caller that may read that SPACE (src/http/proofs.ts).
     const described: Record<string, unknown>[] = [];
+    const describedApart: Record<string, unknown>[] = [];
     for (const [spaceId, chains] of bySpace) {
-      const [space] = await tx<{ name: string; replaced_by: string | null; last_seq: string; revision: string }[]>`
-        select name, replaced_by::text, last_seq::text, revision::text from schellingaf.spaces where space_id = ${spaceId}::uuid`;
+      const [space] = await tx<{ name: string; replaced_by: string | null; last_seq: string; revision: string; visibility: string }[]>`
+        select name, replaced_by::text, last_seq::text, revision::text, visibility from schellingaf.spaces where space_id = ${spaceId}::uuid`;
       if (!space || space.replaced_by !== null) continue;
       let n = 1;
       let replacement = "";
@@ -61,7 +67,7 @@ export async function recover(sql: postgres.Sql, key: ServiceKey, findings: Chai
       const [made] = await tx<{ r: { replacement: { space_id: string; name: string }; not_granted: unknown[] } }[]>`
         select schellingaf.recover_space(${space.name}, ${replacement}, ${reason}) as r`;
       spaces.push({ space_id: spaceId, name: space.name, replacement: made!.r.replacement, not_granted: made!.r.not_granted });
-      described.push({
+      (space.visibility === "public" ? described : describedApart).push({
         space_id: spaceId,
         name: space.name,
         signed: chains.map((c) =>
@@ -82,18 +88,25 @@ export async function recover(sql: postgres.Sql, key: ServiceKey, findings: Chai
       values (${reason}, ${tx.json({ spaces_replaced: spaces.map((s) => ({ name: s.name, replacement: s.replacement.name })) } as never)})
       returning epoch::text`;
     await registerServiceKey(tx, key);
-    const canonical = canonicalBytes({
-      v: 1,
-      service_epoch: epoch!.epoch,
-      previous_epoch: previous,
-      reason,
-      created_at: new Date().toISOString(),
-      spaces: described,
-      signer_key_id: key.keyId.toString("hex"),
-    });
-    const signature = signStatement("recovery", canonical, key.privateKey);
-    const [notice] = await tx<{ id: Buffer }[]>`select schellingaf.record_recovery_notice(${canonical}, ${signature}, ${key.keyId}) as id`;
-    return { notice_id: notice!.id.toString("hex"), service_epoch: epoch!.epoch, spaces };
+    const createdAt = new Date().toISOString();
+    const signNotice = async (apart: Record<string, unknown>, about: Record<string, unknown>[]): Promise<string> => {
+      const canonical = canonicalBytes({
+        v: 1,
+        service_epoch: epoch!.epoch,
+        previous_epoch: previous,
+        reason,
+        created_at: createdAt,
+        ...apart,
+        spaces: about,
+        signer_key_id: key.keyId.toString("hex"),
+      });
+      const signature = signStatement("recovery", canonical, key.privateKey);
+      const [notice] = await tx<{ id: Buffer }[]>`select schellingaf.record_recovery_notice(${canonical}, ${signature}, ${key.keyId}) as id`;
+      return notice!.id.toString("hex");
+    };
+    const noticeId = await signNotice({}, described);
+    for (const one of describedApart) await signNotice({ space_id: one.space_id }, [one]);
+    return { notice_id: noticeId, service_epoch: epoch!.epoch, spaces };
   })) as Recovery;
 }
 

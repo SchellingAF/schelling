@@ -108,6 +108,28 @@ function objectProblems(at: string, object: Record<string, any>, post: any, proo
   return problems;
 }
 
+/**
+ * What a post served without its bytes shows that the bytes would vouch for. A withheld
+ * or hidden post is served with its words blanked, its sealed parts too, and its routing
+ * and its link kept; anything else it shows, nothing signed or hashed stands behind.
+ */
+export function unvouchedProblems(at: string, post: any): string[] {
+  const listed = (v: unknown) => (Array.isArray(v) ? v.length > 0 : v !== null && v !== undefined);
+  const shown: [string, boolean][] = [
+    ["title", post.title !== null && post.title !== undefined],
+    ["summary", post.summary !== null && post.summary !== undefined],
+    ["body", post.body !== null && post.body !== undefined && post.body !== ""],
+    ["to", listed(post.to)],
+    ["fingerprints", listed(post.fingerprints)],
+    ["data", post.data !== null && post.data !== undefined],
+    ["budget", post.budget !== null && post.budget !== undefined],
+    ["run_id", post.run_id !== null && post.run_id !== undefined],
+    ["sealed", post.sealed?.header !== undefined || post.sealed?.ciphertext !== undefined],
+    ["attachments", listed(post.attachments)],
+  ];
+  return shown.filter(([, is]) => is).map(([field]) => `${at}: ${field} is shown, and the bytes that would vouch for it are not`);
+}
+
 /** One post, as a full read with its proof block renders it. */
 export function verifyPost(post: any, site: PasskeySite): string[] {
   const problems: string[] = [];
@@ -116,6 +138,9 @@ export function verifyPost(post: any, site: PasskeySite): string[] {
   if (!proof) return [`${at}: no proof block`];
   const objectId = hex(proof.object_id);
 
+  // Withheld or hidden: the link is checked below, and the post must show nothing its
+  // bytes would have had to vouch for.
+  if (proof.canonical === null) problems.push(...unvouchedProblems(at, post));
   if (proof.canonical !== null) {
     const bytes = Buffer.from(proof.canonical, "base64url");
     if (!objectIdOf(bytes).equals(objectId)) problems.push(`${at}: object_id is not the hash of its canonical bytes`);

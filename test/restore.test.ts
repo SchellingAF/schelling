@@ -510,6 +510,50 @@ describe("the checkpoint log is compacted, and a log that is not there stops the
     }
   });
 
+  test("a log that names no checkpoint is no log: it stops the start while the database holds checkpoints, but for the one a fresh start began, until the service signs again", async () => {
+    const byHand = async (s: Service): Promise<string> => {
+      const [row] = await s.owner<{ newest: string | null; n: string }[]>`
+        select (select encode(c.checkpoint_id, 'hex') from schellingaf.space_checkpoints c
+                 order by c.created_at desc, c.checkpoint_id desc limit 1) as newest,
+               (select count(*) from schellingaf.space_checkpoints)::text as n`;
+      return createHash("sha256").update(`${row!.newest ?? ""}:${row!.n}`).digest("hex").slice(0, 12);
+    };
+    const refused = (file: string, token: string) => (error: Error) =>
+      error.message.startsWith(`restore check: the database holds signed checkpoints, and ${file} names none.\n`) &&
+      error.message.includes(`start once with CHECKPOINT_LOG_MAY_BE_ABSENT=${token}. `);
+
+    const a = open(ORIGINAL);
+    try {
+      const token = await byHand(a);
+      // Emptied, or holding only a line cut short: nothing to compare, so no start.
+      const emptied = mkdtempSync(path.join(logDir, "emptied-"));
+      const file = path.join(emptied, CHECKPOINT_LOG);
+      writeFileSync(file, "");
+      await assert.rejects(checkRestore(a.db, emptied), refused(file, token));
+      writeFileSync(file, `{"space_id":"${spaceId}","stream":"po\n\n`);
+      await assert.rejects(checkRestore(a.db, emptied), refused(file, token));
+      // The token lets one start through, as it does for a log that is not there.
+      assert.deepEqual(await checkRestore(a.db, emptied, { absentLogToken: token }), { checked: 0, findings: [] });
+
+      // A fresh start's own new log is empty until the service signs, and starts again
+      // with nothing more said while nothing was signed.
+      const fresh = mkdtempSync(path.join(logDir, "fresh-"));
+      assert.deepEqual(await checkRestore(a.db, fresh, { absentLogToken: token }), { checked: 0, findings: [], newLog: true });
+      assert.deepEqual(await checkRestore(a.db, fresh), { checked: 0, findings: [] });
+      assert.deepEqual(await checkRestore(a.db, emptied), { checked: 0, findings: [] });
+
+      // Signed since, an empty log is an emptied one again.
+      assert.equal((await call(a, "POST", `/v1/spaces/${spaceName}/posts`, writer.token, { kind: "obs", body: "after the empty log" })).status, 201);
+      const signed = await makeCheckpoints(a.db, key, { minAgeSeconds: 0, logDir: mkdtempSync(path.join(logDir, "empty-signed-")) });
+      assert.ok(signed.state === "done" && signed.made > 0, JSON.stringify(signed));
+      const next = await byHand(a);
+      await assert.rejects(checkRestore(a.db, fresh), refused(path.join(fresh, CHECKPOINT_LOG), next));
+      await assert.rejects(checkRestore(a.db, emptied, { absentLogToken: token }), refused(file, next));
+    } finally {
+      await close(a);
+    }
+  });
+
   test("CHECKPOINT_LOG_MAY_BE_ABSENT is off or a token, and 1 is refused", () => {
     const saved = { ...process.env };
     const load = (value: string | undefined) => {

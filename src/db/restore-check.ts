@@ -24,14 +24,23 @@
 // token the refusal prints (absentLogToken), which follows the checkpoints the
 // database holds: a value left set in an operator's settings lets no later start
 // through once the service has signed again, if the log goes missing a second time.
+//
+// A log that names no checkpoint compares nothing either, emptied or holding only a line
+// cut short, and is refused the same way. The one empty log that starts is a fresh start's
+// own, while nothing has been signed since: the start the token let through writes that
+// token beside the log (CHECKPOINT_LOG_FRESH), and an empty log starts again only while
+// the database's token is still that one.
 
 import { createHash } from "node:crypto";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { Db } from "./sql.ts";
 import { CHECKPOINT_LOG, latestSigned } from "./checkpoints.ts";
 
 export const RESTORE_REPORT = "restore-check.json";
+
+/** Beside the log: the token the last fresh start was let through with. */
+export const CHECKPOINT_LOG_FRESH = `${CHECKPOINT_LOG}.fresh`;
 
 /**
  * How many chains one statement compares. Each chain is two index probes and their
@@ -101,16 +110,20 @@ export async function checkRestore(
   } catch (error) {
     throw new Error(`restore check: ${error instanceof Error ? error.message : String(error)}`);
   }
-  if (read === null) {
+  if (read === null || read.size === 0) {
     if (!(await checkpointsHeld(db))) return { checked: 0, findings: [] };
     const token = await absentLogToken(db);
     const given = options.absentLogToken ?? null;
-    if (given !== token) {
+    const fresh = path.join(logDir, CHECKPOINT_LOG_FRESH);
+    const freshStart = read !== null && (await readFile(fresh, "utf8").catch(() => "")).trim() === token;
+    if (given !== token && !freshStart) {
       throw new Error(
-        `restore check: the database holds signed checkpoints, and ${file} is not there.\n` +
+        `restore check: the database holds signed checkpoints, and ${file} ${read === null ? "is not there" : "names none"}.\n` +
           "That file is the record of what the service signed that a restore cannot roll back. Without it\n" +
           "nothing shows the restored chains still reach what agents were shown, so the service does not start.\n" +
-          "Most often the log directory is not mounted: mount it as it was, and start again.\n" +
+          (read === null
+            ? "Most often the log directory is not mounted: mount it as it was, and start again.\n"
+            : "Most often the log was emptied or replaced: put back the log as it was, and start again.\n") +
           (given === null
             ? ""
             : `CHECKPOINT_LOG_MAY_BE_ABSENT is ${given}, which is not the token for the checkpoints this database holds now.\n`) +
@@ -122,7 +135,8 @@ export async function checkRestore(
     // Created and never truncated: append mode makes the file if it is not there.
     await mkdir(logDir, { recursive: true });
     await writeFile(file, "", { flag: "a" });
-    return { checked: 0, findings: [], newLog: true };
+    await writeFile(fresh, `${token}\n`);
+    return { checked: 0, findings: [], ...(read === null ? { newLog: true as const } : {}) };
   }
 
   const chains = [...read.values()].map((entry) => entry.signed);

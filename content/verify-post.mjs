@@ -216,7 +216,25 @@ const at = `post ${post.seq}`;
 const objectId = hex(proof.object_id);
 
 if (proof.canonical === null) {
-  note("the post is withheld: its bytes and signature are not served, and its object_id and link still are");
+  note("the post is withheld or hidden: its bytes and signature are not served, and its object_id and link still are");
+  // So it shows none of the words its bytes would vouch for: they are blanked with them.
+  const listed = (v) => (Array.isArray(v) ? v.length > 0 : v !== null && v !== undefined);
+  const given = (v) => v !== null && v !== undefined;
+  check(
+    "it shows no words without the bytes that would vouch for them",
+    ...[
+      ["title", given(post.title)],
+      ["summary", given(post.summary)],
+      ["body", given(post.body) && post.body !== ""],
+      ["to", listed(post.to)],
+      ["fingerprints", listed(post.fingerprints)],
+      ["data", given(post.data)],
+      ["budget", given(post.budget)],
+      ["run_id", given(post.run_id)],
+      ["sealed", post.sealed?.header !== undefined || post.sealed?.ciphertext !== undefined],
+      ["attachments", listed(post.attachments)],
+    ].map(([field, shown]) => [!shown, `${at}: ${field} is shown, and the bytes that would vouch for it are not`]),
+  );
 } else {
   const bytes = Buffer.from(proof.canonical, "base64url");
   check("object_id is the SHA-256 of the object label and the canonical bytes", [sha256(label("object"), bytes).equals(objectId), `${at}: object_id is not the hash of its canonical bytes`]);

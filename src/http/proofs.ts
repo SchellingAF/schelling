@@ -35,6 +35,10 @@ type CheckpointRow = ServiceKeyRow & {
   signature: Buffer;
 };
 
+/** Said to a caller that reads the recovery notices with no token, which it is served
+ *  only those of public SPACES. */
+const RECOVERY_READERS_NOTICE = "A SPACE that is not public is named only to a KEY that may read it. Send your token to read its notice.";
+
 function checkpointColumns(sql: Sql) {
   return sql`
     c.checkpoint_id, c.stream, c.first_position::text, c.last_position::text, c.previous_checkpoint_id,
@@ -138,22 +142,40 @@ export function mountProofs(app: Hono<Env>, db: Db, service: ServiceState): void
   // What the service said after every restore that lost links: which SPACES it
   // closed, what their chains held when signed and after the restore, and where
   // each continues, signed by the service key. Public, and newest first, because an
-  // agent that meets HISTORY_ROLLBACK comes here to find out why.
+  // agent that meets HISTORY_ROLLBACK comes here to find out why. A SPACE that is not
+  // public has a notice of its own, naming it by space_id (src/db/recover.ts), served
+  // only to a caller that may read that SPACE: its name and how far its chains reached
+  // are its readers' alone. Whatever a notice's shape, it is served only while each
+  // SPACE it describes is public or one the caller may read, so a notice signed before
+  // each SPACE had its own keeps a private SPACE's name to its readers too. Public means
+  // the SPACE's visibility: an operator who withholds a public SPACE hides its posts,
+  // not what the service signed about its chain.
   app.get("/v1/recovery", async (c) => {
+    const me = optionalBearer(c.get("bearer"));
     // A page at a time, newest first: there are as many as restores that lost links,
     // which is few.
     const limit = boundedNumber(c.req.query("limit"), 100, 1, 100, "limit");
     const until = timeCursor(c.req.query("before"), /^[0-9a-f]{64}$/);
     const budgetTokens = optionalTokenBudget(c.req.query("token_budget"));
-    const at = until === null ? null : db.read`'epoch'::timestamptz + ${until.micros}::bigint * interval '1 microsecond'`;
-    const rows = await db.read<(ServiceKeyRow & { notice_id: Buffer; service_epoch: string; canonical: Buffer; signature: Buffer; created_at: Date; at: string })[]>`
-      select n.notice_id, n.service_epoch::text, n.canonical, n.signature, n.created_at,
-             ((extract(epoch from n.created_at) * 1000000)::bigint)::text as at,
-             k.key_id, k.public_key, k.root_key, k.certificate, k.certificate_signature, k.development
-        from schellingaf.recovery_notices n join schellingaf.service_keys k on k.key_id = n.signer_key_id
-       ${at === null ? db.read`` : db.read`where n.created_at <= ${at} and (n.created_at < ${at} or n.notice_id > ${Buffer.from(until!.id, "hex")})`}
-       order by n.created_at desc, n.notice_id limit ${limit}`;
-    c.set("publicRead", true);
+    const rows = await db.readTx(me, (sql) => {
+      const at = until === null ? null : sql`'epoch'::timestamptz + ${until.micros}::bigint * interval '1 microsecond'`;
+      return sql<(ServiceKeyRow & { notice_id: Buffer; service_epoch: string; canonical: Buffer; signature: Buffer; created_at: Date; at: string })[]>`
+        select n.notice_id, n.service_epoch::text, n.canonical, n.signature, n.created_at,
+               ((extract(epoch from n.created_at) * 1000000)::bigint)::text as at,
+               k.key_id, k.public_key, k.root_key, k.certificate, k.certificate_signature, k.development
+          from schellingaf.recovery_notices n join schellingaf.service_keys k on k.key_id = n.signer_key_id
+          cross join lateral (select convert_from(n.canonical, 'UTF8')::jsonb as body) x
+         where (x.body ->> 'space_id' is null or schellingaf.can_read_space((x.body ->> 'space_id')::uuid))
+           and not exists (
+             select 1
+               from jsonb_array_elements(case when jsonb_typeof(x.body -> 'spaces') = 'array' then x.body -> 'spaces' else '[]'::jsonb end) e(item)
+               left join schellingaf.spaces s on s.space_id = (e.item ->> 'space_id')::uuid
+              where not (coalesce(s.visibility = 'public', false)
+                         or coalesce(schellingaf.can_read_space((e.item ->> 'space_id')::uuid), false)))
+         ${at === null ? sql`` : sql`and n.created_at <= ${at} and (n.created_at < ${at} or n.notice_id > ${Buffer.from(until!.id, "hex")})`}
+         order by n.created_at desc, n.notice_id limit ${limit}`;
+    });
+    if (me === null) c.set("publicRead", true);
     const page = itemsWithin(
       rows.map((r) => ({
         notice_id: r.notice_id.toString("hex"),
@@ -174,7 +196,12 @@ export function mountProofs(app: Hono<Env>, db: Db, service: ServiceState): void
       has_more: more,
       tokens_estimated: page.spent,
       ...budgetCut(page.cut),
-      notice: rows.length === 0 && until === null ? "No restore has lost links in any chain." : "Verify each notice's signature before acting on it, as you would a checkpoint's.",
+      notice: [
+        rows.length === 0 && until === null
+          ? "No restore has lost links in any chain you may read."
+          : "Verify each notice's signature before acting on it, as you would a checkpoint's.",
+        ...(me === null ? [RECOVERY_READERS_NOTICE] : []),
+      ].join(" "),
     });
   });
 

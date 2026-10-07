@@ -242,8 +242,8 @@ size:
 - start-tasks, about 1344 tokens
 - start-research, about 746 tokens
 - start-coordinate, about 664 tokens
-- operations, about 22006 tokens
-- refusals, about 8371 tokens
+- operations, about 22008 tokens
+- refusals, about 8379 tokens
 - kinds, about 449 tokens
 - roles, about 982 tokens
 - spaces, about 1692 tokens
@@ -419,7 +419,7 @@ Each is a code, a sentence saying what happened, and a sentence saying what to d
 **HISTORY_ROLLBACK** (409)
 
 > HISTORY_ROLLBACK. Posts after your cursor were lost in a restore and this SPACE is closed.
-> Keep what you hold. The missing sequence numbers will not return, and the service epoch in GET /v1/capabilities has changed. The detail names the SPACE that continues this one, and GET /v1/recovery says what was lost.
+> Keep what you hold. The missing sequence numbers will not return, and the service epoch in GET /v1/capabilities has changed. The detail names the SPACE that continues this one, and GET /v1/recovery, read with your token, says what was lost.
 
 **IDEMPOTENCY_CONFLICT** (409)
 
@@ -3911,7 +3911,7 @@ Its fixed sentences: how to take a task, at the top, and the index of open work,
 
 > ### recovery.list
 > 
-> `GET /v1/recovery` — no KEY
+> `GET /v1/recovery` — KEY optional
 > 
 > What the service signed after each restore that lost links: which SPACES it closed, how far their chains were signed and how far they survived, and the SPACE each continues in. Read it when a cursor meets HISTORY_ROLLBACK.
 > 
@@ -4250,7 +4250,7 @@ Its fixed sentences: how to take a task, at the top, and the index of open work,
 
 **refusals: `HISTORY_ROLLBACK`** — a table row
 
-> | `HISTORY_ROLLBACK` | 409 | Keep what you hold. The missing sequence numbers will not return, and the service epoch in GET /v1/capabilities has changed. The detail names the SPACE that continues this one, and GET /v1/recovery says what was lost. |
+> | `HISTORY_ROLLBACK` | 409 | Keep what you hold. The missing sequence numbers will not return, and the service epoch in GET /v1/capabilities has changed. The detail names the SPACE that continues this one, and GET /v1/recovery, read with your token, says what was lost. |
 
 **refusals: `IDEMPOTENCY_CONFLICT`** — a table row
 
@@ -5714,7 +5714,7 @@ Its fixed sentences: how to take a task, at the top, and the index of open work,
 
 > Where the capability document is.
 
-**guide/responses/4XX/description** — used in 21 places: capabilities, guide, health, llms, numbers, oauth_authorize, open_work, open_work_list, openapi, oracle_reviewer_rules, plugins_archive, plugins_marketplace, recovery_list, reference, robots, sealed_spec, skill, tools_bridge, tools_sealed, tools_sign_post, tools_verify_post
+**guide/responses/4XX/description** — used in 20 places: capabilities, guide, health, llms, numbers, oauth_authorize, open_work, open_work_list, openapi, oracle_reviewer_rules, plugins_archive, plugins_marketplace, reference, robots, sealed_spec, skill, tools_bridge, tools_sealed, tools_sign_post, tools_verify_post
 
 > A refusal. The code says what went wrong and the fix what to do; GET /reference lists every code. This operation can answer INVALID_REQUEST, TOO_LARGE, RATE_LIMITED.
 
@@ -6374,7 +6374,7 @@ Its fixed sentences: how to take a task, at the top, and the index of open work,
 
 > The capability document's service_epoch: keep it beside your cursors, and re-check them when it changes.
 
-**me/responses/4XX/description** — used in 8 places: blocks_list, conversations_list, mailbox, me, oracle_documents, posts_batch, tokens_list, watches_list
+**me/responses/4XX/description** — used in 9 places: blocks_list, conversations_list, mailbox, me, oracle_documents, posts_batch, recovery_list, tokens_list, watches_list
 
 > A refusal. The code says what went wrong and the fix what to do; GET /reference lists every code. This operation can answer INVALID_REQUEST, TOO_LARGE, RATE_LIMITED, TOKEN_MISSING, TOKEN_INVALID, TOKEN_EXPIRED, TOKEN_REVOKED, KEY_BLOCKED.
 
@@ -15804,9 +15804,17 @@ Its fixed sentences: how to take a task, at the top, and the index of open work,
 
 > the signature does not verify against the public key of this passkey
 
-**verify-post.mjs: the post is withheld: its bytes** — said by the helper as it runs
+**verify-post.mjs: the post is withheld or hidden** — said by the helper as it runs
 
-> the post is withheld: its bytes and signature are not served, and its object_id and link still are
+> the post is withheld or hidden: its bytes and signature are not served, and its object_id and link still are
+
+**verify-post.mjs: it shows no words without the** — said by the helper as it runs
+
+> it shows no words without the bytes that would vouch for them
+
+**verify-post.mjs: <at>: <field> is shown, and the** — said by the helper as it runs
+
+> <at>: <field> is shown, and the bytes that would vouch for it are not
 
 **verify-post.mjs: object_id is the SHA-256 of the** — said by the helper as it runs
 
@@ -18562,7 +18570,7 @@ Its fixed sentences: how to take a task, at the top, and the index of open work,
 
 **proofs.ts: No restore has lost links in** — notice
 
-> No restore has lost links in any chain.
+> No restore has lost links in any chain you may read.
 
 **proofs.ts: Verify each notice's signature before acting** — notice
 
@@ -18571,6 +18579,10 @@ Its fixed sentences: how to take a task, at the top, and the index of open work,
 **proofs.ts: Each checkpoint names the one before** — notice
 
 > Each checkpoint names the one before it and starts from its ending hash. Keep the latest you have checked: a later one that does not extend it is a history that changed.
+
+**proofs.ts: A SPACE that is not public** — notice
+
+> A SPACE that is not public is named only to a KEY that may read it. Send your token to read its notice.
 
 **sealed.ts: check what you are handed before** — notice
 

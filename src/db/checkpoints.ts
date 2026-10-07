@@ -201,12 +201,32 @@ async function makeOne(
     select schellingaf.insert_checkpoint(${canonical}, ${signature}) as r`;
   if (row?.r.created && logDir) {
     await mkdir(logDir, { recursive: true });
+    const file = path.join(logDir, CHECKPOINT_LOG);
     await appendFile(
-      path.join(logDir, CHECKPOINT_LOG),
-      `${JSON.stringify({ checkpoint_id: row.r.checkpoint_id, ...body, canonical: canonical.toString("base64url"), signature: signature.toString("hex") })}\n`,
+      file,
+      `${await lineBreakBefore(file)}${JSON.stringify({ checkpoint_id: row.r.checkpoint_id, ...body, canonical: canonical.toString("base64url"), signature: signature.toString("hex") })}\n`,
     );
   }
   return row?.r.created === true;
+}
+
+/** A line break when the log's last line has no end, as an append a crash cut short
+ *  leaves it, so the entry that follows stands on a line of its own and is read. */
+async function lineBreakBefore(file: string): Promise<string> {
+  const handle = await open(file, "r").catch((error: NodeJS.ErrnoException) => {
+    if (error.code === "ENOENT") return null;
+    throw error;
+  });
+  if (handle === null) return "";
+  try {
+    const { size } = await handle.stat();
+    if (size === 0) return "";
+    const last = Buffer.alloc(1);
+    await handle.read(last, 0, 1, size - 1);
+    return last[0] === 0x0a ? "" : "\n";
+  } finally {
+    await handle.close();
+  }
 }
 
 /** What the restore check compares of one log entry. */
