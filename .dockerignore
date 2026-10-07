@@ -1,6 +1,12 @@
 node_modules
 secrets
 .env
+.env.*
+**/*.pem
+.dev.vars
+postgres/pgbackrest.conf
+incidents
+.claude
 *.log
 .DS_Store
 .git

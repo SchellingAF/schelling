@@ -109,15 +109,16 @@ secret api_db_password
 secret challenge_key
 secret backup_cipher
 
-# The database containers read these as uid 999; the api reads its two as 1000.
+# The database containers read these as uid 999; the api reads challenge_key as 1000.
 chown "$PG_UID:$PG_UID" "$ROOT/secrets/postgres_password" \
                         "$ROOT/secrets/owner_db_password" \
                         "$ROOT/secrets/backup_cipher" 2>/dev/null || true
-chown "$NODE_UID:$NODE_UID" "$ROOT/secrets/api_db_password" \
-                            "$ROOT/secrets/challenge_key" 2>/dev/null || true
-# migrate_db_password is read by both the database at initdb and the migrate
-# container, so it is group-readable rather than owned by either.
-chmod 644 "$ROOT/secrets/migrate_db_password" 2>/dev/null || true
+chown "$NODE_UID:$NODE_UID" "$ROOT/secrets/challenge_key" 2>/dev/null || true
+# migrate_db_password and api_db_password are each read by the database at initdb
+# (as 999) and by a service container (as 1000), so they are readable by both
+# rather than owned by either. The secrets folder is 0700, which keeps the host's
+# other users out.
+chmod 644 "$ROOT/secrets/migrate_db_password" "$ROOT/secrets/api_db_password" 2>/dev/null || true
 
 # The service's signing key and certificate are the one secret this script must
 # NOT make: the certificate is signed by a root key that never touches this
@@ -137,9 +138,27 @@ say "3. The backup configuration, with its passphrase"
 
 # pgBackRest has no cipher-pass-file option, so the passphrase goes into the
 # config file, which is therefore generated here and never committed.
-CIPHER=$(cat "$ROOT/secrets/backup_cipher")
-sed "s|__BACKUP_CIPHER__|$CIPHER|" "$ROOT/postgres/pgbackrest.conf.template" \
-  > "$ROOT/postgres/pgbackrest.conf"
+# Substituted by awk from the environment, never by sed from the command line: a
+# passphrase an operator brought with an & or a | or a backslash in it would be
+# read by sed as part of its own syntax, and pgBackRest would be given a different
+# passphrase from the one the weekly dump is encrypted with.
+write_backup_conf() {
+  # In a subshell under umask 077, so the file never exists readable by others.
+  # Each marker is replaced once, and the search goes on after the inserted text.
+  (
+    umask 077
+    CIPHER=$(cat "$1") awk '{
+      out = ""
+      while ((at = index($0, "__BACKUP_CIPHER__")) > 0) {
+        out = out substr($0, 1, at - 1) ENVIRON["CIPHER"]
+        $0 = substr($0, at + 17)
+      }
+      print out $0
+    }' "$2" > "$3"
+  )
+}
+write_backup_conf "$ROOT/secrets/backup_cipher" "$ROOT/postgres/pgbackrest.conf.template" \
+  "$ROOT/postgres/pgbackrest.conf"
 chmod 640 "$ROOT/postgres/pgbackrest.conf"
 chown "$PG_UID:$PG_UID" "$ROOT/postgres/pgbackrest.conf" 2>/dev/null || true
 echo "  postgres/pgbackrest.conf written (holds the repository passphrase)"

@@ -11,13 +11,10 @@
 
 {$API_HOST} {
 	reverse_proxy api:3000 {
-		# REPLACE the forwarded-for header rather than appending to it.
-		#
-		# Caddy appends by default, so a caller that sends its own
-		# X-Forwarded-For has its claim arrive ahead of the address Caddy saw,
-		# and anything that reads the first entry would read the caller's own
-		# assertion. {remote_host} is the peer Caddy is talking to; nothing else
-		# survives.
+		# Set the forwarded-for header to the peer Caddy saw, whatever the caller
+		# sent. Caddy since 2.5 discards a forwarded value from a client it does not
+		# trust, so this is the same rule written down where it can be read:
+		# {remote_host} is the peer Caddy is talking to, and nothing else survives.
 		header_up X-Forwarded-For {remote_host}
 	}
 
