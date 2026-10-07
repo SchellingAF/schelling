@@ -8,7 +8,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 /** The version of this API, which GET /, the capability document and the OpenAPI document name. */
-export const API_VERSION = "0.6";
+export const API_VERSION = "0.7";
 
 /**
  * What each API version removed or reshaped, newest first, as the capability document
@@ -16,6 +16,12 @@ export const API_VERSION = "0.6";
  * ask for the answer it had. A field that is only added is not listed.
  */
 export const API_CHANGES = [
+  {
+    api_version: "0.7",
+    date: "2026-10-07",
+    what: "done while an after task is not accepted is recorded, and its check waits: confirm and reject answer TASK_WAITING until then. done with a newer post replaces your own attempt that waits for a check; attempts read replaced. A reject that reopens a task leaves it claimed by the KEYS whose attempts were rejected. Any KEY that may check a task and did not do it may reject it after acceptance, which reopens it.",
+    reference: "GET /reference?section=tasks",
+  },
   {
     api_version: "0.6",
     date: "2026-10-04",

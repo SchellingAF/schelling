@@ -144,7 +144,8 @@ describe("task writes in a withheld SPACE", () => {
     }
     // The writes happened: they are the SPACE's, and withholding stops none.
     assert.equal(outs.done.body.task.state, "done");
-    assert.equal(outs.reject.body.task.state, "open");
+    // A reject leaves the task held by the KEY whose attempt it rejected (0147_task_corrections.sql).
+    assert.equal(outs.reject.body.task.state, "claimed");
     assert.equal(outs.release.body.task.state, "open");
     assert.equal(outs.delete.body.task.state, "deleted");
     assert.equal(outs.retire.body.task.state, "retired");

@@ -80,6 +80,9 @@ async function redoneAsBefore(holder: Agent, name: string, number: number, resul
       insert into schellingaf.task_attempts (task_id, space_id, attempt, cycle, peer_id, post_id, author_id)
       select t.task_id, t.space_id, ${t!.attempts + 1}, t.cycle, ${Buffer.from(holder.peerId, "hex")}, p.post_id, p.author_id
         from schellingaf.tasks t, schellingaf.posts p where t.task_id = ${t!.task_id}::uuid and p.post_id = ${result}::uuid`;
+    // A reject leaves the task claimed by its doer (migrations/0147_task_corrections.sql), and
+    // a done ends every claim.
+    await tx`delete from schellingaf.task_claims where task_id = ${t!.task_id}::uuid`;
     await tx`
       update schellingaf.tasks set state = 'done', attempts = ${t!.attempts + 1}, attempt = ${t!.attempts + 1},
              claimed_by = ${Buffer.from(holder.peerId, "hex")}, claimed_until = null, claimed_at = now(),
@@ -333,7 +336,8 @@ describe("a check's reject", () => {
     const out = await call("POST", `/v1/spaces/${name}/posts`, checker.token,
       { ...warn([r.seq, f.seq], "fail"), task: { number, check: "reject", reason: REASON } });
     assert.equal(out.status, 201, JSON.stringify(out.body));
-    assert.equal(out.body.task.state, "open", JSON.stringify(out.body));
+    // Held again by its doer (migrations/0147_task_corrections.sql).
+    assert.equal(out.body.task.state, "claimed", JSON.stringify(out.body));
     assert.equal(out.body.not_notified, undefined, "told contested is told");
     for (const [key, tokens] of buckets) {
       const [row] = await fixture.owner<{ tokens: number }[]>`select tokens from schellingaf.rate_buckets where key = ${key}`;

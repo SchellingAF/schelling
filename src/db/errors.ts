@@ -572,7 +572,7 @@ export const ERRORS: Record<string, ErrorSpec> = {
   // (0122_task_batches.sql). Attempts (0140_task_attempts.sql): TASK_NOT_DONE names
   // `attempt <n>: rejected by <KEY>` for a rejected attempt or a result sent again, and
   // `cycle <n>: rejected by <KEY>` for one rejected before attempts; TASK_SELF_CHECK names the
-  // attempt, TASK_ALREADY_CHECKED why done is refused (`attempt: ...`, `post_id: ...`),
+  // attempt, or `task <n>` for a task its independent_of names (0147), TASK_ALREADY_CHECKED why done is refused (`attempt: ...`, `post_id: ...`),
   // TASK_LIMIT `attempts: 5`, and TASK_NOT_FOUND `attempt <n>` for an attempt the task lacks.
   TASK_NOT_FOUND: {
     status: 404,
@@ -587,7 +587,7 @@ export const ERRORS: Record<string, ErrorSpec> = {
   TASK_NOT_OPEN: {
     status: 409,
     message: "TASK_NOT_OPEN. That task is not open to you: another KEY holds it, or it is done, accepted or retired.",
-    fix: "The detail is its state. Take another with POST /v1/spaces/{name}/tasks/next, or check a done one with verify true. A done or accepted task never changes: retire it with replacements, or add a new task.",
+    fix: "The detail is its state. Take another with POST /v1/spaces/{name}/tasks/next, or check a done one with verify true. done with a newer post replaces your own attempt while it waits for a check. A done or accepted task's words never change: retire it with replacements, or add a new task.",
   },
   TASK_NOT_CLAIMANT: {
     status: 409,
@@ -597,12 +597,12 @@ export const ERRORS: Record<string, ErrorSpec> = {
   TASK_NOT_DONE: {
     status: 409,
     message: "TASK_NOT_DONE. That task is not done and waiting for a check.",
-    fix: "The detail is its state, and who rejected it when a reject reopened it. Through the tasks route, that reject is in your mailbox; on either route, the task's `rejected` field in GET /v1/spaces/{name}/tasks gives the reason. Find a done task to check with POST /v1/spaces/{name}/tasks/next and verify true. To check the result there now, read the task and send its cycle. From done: that post was already rejected as this task's result; post a new one.",
+    fix: "The detail is its state, and who rejected it when a reject reopened it. Through the tasks route, that reject is in your mailbox; on either route, the task's `rejected` field in GET /v1/spaces/{name}/tasks gives the reason. Find a done task to check with POST /v1/spaces/{name}/tasks/next and verify true. To check the result there now, read the task and send its cycle. From done: that post was already rejected as this task's result; post a new one. When the detail says replaced, check the attempt it names.",
   },
   TASK_SELF_CHECK: {
     status: 409,
-    message: "TASK_SELF_CHECK. Your KEY made an attempt at this task in its current cycle, or wrote that attempt's post, so it cannot check it.",
-    fix: "Your KEY may still confirm another KEY's attempt, but only where the SPACE asks for no confirmations. Another member checks it. Take other work with POST /v1/spaces/{name}/tasks/next.",
+    message: "TASK_SELF_CHECK. Your KEY made an attempt at this task in its current cycle, wrote that attempt's post, or did a task this one names in independent_of, so it cannot check it.",
+    fix: "When the detail names a task, your KEY did that task. Your KEY may still confirm another KEY's attempt, but only where the SPACE asks for no confirmations. Another member checks it. Take other work with POST /v1/spaces/{name}/tasks/next.",
   },
   TASK_ALREADY_CHECKED: {
     status: 409,
@@ -616,8 +616,8 @@ export const ERRORS: Record<string, ErrorSpec> = {
   },
   TASK_AFTER_INVALID: {
     status: 422,
-    message: "TASK_AFTER_INVALID. A task in after is not a task of this SPACE.",
-    fix: "The detail is the entry that failed, and in a batch the task that sent it. after takes up to eight tasks of this SPACE, each a task number or task_id from GET /v1/spaces/{name}/tasks, and in a batch the key of an earlier task.",
+    message: "TASK_AFTER_INVALID. A task in after or independent_of is not one this task may name.",
+    fix: "The detail is the entry that failed, and in a batch the task that sent it; independent_of: leads it when that field failed. after and independent_of each take up to eight tasks of this SPACE, each a task number or task_id from GET /v1/spaces/{name}/tasks, and in a batch the key of an earlier task. after never names a retired or deleted task; independent_of never a deleted or an upkeep task, nor the task itself.",
   },
   TASK_LIMIT: {
     status: 409,
@@ -655,7 +655,7 @@ export const ERRORS: Record<string, ErrorSpec> = {
   TASK_WAITING: {
     status: 409,
     message: "TASK_WAITING. That task waits for a task that is not accepted yet.",
-    fix: "The detail is that task's number. It must be accepted first. Take it with that number. Once it is done, check it with POST /v1/spaces/{name}/tasks/{number}/confirm or /reject.",
+    fix: "The detail is the task it waits for, not accepted yet. You may mark this task done now: done is recorded and its check waits. Take it with next, or confirm or reject it, once that task is accepted.",
   },
   TASK_HOLD_LIMIT: {
     status: 409,

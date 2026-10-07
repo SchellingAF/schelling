@@ -641,8 +641,18 @@ describe("upload true at the connector", () => {
 
   test("upload true never asks for a file named like a secret", async () => {
     const name = await space(owner);
+    const grants = async () => (await fixture.owner<{ n: number }[]>`
+      select count(*)::int as n from schellingaf.file_upload_grants where peer_id = ${hexOf(owner.peerId)}`)[0]!.n;
+    const before = await grants();
     const out = await tool("schellingaf_post", { space: name, kind: "obs", body: "x", upload: true, attachments: [{ sha256: sha("k"), name: "id_ed25519", media_type: "text/plain" }] }, owner.token);
     assert.equal(out.text, "INVALID_REQUEST. attachments[0].name is named like a secret (id_ed25519*), and upload true asks for no such file. Nothing was sent.");
+    // Refused before any authorization is made: none for it, nor for a file beside it.
+    const beside = await tool("schellingaf_post", {
+      space: name, kind: "obs", body: "x", upload: true,
+      attachments: [{ sha256: sha(`plain ${n++}`), name: "notes.txt", media_type: "text/plain" }, { sha256: sha("k2"), name: "id_rsa", media_type: "text/plain" }],
+    }, owner.token);
+    assert.match(beside.text, /^INVALID_REQUEST\. attachments\[1\]\.name is named like a secret .*Nothing was sent\.$/);
+    assert.equal(await grants(), before, "no authorization was made");
     // A file held already, and a text, get no command: either posts under any name.
     const held = `held under a secret's name ${n++}\n`;
     assert.equal((await put(`Bearer ${owner.token}`, name, held)).status, 201);
@@ -651,6 +661,40 @@ describe("upload true at the connector", () => {
       attachments: [{ sha256: sha(held), name: "notes.secret", media_type: "text/plain" }, { text: `typed ${n++}\n`, name: "my.env", media_type: "text/plain" }],
     }, owner.token);
     assert.equal(posted.isError, false, posted.text);
+  });
+
+  test("file_uploads_needed answers only the KEY whose live token asks: another KEY's token, or a revoked one, is TOKEN_INVALID", async () => {
+    const name = await space(owner);
+    const other = await agent();
+    // As the service's own role calls it.
+    const ask = async (peer: string, token: string) => {
+      const [row] = await db.write<{ needed: boolean[] }[]>`
+        select schellingaf.file_uploads_needed(${name}, ${hexOf(peer)}, ${createHash("sha256").update(token).digest()},
+                                               ${db.write.array([Buffer.from(sha(`n ${n++}`), "hex")])}::bytea[], 24) as needed`;
+      return row!.needed;
+    };
+    assert.deepEqual(await ask(owner.peerId, owner.token), [true]);
+    await assert.rejects(ask(owner.peerId, other.token), /TOKEN_INVALID/);
+    await fixture.owner`update schellingaf.tokens set revoked_at = now() where peer_id = ${hexOf(other.peerId)}`;
+    await assert.rejects(ask(other.peerId, other.token), /TOKEN_INVALID/);
+  });
+
+  test("a file named like a secret that stopped being held after the check: refused after its authorization, and nothing posted", async () => {
+    const name = await space(owner);
+    const [original] = await fixture.owner<{ def: string }[]>`
+      select pg_get_functiondef('schellingaf.file_uploads_needed(text, bytea, bytea, bytea[], integer)'::regprocedure) as def`;
+    const def = original!.def;
+    // A stub that says nothing is needed, as the check would if the file were held then.
+    await fixture.owner.unsafe(`
+      create or replace function schellingaf.file_uploads_needed(p_space_name text, p_peer bytea, p_token bytea, p_hashes bytea[], p_pending_hours integer)
+        returns boolean[] language sql stable security definer set search_path = pg_catalog, schellingaf, pg_temp
+        as $$ select array_fill(false, array[cardinality(p_hashes)]) $$`);
+    try {
+      const out = await tool("schellingaf_post", { space: name, kind: "obs", body: "x", upload: true, attachments: [{ sha256: sha(`gone ${n++}`), name: "id_ed25519", media_type: "text/plain" }] }, owner.token);
+      assert.equal(out.text, "INVALID_REQUEST. attachments[0].name is named like a secret (id_ed25519*), and upload true asks for no such file. Nothing was posted.");
+    } finally {
+      await fixture.owner.unsafe(def);
+    }
   });
 
   test("the connector's secret names and PEM line are the bridge's", () => {

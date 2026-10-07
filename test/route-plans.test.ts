@@ -782,7 +782,8 @@ describe("the reads the service actually issues", () => {
       assert.match(plan, /task_checks_result_idx on task_checks cr/, `${query}:\n${plan}`);
       assert.match(plan, /tasks_pkey on tasks ct/, `${query}:\n${plan}`);
       // The newest reject: a probe of that task's checks, by the task's key or by the post's.
-      assert.match(plan, /on task_checks cn\s+Index Cond: (\(task_id = cr\.task_id\)|\(\(result_post_id = .*\) AND \(checked_at > )/, `${query}:\n${plan}`);
+      // Since 0147_task_corrections.sql the checks' key ends in verdict, which may join the probe.
+      assert.match(plan, /on task_checks cn\s+Index Cond: (\(task_id = cr\.task_id\)|\(\(task_id = cr\.task_id\) AND \(verdict = 'reject'::text\)\)|\(\(result_post_id = .*\) AND \(checked_at > )/, `${query}:\n${plan}`);
       assert.match(plan, /Index Scan Backward using post_objections_pkey on post_objections co/, `${query}:\n${plan}`);
       assert.doesNotMatch(plan, /Seq Scan on (tasks|task_checks|post_objections)/, `${query}:\n${plan}`);
       assert.doesNotMatch(plan, /Index Scan Backward using posts_pkey/, `${query}: the warns were joined to every post:\n${plan}`);

@@ -617,10 +617,11 @@ async function dryChecks(sql: Sql, name: string, author: Buffer, post: PostInput
  * say. No row is TASK_NOT_FOUND, an oracle space's too, which keeps none. A deleted task is
  * TASK_NOT_FOUND, detail deleted.
  *
- * To finish it (migrations/0140_task_attempts.sql): accepted or retired is TASK_NOT_OPEN; the
- * caller's own attempt in the cycle TASK_NOT_OPEN done; the caller's check in the cycle
- * TASK_ALREADY_CHECKED; the cycle's attempts at TASK_LIMITS.attempts TASK_LIMIT; a KEY that
- * does not hold it, where an after is not accepted, TASK_WAITING; and a revision sent that is
+ * To finish it (migrations/0140_task_attempts.sql, 0147_task_corrections.sql): accepted or
+ * retired is TASK_NOT_OPEN; the caller's own attempt in the cycle, once rejected, TASK_NOT_OPEN
+ * done, and while it waits for a check it is replaced; the caller's check in the cycle
+ * TASK_ALREADY_CHECKED; the cycle's attempts that nothing replaced at TASK_LIMITS.attempts,
+ * for an attempt that replaces none, TASK_LIMIT; and a revision sent that is
  * not the task's, or, for a holder sending none, a task changed since its own take,
  * TASK_CHANGED. An upkeep task keeps its one holder: done or accepted is TASK_NOT_OPEN, open
  * TASK_NOT_CLAIMANT, held by another KEY TASK_NOT_OPEN claimed. The POST is the caller's own
@@ -629,37 +630,43 @@ async function dryChecks(sql: Sql, name: string, author: Buffer, post: PostInput
  * To check it: no upkeep task (TASK_IS_UPKEEP); the cycle checked, as sent or the caller's
  * live offer's or the task's, never above the task's (INVALID_REQUEST); one below, or a
  * task not done after a reject, the late check (TASK_NOT_DONE naming the rejecter); a task
- * not done TASK_NOT_DONE; the attempt, as sent (TASK_NOT_FOUND when the task has none of
- * that number), or the offer's, or the one pending (INVALID_REQUEST naming them when
- * several wait); a rejected one TASK_NOT_DONE naming its rejecter; the doer TASK_SELF_CHECK;
- * a check of that attempt already TASK_ALREADY_CHECKED. The rank rules, what post finishes
+ * not done TASK_NOT_DONE, but a reject of an accepted task's attempt reopens it; the attempt,
+ * as sent (TASK_NOT_FOUND when the task has none of that number), or the offer's, or the one
+ * pending (INVALID_REQUEST naming them when several wait); a rejected one TASK_NOT_DONE
+ * naming its rejecter, a replaced one naming the attempt that stands; a done task whose
+ * after is not accepted TASK_WAITING; the doer TASK_SELF_CHECK, and a doer of a task its
+ * independent_of names TASK_SELF_CHECK naming that task; a check of that attempt
+ * already TASK_ALREADY_CHECKED, of an accepted one a reject only. The rank rules, what post finishes
  * an upkeep task, and a check's own post are task_done()'s and task_check()'s to say, at the
  * write: nothing here copies them.
  */
 async function dryTaskChecks(sql: Sql, spaceId: string, author: Buffer, task: PostTask): Promise<Record<string, unknown>> {
-  type Tried = { attempt: number; cycle: number; by: string; author: string; rejected_by: string | null };
+  type Tried = { attempt: number; cycle: number; by: string; author: string; rejected_by: string | null; replaced: boolean };
   const [row] = await sql<{
     item: Record<string, unknown>; state: string; claimed_by: string | null; cycle: number; revision: number;
     claim_revision: number | null; confirmations: number; waiting: number | null; upkeep: string | null;
-    my_claim_revision: number | null;
-    attempts: Tried[]; checked: { cycle: number; attempt: number | null }[];
+    my_claim_revision: number | null; record: number | null; did: number | null;
+    attempts: Tried[]; checked: { cycle: number; attempt: number | null; verdict: string }[];
     rejects: { cycle: number; by: string }[]; offer: { cycle: number; attempt: number | null } | null;
   }[]>`
     select schellingaf.task_item(t, s.task_confirmations) as item, t.state, encode(t.claimed_by, 'hex') as claimed_by,
-           t.cycle, t.revision, t.claim_revision, s.task_confirmations as confirmations, t.upkeep,
+           t.cycle, t.revision, t.claim_revision, s.task_confirmations as confirmations, t.upkeep, t.attempt as record,
            (select c.claim_revision from schellingaf.task_claims c
              where c.task_id = t.task_id and c.peer_id = ${author}) as my_claim_revision,
            (select a.number from schellingaf.tasks a
              where a.task_id = any (t.waits_for) and a.state not in ('accepted', 'retired')
              order by a.number limit 1) as waiting,
+           case when cardinality(t.independent_of) > 0 then schellingaf.task_doer(t, ${author}) end as did,
            (select coalesce(jsonb_agg(jsonb_build_object(
                      'attempt', a.attempt, 'cycle', a.cycle, 'by', encode(a.peer_id, 'hex'), 'author', encode(a.author_id, 'hex'),
                      'rejected_by', (select encode(c.peer_id, 'hex') from schellingaf.task_checks c
                                       where c.task_id = a.task_id and c.cycle = a.cycle and c.attempt = a.attempt
-                                        and c.verdict = 'reject' order by c.checked_at desc limit 1))
+                                        and c.verdict = 'reject' order by c.checked_at desc limit 1),
+                     'replaced', exists (select 1 from schellingaf.task_attempts n
+                                          where n.task_id = a.task_id and n.replaces = a.attempt))
                      order by a.attempt), '[]'::jsonb)
               from schellingaf.task_attempts a where a.task_id = t.task_id) as attempts,
-           (select coalesce(jsonb_agg(jsonb_build_object('cycle', c.cycle, 'attempt', c.attempt)), '[]'::jsonb)
+           (select coalesce(jsonb_agg(jsonb_build_object('cycle', c.cycle, 'attempt', c.attempt, 'verdict', c.verdict)), '[]'::jsonb)
               from schellingaf.task_checks c
              where c.task_id = t.task_id and c.cycle = t.cycle and c.peer_id = ${author}) as checked,
            (select coalesce(jsonb_agg(jsonb_build_object('cycle', r.cycle, 'by', encode(r.peer_id, 'hex'))
@@ -680,6 +687,8 @@ async function dryTaskChecks(sql: Sql, spaceId: string, author: Buffer, task: Po
   const tookRevision = row.upkeep !== null ? row.claim_revision : row.my_claim_revision;
   // The attempts of the task's present cycle.
   const now = row.attempts.filter((a) => a.cycle === row.cycle);
+  // The caller's attempt of the cycle that nothing replaced (migrations/0147_task_corrections.sql).
+  const own = now.find((a) => a.by === me && !a.replaced);
   if (task.check === null) {
     if (row.upkeep !== null) {
       if (state === "done" || state === "accepted" || state === "retired") throw new ApiError("TASK_NOT_OPEN", { detail: state });
@@ -688,17 +697,25 @@ async function dryTaskChecks(sql: Sql, spaceId: string, author: Buffer, task: Po
       if (!holder) throw new ApiError("TASK_NOT_OPEN", { detail: "claimed" });
     } else {
       if (state === "accepted" || state === "retired") throw new ApiError("TASK_NOT_OPEN", { detail: state });
-      if (now.some((a) => a.by === me)) throw new ApiError("TASK_NOT_OPEN", { detail: "done" });
+      // The caller's attempt that nothing replaced: rejected, the caller's last word in the
+      // cycle; waiting, this POST replaces it. A task in after not accepted refuses no done.
+      if (own !== undefined && own.rejected_by !== null) throw new ApiError("TASK_NOT_OPEN", { detail: "done" });
       if (row.checked.length > 0) {
         throw new ApiError("TASK_ALREADY_CHECKED", { detail: `attempt: you checked this task in cycle ${row.cycle}` });
       }
-      if (now.length >= TASK_LIMITS.attempts) throw new ApiError("TASK_LIMIT", { detail: `attempts: ${TASK_LIMITS.attempts}` });
-      if (state !== "done" && !holder && row.waiting !== null) throw new ApiError("TASK_WAITING", { detail: String(row.waiting) });
+      if (own === undefined && now.filter((a) => !a.replaced).length >= TASK_LIMITS.attempts) {
+        throw new ApiError("TASK_LIMIT", { detail: `attempts: ${TASK_LIMITS.attempts}` });
+      }
     }
     if (task.revision !== null ? task.revision !== row.revision : holder && (tookRevision ?? row.revision) < row.revision) {
       throw new ApiError("TASK_CHANGED", { detail: String(row.revision) });
     }
-    return short(shown(row.item))!;
+    // What the write adds: the attempt it replaces, and the task its check would wait for.
+    return {
+      ...short(shown(row.item))!,
+      ...(row.upkeep === null && own !== undefined ? { replaces: own.attempt } : {}),
+      ...(row.upkeep === null && row.waiting !== null ? { check_waits_for: row.waiting } : {}),
+    };
   }
   if (row.upkeep !== null) throw new ApiError("TASK_IS_UPKEEP");
   if (task.cycle !== null && task.cycle > row.cycle) {
@@ -707,12 +724,19 @@ async function dryTaskChecks(sql: Sql, spaceId: string, author: Buffer, task: Po
   const rejecter = (cycle: number) => row.rejects.find((r) => r.cycle === cycle)?.by;
   const cycle = task.cycle ?? row.offer?.cycle ?? row.cycle;
   if (cycle < row.cycle) throw new ApiError("TASK_NOT_DONE", { detail: `${state}: rejected by ${rejecter(cycle)}` });
-  if (row.state !== "done") {
+  // A reject of an accepted task's attempt reopens it, whatever attempt an offer names.
+  // Unless it names an attempt, or the caller's live offer names another one of this cycle.
+  const offered = row.offer !== null && row.offer.cycle === row.cycle && row.offer.attempt !== null ? row.offer.attempt : null;
+  const reopen = row.state === "accepted" && task.check === "reject" && row.record !== null
+    && (task.attempt === row.record || (task.attempt === null && (offered === null || offered === row.record)));
+  if (row.state !== "done" && !reopen) {
     const before = row.cycle > 0 && (row.state === "open" || row.state === "claimed") ? rejecter(row.cycle - 1) : undefined;
     throw new ApiError("TASK_NOT_DONE", { detail: before === undefined ? state : `${state}: rejected by ${before}` });
   }
   let attempt: Tried | undefined;
-  if (task.attempt !== null) {
+  if (reopen) {
+    attempt = row.attempts.find((a) => a.attempt === row.record);
+  } else if (task.attempt !== null) {
     attempt = row.attempts.find((a) => a.attempt === task.attempt);
     if (attempt === undefined) throw new ApiError("TASK_NOT_FOUND", { detail: `attempt ${task.attempt}` });
     // Of an earlier cycle: the late check of that cycle.
@@ -720,7 +744,7 @@ async function dryTaskChecks(sql: Sql, spaceId: string, author: Buffer, task: Po
   } else if (row.offer !== null && row.offer.cycle === row.cycle && row.offer.attempt !== null) {
     attempt = row.attempts.find((a) => a.attempt === row.offer!.attempt);
   } else {
-    const pending = now.filter((a) => a.rejected_by === null);
+    const pending = now.filter((a) => a.rejected_by === null && !a.replaced);
     if (pending.length > 1) {
       throw new ApiError("INVALID_REQUEST", { detail: `attempt: name the attempt you checked: ${pending.map((a) => a.attempt).join(", ")}` });
     }
@@ -730,12 +754,20 @@ async function dryTaskChecks(sql: Sql, spaceId: string, author: Buffer, task: Po
   if (attempt.rejected_by !== null) {
     throw new ApiError("TASK_NOT_DONE", { detail: `attempt ${attempt.attempt}: rejected by ${attempt.rejected_by}` });
   }
+  if (attempt.replaced) {
+    const stands = row.attempts.find((a) => a.cycle === attempt.cycle && a.by === attempt.by && !a.replaced);
+    throw new ApiError("TASK_NOT_DONE", { detail: `attempt ${attempt.attempt}: replaced by attempt ${stands?.attempt}` });
+  }
+  if (row.state === "done" && row.waiting !== null) throw new ApiError("TASK_WAITING", { detail: String(row.waiting) });
   if (attempt.by === me || attempt.author === me) throw new ApiError("TASK_SELF_CHECK", { detail: `attempt ${attempt.attempt}` });
-  const mine = now.find((a) => a.by === me);
+  const mine = now.filter((a) => a.by === me).at(-1);
   if (mine !== undefined && !(row.confirmations === 0 && task.check === "confirm")) {
     throw new ApiError("TASK_SELF_CHECK", { detail: `attempt ${mine.attempt}` });
   }
-  if (row.checked.some((c) => c.attempt === null || c.attempt === attempt.attempt)) throw new ApiError("TASK_ALREADY_CHECKED");
+  if (row.did !== null) throw new ApiError("TASK_SELF_CHECK", { detail: `task ${row.did}` });
+  if (row.checked.some((c) => (c.attempt === null || c.attempt === attempt.attempt) && (!reopen || c.verdict === "reject"))) {
+    throw new ApiError("TASK_ALREADY_CHECKED");
+  }
   return { ...short(shown(row.item))!, ...(now.length >= 2 ? { attempt: attempt.attempt } : {}) };
 }
 
@@ -1319,16 +1351,22 @@ export function mountPosts(app: Hono<Env>, config: Config, db: Db, service: Serv
       const [out] = check === null
         ? await sql<{ out: Record<string, unknown> }[]>`
             select schellingaf.task_done(${name}, ${bearer.peerId}, ${number}::int, ${String(receipt.post_id)}::uuid, ${revision}::int,
-                                         true, ${TASK_LIMITS.attempts}::int) as out`
+                                         true, ${TASK_LIMITS.attempts}::int, ${TASK_LIMITS.checkOfferMinutes}::int) as out`
             .catch((error: unknown) => { throw upkeepPost(error); })
         : await sql<{ out: Record<string, unknown> }[]>`
             select schellingaf.task_check(${name}, ${bearer.peerId}, ${number}::int, ${check},
                                           ${String(receipt.post_id)}::uuid, ${reason}, true, ${attempt}::int, ${cycle}::int,
-                                          ${TASK_LIMITS.checkOfferMinutes}::int) as out`;
+                                          ${TASK_LIMITS.checkOfferMinutes}::int, ${TASK_LIMITS.held}::int,
+                                          ${TASK_LIMITS.claimants}::int) as out`;
       const { refused, detail, delivered, task } = out!.out;
       if (typeof refused === "string") throw new ApiError(refused, typeof detail === "string" ? { detail } : {});
-      // The attempt this POST made or checked, where its cycle holds two or more.
-      const tried = typeof out!.out.attempt === "number" ? { attempt: out!.out.attempt } : {};
+      // The attempt this POST made or checked, where its cycle holds two or more; the attempt
+      // it replaced; and the task its check waits for (migrations/0147_task_corrections.sql).
+      const tried = {
+        ...(typeof out!.out.attempt === "number" ? { attempt: out!.out.attempt } : {}),
+        ...(typeof out!.out.replaces === "number" ? { replaces: out!.out.replaces } : {}),
+        ...(typeof out!.out.check_waits_for === "number" ? { check_waits_for: out!.out.check_waits_for } : {}),
+      };
       return { receipt, attached, task: { ...short(shown(task as Record<string, unknown>)), ...tried }, delivered, contested: await contest() };
     };
 
@@ -1418,7 +1456,7 @@ export function mountPosts(app: Hono<Env>, config: Config, db: Db, service: Serv
           // keeps no attempts, the row does; another KEY's attempt citing it is not the
           // caller's finish. This POST is the caller's own, as its replay says. The attempt answered is the one the write answered: this POST's
           // attempt, or the attempt it checked, where its cycle holds two or more.
-          const [row] = await sql<{ item: Record<string, unknown>; finished: boolean; checked: boolean; attempt: number | null }[]>`
+          const [row] = await sql<{ item: Record<string, unknown>; finished: boolean; checked: boolean; attempt: number | null; replaces: number | null }[]>`
             select schellingaf.task_item(t, s.task_confirmations) as item,
                    (mine.attempt is not null
                     or (t.upkeep is not null and t.done_post_id is not distinct from ${postId}::uuid)
@@ -1431,9 +1469,10 @@ export function mountPosts(app: Hono<Env>, config: Config, db: Db, service: Serv
                                where n.task_id = t.task_id
                                  and n.cycle = (select o.cycle from schellingaf.task_attempts o
                                                  where o.task_id = t.task_id and o.attempt = pick.attempt)) >= 2
-                        then pick.attempt end as attempt
+                        then pick.attempt end as attempt,
+                   case when ${check === null} then mine.replaces end as replaces
               from schellingaf.tasks t join schellingaf.spaces s on s.space_id = t.space_id
-              left join lateral (select a.attempt from schellingaf.task_attempts a
+              left join lateral (select a.attempt, a.replaces from schellingaf.task_attempts a
                                   where a.task_id = t.task_id and a.post_id = ${postId}::uuid
                                     and a.peer_id = ${bearer.peerId}) mine on true
               left join lateral (select k.attempt, true as found from schellingaf.task_checks k
@@ -1450,7 +1489,13 @@ export function mountPosts(app: Hono<Env>, config: Config, db: Db, service: Serv
             });
             throw batch ? atItem(i, item.key, refused) : refused;
           }
-          out.push({ ...short(shown(row.item)), ...(row.attempt !== null ? { attempt: row.attempt } : {}) });
+          // As the first answer: the attempt, the attempt it replaced, and the task its check waits for.
+          const waits = row.item.check_waits_for;
+          out.push({
+            ...short(shown(row.item)), ...(row.attempt !== null ? { attempt: row.attempt } : {}),
+            ...(row.replaces !== null ? { replaces: row.replaces } : {}),
+            ...(check === null && typeof waits === "number" ? { check_waits_for: waits } : {}),
+          });
         }
         return out;
       });

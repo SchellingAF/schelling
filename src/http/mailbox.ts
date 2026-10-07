@@ -45,6 +45,9 @@ type TaskRow = {
 
 /** The check a task's notice is about, for a reject's reason. */
 type CheckRow = { task_id: string; cycle: number; attempt: number | null; peer: string; verdict: string; reason: string | null };
+
+/** The verdict of the check a task's notice is about: a confirm's, else a reject's. */
+const verdictOf = (reason: string) => (reason === "task_confirmed" || reason === "task_accepted" ? "confirm" : "reject");
 /** The attempt a task's notice names: its post, and how many attempts its cycle holds. */
 type AttemptRow = { task_id: string; cycle: number; attempt: number | null; result: string | null; attempts: number };
 /** Why a KEY changed a task's words: its newest change of that task (0130_task_changes.sql). */
@@ -240,16 +243,20 @@ export function mountMailbox(app: Hono<Env>, db: Db): void {
         : [];
       const about = deliveries.filter((d) => d.task_id !== null);
       // A check is one KEY's of one attempt (migrations/0140_task_attempts.sql); a notice from
-      // before attempts names none, and finds only a check that names none.
+      // before attempts names none, and finds only a check that names none. A KEY may confirm
+      // an attempt and reject it once accepted (migrations/0147_task_corrections.sql), so the
+      // verdict is the notice's: a confirm's for task_confirmed and task_accepted, else a
+      // reject's.
       const checks = about.length
         ? await sql<CheckRow[]>`
             select c.task_id::text, c.cycle, c.attempt, encode(c.peer_id, 'hex') as peer, c.verdict, c.reason
               from unnest(${about.map((d) => d.task_id!)}::uuid[], ${about.map((d) => d.task_cycle!)}::int[],
-                          ${about.map((d) => d.actor!)}::text[], ${about.map((d) => d.task_attempt)}::int[])
-                   as w(task_id, cycle, actor, attempt)
+                          ${about.map((d) => d.actor!)}::text[], ${about.map((d) => d.task_attempt)}::int[],
+                          ${about.map((d) => verdictOf(d.reason))}::text[])
+                   as w(task_id, cycle, actor, attempt, verdict)
               join schellingaf.task_checks c
                 on c.task_id = w.task_id and c.cycle = w.cycle and c.peer_id = decode(w.actor, 'hex')
-               and c.attempt is not distinct from w.attempt`
+               and c.attempt is not distinct from w.attempt and c.verdict = w.verdict`
         : [];
       // The attempt each notice names, its result post, and how many attempts its cycle
       // holds: a notice shows its attempt only where that cycle holds two or more.
@@ -303,7 +310,7 @@ export function mountMailbox(app: Hono<Env>, db: Db): void {
     const conversationById = new Map(result.conversations.map((c) => [c.conversation_id, c]));
     const offerById = new Map(result.offers.map((o) => [o.invite_id, o]));
     const taskById = new Map(result.tasks.map((t) => [t.task_id, t]));
-    const checkOf = new Map(result.checks.map((k) => [`${k.task_id}/${k.cycle}/${k.peer}/${k.attempt}`, k]));
+    const checkOf = new Map(result.checks.map((k) => [`${k.task_id}/${k.cycle}/${k.peer}/${k.attempt}/${k.verdict}`, k]));
     const attemptOf = new Map(result.attempts.map((k) => [`${k.task_id}/${k.cycle}/${k.attempt}`, k]));
     const changeOf = new Map(result.changes.map((k) => [`${k.task_id}/${k.actor}`, k.reason]));
 
@@ -321,7 +328,7 @@ export function mountMailbox(app: Hono<Env>, db: Db): void {
       // A reject's reason, a change's, a give-back's, or a retire's or delete's: the PEER
       // text a task's notice carries. A give-back's is the task's last, while the same KEY
       // gave it; a retire's or delete's is read from the task while it is in that state.
-      const check = task ? checkOf.get(`${d.task_id}/${d.task_cycle}/${d.actor}/${d.task_attempt}`) : undefined;
+      const check = task ? checkOf.get(`${d.task_id}/${d.task_cycle}/${d.actor}/${d.task_attempt}/${verdictOf(d.reason)}`) : undefined;
       // An attempt: task_attempt always names it, with its result; any other notice names
       // its attempt only where that cycle holds two or more.
       const tried = task && d.task_attempt !== null ? attemptOf.get(`${d.task_id}/${d.task_cycle}/${d.task_attempt}`) : undefined;

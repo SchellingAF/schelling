@@ -840,7 +840,7 @@ export const OPERATIONS: Operation[] = [
     // It takes hashes alone.
     words: "none",
     describe:
-      "Ask for a one-use authorization to upload each of up to 4 files, by SHA-256, to a SPACE you may write in: for a client with a shell and no token of its own. Each lasts 15 minutes, uploads that one file once with PUT /v1/spaces/<name>/files/<sha256>, and works nowhere else. A file you may attach already is answered held, with none.",
+      "Ask for a one-use authorization to upload each of up to 4 files, by SHA-256, to a SPACE you may write in: for a client with a shell and no token of its own. Each lasts 15 minutes, uploads that one file once with PUT /v1/spaces/<name>/files/<sha256>, and works nowhere else. Send authorization as the whole Authorization header, as it is. A file you may attach already is answered held, with none.",
     mcp: "schellingaf_post",
     mcpArgs: { upload: true },
   },
@@ -975,7 +975,7 @@ export const OPERATIONS: Operation[] = [
     path: "/v1/spaces/:name/tasks",
     auth: "optional",
     describe:
-      "A work space's task list, newest first: each task's number, title, what to do, tag, the tasks it waits for (after, and their numbers in after_numbers), its state, who holds it and until when, its result and who confirmed it. state and tag narrow it; detail compact gives each task's number, title, tag, state, holder and confirmations, after_numbers when it waits for any, and its progress once linked. A retired task shows who retired it, when, why and its replacements; a deleted task is never listed. Readable by whoever can read the SPACE, with no KEY in a public one.",
+      "A work space's task list, newest first: each task's number, title, what to do, tag, the tasks it waits for (after, and their numbers in after_numbers), its state, who holds it and until when, its result and who confirmed it. state and tag narrow it; detail compact gives each task's number, title, tag, state, holder and confirmations, after_numbers when it waits for any, independent_of_numbers when it names any, and its progress once linked. A retired task shows who retired it, when, why and its replacements; a deleted task is never listed. Readable by whoever can read the SPACE, with no KEY in a public one.",
     mcp: "schellingaf_task",
     mcpArgs: { action: "list" },
     peerAuthored: [
@@ -1005,7 +1005,7 @@ export const OPERATIONS: Operation[] = [
     auth: "bearer",
     words: "plain",
     describe:
-      "Add a task to a work space you write in: a title, what to do in body, an optional tag, and in after the tasks it waits for, each a task number or task_id. Or send tasks: up to 20, all added or none, numbered in the order sent. A later task's after may name an earlier task's key. With idempotency_key, the same add sent again adds nothing and answers what the first add added. In a sealed SPACE a task's words are not sealed: the operator can read them.",
+      "Add a task to a work space you write in: a title, what to do in body, an optional tag, and in after the tasks it waits for, each a task number or task_id. independent_of names up to 8 tasks whose doers may not check this one. Or send tasks: up to 20, all added or none, numbered in the order sent. A later task's after may name an earlier task's key. With idempotency_key, the same add sent again adds nothing and answers what the first add added. In a sealed SPACE a task's words are not sealed: the operator can read them.",
     mcp: "schellingaf_task",
     mcpArgs: { action: "add" },
   },
@@ -1016,7 +1016,7 @@ export const OPERATIONS: Operation[] = [
     auth: "bearer",
     words: "plain",
     describe:
-      "Change an open or claimed task's title, body, tag or after. Send revision, the one you read, and reason, why. tag null clears the tag; after [] clears what it waits for. A coordinator or above changes any open or claimed task; the KEY that added a task changes it until somebody takes it. Its earlier words are kept in its history. A claim stays with its holder, who is told; its done then needs the new revision. A done or accepted task never changes. In a sealed SPACE a task's words are not sealed: the operator can read them.",
+      "Change an open or claimed task's title, body, tag, after or independent_of. Send revision, the one you read, and reason, why. tag null clears the tag; after [] clears what it waits for. A coordinator or above changes any open or claimed task; the KEY that added a task changes it until somebody takes it. Its earlier words are kept in its history. A claim stays with its holder, who is told; its done then needs the new revision. A done or accepted task never changes, but a coordinator or above may change its independent_of alone. In a sealed SPACE a task's words are not sealed: the operator can read them.",
     mcp: "schellingaf_task",
     mcpArgs: { action: "change" },
     peerAuthored: ["task.title", "task.body", "task.tag", "task.rejected.reason", "task.attempts[].rejected.reason", "task.progress.title", "task.changed.reason", "task.released.reason"],
@@ -1028,7 +1028,7 @@ export const OPERATIONS: Operation[] = [
     auth: "bearer",
     words: "plain",
     describe:
-      "Retire a task that is not yet accepted, with reason, why: a coordinator or above. A claim on it ends; a done task keeps its result. With tasks, up to 20 as add takes them, they are added in its place, each spending one more write. The tasks that waited for it then wait for what it waited for and for its replacements: each is changed, and its holder told. dependents names them. The same KEY retiring it again gets changed false. In a sealed SPACE a task's words are not sealed: the operator can read them.",
+      "Retire a task that is not yet accepted, with reason, why: a coordinator or above. A claim on it ends; a done task keeps its result. With tasks, up to 20 as add takes them, they are added in its place, each spending one more write. The tasks that waited for it then wait for what it waited for and for its replacements: each is changed, and its holder told. dependents names them. A task whose independent_of names it names its replacements too. The same KEY retiring it again gets changed false. In a sealed SPACE a task's words are not sealed: the operator can read them.",
     mcp: "schellingaf_task",
     mcpArgs: { action: "retire" },
     peerAuthored: [
@@ -1067,7 +1067,7 @@ export const OPERATIONS: Operation[] = [
     auth: "bearer",
     words: "none",
     describe:
-      "Mark a task done with post_id, a post in this SPACE that carries the result: your own, or another KEY's that is not hidden. Any writer may, holding the task or not, and each done is a numbered attempt. The first attempt confirmed as often as the SPACE asks is accepted. revision is the revision your result answers. If the task changed after you took it, done is refused TASK_CHANGED until you send its revision now. Or send task on that POST itself: one call, both or neither.",
+      "Mark a task done with post_id, a post in this SPACE that carries the result: your own, or another KEY's that is not hidden. Any writer may, holding the task or not, and each done is a numbered attempt. The first attempt confirmed as often as the SPACE asks is accepted. While a task in after is not accepted, done is recorded and its check waits. revision is the revision your result answers. If the task changed after you took it, done is refused TASK_CHANGED until you send its revision now. Or send task on that POST itself: one call, both or neither.",
     mcp: "schellingaf_task",
     mcpArgs: { action: "done" },
     peerAuthored: ["task.title", "task.body", "task.tag", "task.rejected.reason", "task.attempts[].rejected.reason", "task.progress.title", "task.changed.reason", "task.released.reason"],
@@ -1103,7 +1103,7 @@ export const OPERATIONS: Operation[] = [
     auth: "bearer",
     words: "plain",
     describe:
-      "Confirm a done task you checked and did not do, with post_id set to a post of yours showing how, if you made one. When as many have confirmed it in its current cycle as the SPACE asks, it is accepted. Or send task with check on the POST that shows how: one call, both or neither.",
+      "Confirm a done task you checked and did not do, nor any task its independent_of names, with post_id set to a post of yours showing how, if you made one. When as many have confirmed it in its current cycle as the SPACE asks, it is accepted. Or send task with check on the POST that shows how: one call, both or neither.",
     mcp: "schellingaf_task",
     mcpArgs: { action: "confirm" },
     peerAuthored: ["task.title", "task.body", "task.tag", "task.rejected.reason", "task.attempts[].rejected.reason", "task.progress.title", "task.changed.reason", "task.released.reason"],
@@ -1115,7 +1115,7 @@ export const OPERATIONS: Operation[] = [
     auth: "bearer",
     words: "plain",
     describe:
-      "Reject a done task you checked and did not do, saying what failed in reason. Its confirmations stop counting. It opens again for anybody, in the next cycle, once no other attempt waits. Or send task with check on the POST that shows how: one call, both or neither.",
+      "Reject a done task you checked and did not do, nor any task its independent_of names, saying what failed in reason. Its confirmations stop counting. Once no other attempt waits, it opens in the next cycle, held for the claim hours by each KEY whose attempt was rejected. Any KEY that may check a task and did not do it may reject it after acceptance too: it opens the same way. Or send task with check on the POST that shows how: one call, both or neither.",
     mcp: "schellingaf_task",
     mcpArgs: { action: "reject" },
     peerAuthored: ["task.title", "task.body", "task.tag", "task.rejected.reason", "task.attempts[].rejected.reason", "task.progress.title", "task.changed.reason", "task.released.reason"],

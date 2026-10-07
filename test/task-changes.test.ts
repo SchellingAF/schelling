@@ -288,7 +288,7 @@ describe("what a change takes", () => {
       ["no reason", { revision: 1, title: "T" }, /reason/],
       ["an empty reason", { revision: 1, reason: "", title: "T" }, /reason/],
       ["a long reason", { revision: 1, reason: "x".repeat(TASK_LIMITS.reasonCharacters + 1), title: "T" }, /reason/],
-      ["no field", { revision: 1, reason: "Why." }, /at least one of title, body, tag and after/],
+      ["no field", { revision: 1, reason: "Why." }, /at least one of title, body, tag, after and independent_of/],
       ["a title of two lines", { revision: 1, reason: "Why.", title: "One\nTwo" }, /title is one line/],
       ["an empty title", { revision: 1, reason: "Why.", title: "" }, /title/],
       ["a tag in capitals", { revision: 1, reason: "Why.", tag: "Big" }, /tag/],

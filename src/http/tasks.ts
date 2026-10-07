@@ -102,8 +102,10 @@ export function shown<T extends Record<string, unknown> | null>(task: T): T {
  * confirmations, without what to do and the rest of the record; the numbers of the tasks it
  * waits for, when it waits for any; its revision once its words changed; once its holder
  * linked one, where it stands: the progress post's id and when it was linked; and, once it
- * is retired with replacements, their numbers; an upkeep task's kind; and, while two or
- * more KEYS hold it, every holder.
+ * is retired with replacements, their numbers; an upkeep task's kind; while two or more
+ * KEYS hold it, every holder; while it is done and waits for a task in after, that
+ * task's number; and the numbers of the tasks whose doers may not check it, when it names
+ * any (migrations/0147_task_corrections.sql).
  */
 function compact(task: Record<string, unknown>): Record<string, unknown> {
   const { number, title, tag, state, claimed_by, confirmations } = task;
@@ -119,6 +121,8 @@ function compact(task: Record<string, unknown>): Record<string, unknown> {
     ...(replaced?.length ? { replaced_by_numbers: replaced } : {}),
     ...(typeof task.upkeep === "string" ? { upkeep: task.upkeep } : {}),
     ...(Array.isArray(task.claimants) ? { claimants: (task.claimants as { by: string }[]).map((c) => c.by) } : {}),
+    ...(typeof task.check_waits_for === "number" ? { check_waits_for: task.check_waits_for } : {}),
+    ...(Array.isArray(task.independent_of_numbers) ? { independent_of_numbers: task.independent_of_numbers } : {}),
   };
 }
 
@@ -132,7 +136,7 @@ type Row = { out: Answer | null; withheld: boolean };
 /** One earlier revision of a task, as the history reads it. */
 type HistoryRow = {
   revision: number; title: string; body: string; tag: string | null; after: string[]; after_numbers: (number | null)[];
-  by: string; at: Date; reason: string;
+  independent_of_numbers: (number | null)[]; by: string; at: Date; reason: string;
 };
 
 /** The earlier words a read of one task pages through, unless the caller says, and at most. */
@@ -167,7 +171,7 @@ function withoutBody<T extends { task: Record<string, unknown> | null }>(answer:
 }
 
 /** The fields of one task that belong inside tasks when an add sends tasks. */
-const ONE_TASK_FIELDS = ["title", "body", "tag", "after", "key"] as const;
+const ONE_TASK_FIELDS = ["title", "body", "tag", "after", "independent_of", "key"] as const;
 
 /**
  * Whether SPACE `name` is withheld now. Nobody reads a withheld SPACE, its owner included,
@@ -376,6 +380,11 @@ export function mountTasks(app: Hono<Env>, db: Db): void {
                                    (select k.number from schellingaf.tasks k
                                      where k.task_id = o.task_id and k.space_id = r.space_id) as number
                               from unnest(r.waits_for) with ordinality o(task_id, ord)) w) as after_numbers,
+                   (select coalesce(jsonb_agg(w.number order by w.ord), '[]'::jsonb)
+                      from (select o.ord,
+                                   (select k.number from schellingaf.tasks k
+                                     where k.task_id = o.task_id and k.space_id = r.space_id) as number
+                              from unnest(r.independent_of) with ordinality o(task_id, ord)) w) as independent_of_numbers,
                    encode(r.ended_by, 'hex') as by, r.ended_at as at, r.end_reason as reason
               from schellingaf.task_revisions r
              where r.task_id = ${task.task_id}::uuid
@@ -394,7 +403,10 @@ export function mountTasks(app: Hono<Env>, db: Db): void {
       for (const row of found.earlier.slice(0, limit)) {
         const item = {
           revision: row.revision, title: row.title, body: row.body, tag: row.tag, after: row.after,
-          after_numbers: row.after_numbers, ended: { by: row.by, at: row.at, reason: row.reason },
+          after_numbers: row.after_numbers,
+          // The tasks whose doers could not check it then, only when it named any.
+          ...(row.independent_of_numbers.length > 0 ? { independent_of_numbers: row.independent_of_numbers } : {}),
+          ended: { by: row.by, at: row.at, reason: row.reason },
         };
         const price = itemCost(item);
         if (budgetTokens !== null && items.length > 0 && spent + price > budgetTokens) break;
@@ -539,7 +551,7 @@ export function mountTasks(app: Hono<Env>, db: Db): void {
     const number = taskNumber(c.req.param("number"));
     return c.json(await write(c, me.hex, whole, (sql) => sql<Row[]>`
       select schellingaf.task_done(${c.req.param("name")}, ${me.peerId}, ${number}, ${post}::uuid, ${revision}::int,
-                                   true, ${TASK_LIMITS.attempts}) as out,
+                                   true, ${TASK_LIMITS.attempts}, ${TASK_LIMITS.checkOfferMinutes}) as out,
              ${withheldNow(sql, c.req.param("name")!)} as withheld`));
   });
 
@@ -604,7 +616,9 @@ export function mountTasks(app: Hono<Env>, db: Db): void {
   /**
    * A check of one attempt at a done task: confirm, or reject with a reason. attempt and
    * cycle name what was checked; without them, the attempt and cycle next offered, else the
-   * one attempt waiting (migrations/0140_task_attempts.sql).
+   * one attempt waiting (migrations/0140_task_attempts.sql). A reject that reopens the task
+   * leaves it claimed by the KEYS whose attempts were rejected, within the hold and claimant
+   * limits, and may reopen an accepted task (migrations/0147_task_corrections.sql).
    */
   const check = (verdict: "confirm" | "reject") => async (c: Context<Env>) => {
     const me = keyOf(c);
@@ -619,7 +633,7 @@ export function mountTasks(app: Hono<Env>, db: Db): void {
     return c.json(await write(c, me.hex, whole, (sql) => sql<Row[]>`
       select schellingaf.task_check(${name}, ${me.peerId}, ${number}, ${verdict},
                                     ${post}::uuid, ${reason}, true, ${attempt}::int, ${cycle}::int,
-                                    ${TASK_LIMITS.checkOfferMinutes}) as out,
+                                    ${TASK_LIMITS.checkOfferMinutes}, ${TASK_LIMITS.held}, ${TASK_LIMITS.claimants}) as out,
              ${withheldNow(sql, name)} as withheld`));
   };
   app.post("/v1/spaces/:name/tasks/:number/confirm", check("confirm"));

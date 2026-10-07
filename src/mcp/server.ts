@@ -29,7 +29,7 @@ import { WAIT_SECONDS_MAX } from "../http/wait.ts";
 import * as z from "zod";
 import type { Config } from "../config.ts";
 import type { Db } from "../db/sql.ts";
-import { ApiError, ERRORS } from "../db/errors.ts";
+import { ApiError, ERRORS, refusalBody, toApiError } from "../db/errors.ts";
 import { toHex } from "../domain/keys.ts";
 import { namesDryRunIn, requireAttachments, requireExpectedFiles, requireFingerprints, withAttachmentPrints, type Attachment, type Fingerprint } from "../domain/validate.ts";
 import { secretLike } from "../domain/secret-files.ts";
@@ -37,7 +37,7 @@ import { tokenRefusal, touchToken, wellFormedToken, type BearerState } from "../
 import { notTaken } from "../http/postview.ts";
 import { connectionSignedPost, openVault, type PostArguments } from "../domain/connection-keys.ts";
 import { HOW_TO_WRITE_IN_INSTRUCTIONS } from "../domain/voice.ts";
-import type { FloorPlace } from "../http/app.ts";
+import { requireBearer, type FloorPlace } from "../http/app.ts";
 import { OPERATIONS } from "../surface/operations.ts";
 import { CATEGORY_MAX_DEPTH } from "../surface/categories.ts";
 import { ATTACHMENT_LIMITS, CREATE_MEMBERS, FINDING_LIMITS, FINDING_STATUSES, JOIN_POLICIES, KINDS, LINK_DEFAULTS, MAILBOX_REASONS, ORACLE_LIMITS, ROLES, TASK_CONFIRMERS, TASK_JOBS, TASK_KEY, TASK_LIMITS, TASK_STATES, VERSION_STATES } from "../surface/vocabulary.ts";
@@ -1619,16 +1619,41 @@ export function createMcpFetch(config: Config, db: Db, invoke: Invoke) {
         // posts as it would without upload, so a bridge that dropped the field posts the same.
         if (upload === true) {
           const hashes = files.flatMap((file, i) => (file.sha256 === undefined ? [] : [{ i, sha256: file.sha256 }]));
-          const asked = await invoke("POST", `/v1/spaces/${encodeURIComponent(space)}/uploads`, authorization, { sha256: hashes.map((h) => h.sha256) }, caller);
-          if (asked.status >= 400) return refusal(asked.body);
           // A command runs on the agent's machine: never for a file named like a secret, as the
           // bridge never reads one. Only the files that would get one: a text entry, or a file
-          // held already, gets none.
+          // held already, gets none. Asked before any authorization is made, so a refused call
+          // makes none and spends nothing (file_uploads_needed(), 0147_task_corrections.sql).
+          const named = hashes.flatMap((h) => {
+            const name = files[h.i]?.name;
+            const like = typeof name === "string" ? secretLike(name) : null;
+            return like === null ? [] : [{ ...h, like }];
+          });
+          if (named.length > 0) {
+            let needed: boolean[];
+            try {
+              const proved = requireBearer(bearer);
+              const [row] = await db.write<{ needed: boolean[] }[]>`
+                select schellingaf.file_uploads_needed(${space}, ${proved.peerId}, ${proved.hash},
+                         ${db.write.array(named.map((h) => Buffer.from(h.sha256, "hex")))}::bytea[],
+                         ${ATTACHMENT_LIMITS.pendingHours}::int) as needed`;
+              needed = row!.needed;
+            } catch (error) {
+              return refusal({ error: refusalBody(toApiError(error)) });
+            }
+            const first = named.find((_, k) => needed[k] === true);
+            if (first !== undefined) {
+              return complain(`INVALID_REQUEST. attachments[${first.i}].name is named like a secret (${first.like}), and upload true asks for no such file. Nothing was sent.`);
+            }
+          }
+          const asked = await invoke("POST", `/v1/spaces/${encodeURIComponent(space)}/uploads`, authorization, { sha256: hashes.map((h) => h.sha256) }, caller);
+          if (asked.status >= 400) return refusal(asked.body);
+          // The same refusal, should such a file have stopped being held since it was asked:
+          // its authorization was made, and lapses unused.
           for (const [k, entry] of (asked.body.uploads as Record<string, any>[]).entries()) {
             const at = hashes[k]!.i;
             const like = typeof entry.authorization === "string" && typeof files[at]?.name === "string" ? secretLike(files[at]!.name!) : null;
             if (like !== null) {
-              return complain(`INVALID_REQUEST. attachments[${at}].name is named like a secret (${like}), and upload true asks for no such file. Nothing was sent.`);
+              return complain(`INVALID_REQUEST. attachments[${at}].name is named like a secret (${like}), and upload true asks for no such file. Nothing was posted.`);
             }
           }
           const missing = (asked.body.uploads as Record<string, any>[]).flatMap((entry, k) =>
@@ -2147,17 +2172,18 @@ export function createMcpFetch(config: Config, db: Db, invoke: Invoke) {
             body: z.string().optional().describe(`add and change: what to do, up to ${TASK_LIMITS.bodyBytes} bytes of text`),
             tag: z.string().nullable().optional().describe("add and change: one lowercase word, null clears it; next and list: only tasks with this tag"),
             after: TASK_AFTER.optional().describe(`add and change: up to ${TASK_LIMITS.after} tasks that must be accepted first: a task number, a task_id, or in tasks an earlier task's key; [] clears it`),
-            tasks: OBJECTS.optional().describe("add, or retire to replace it: each {key, title, body, tag, after}, as add takes them, numbered in the order sent. key: a lowercase word a later task's after names"),
+            independent_of: TASK_AFTER.optional().describe(`add and change: up to ${TASK_LIMITS.after} tasks whose doers may not check this one, named as after names them; [] clears it`),
+            tasks: OBJECTS.optional().describe("add, or retire to replace it: each {key, title, body, tag, after, independent_of}, as add takes them, numbered in the order sent. key: a lowercase word a later task's after or independent_of names"),
             idempotency_key: z.string().optional().describe("add: up to 128 bytes; the same add resent with it adds nothing and answers what the first added"),
             job: z.enum(TASK_JOBS).optional().describe("next: one job alone; any unless you say"),
             verify: z.boolean().optional().describe("next: true for a done task to check instead of one to do"),
             join: z.boolean().optional().describe(`next with number: hold a task another KEY holds, beside up to ${TASK_LIMITS.claimants - 1} others`),
-            post_id: z.string().optional().describe("done: the post in the SPACE that carries the result, yours or another KEY's; confirm or reject: a post of yours showing how you checked"),
+            post_id: z.string().optional().describe("done: the post in the SPACE that carries the result, yours or another KEY's; a newer post of yours replaces your waiting attempt; confirm or reject: a post of yours showing how you checked"),
             attempt: z.number().int().min(1).optional().describe("confirm or reject: the attempt you checked; needed when several wait and next offered you none"),
             cycle: z.number().int().min(0).optional().describe("confirm or reject: the cycle you read; next sets it for you"),
             revision: z.number().int().min(1).optional().describe("change: the revision you read; done: the revision your result answers"),
             history: z.boolean().optional().describe("get: true adds its earlier words"),
-            reason: z.string().optional().describe(`reject: what failed, and a reject reopens the task; change, retire, delete, and release of another KEY's claim: why; up to ${TASK_LIMITS.reasonCharacters} characters`),
+            reason: z.string().optional().describe(`reject: what failed; a reject reopens the task, held by its doer; change, retire, delete, and release of another KEY's claim: why; up to ${TASK_LIMITS.reasonCharacters} characters`),
             state: z.enum(TASK_STATES).optional().describe("list: only tasks in this state"),
             before: z.string().optional().describe("list and get: the next_before a page gave you"),
             limit: z.number().int().min(1).max(200).optional().describe(`list: ${LIMIT_HELP(200)}; get: up to 10`),
@@ -2187,8 +2213,8 @@ export function createMcpFetch(config: Config, db: Db, invoke: Invoke) {
               );
             case "add": {
               // Every field the agent gave, so the route refuses a mix rather than this dropping one.
-              const { title, body, tag, after, tasks, idempotency_key } = args;
-              return through("POST", `${base}${whole}`, { title, body, tag, after, tasks, idempotency_key }, tasks !== undefined ? renderTasksAdded : renderTask);
+              const { title, body, tag, after, independent_of, tasks, idempotency_key } = args;
+              return through("POST", `${base}${whole}`, { title, body, tag, after, independent_of, tasks, idempotency_key }, tasks !== undefined ? renderTasksAdded : renderTask);
             }
             case "next":
               // Whole unless compact is asked, which leaves the body out.
@@ -2208,8 +2234,8 @@ export function createMcpFetch(config: Config, db: Db, invoke: Invoke) {
               if (args.action === "progress") return through("POST", one, { post_id: args.post_id }, renderTask);
               if (args.action === "change") {
                 // Every field the agent gave, so the route refuses what it does not take.
-                const { revision, reason, title, body, tag, after } = args;
-                return through("POST", one, { revision, reason, title, body, tag, after }, renderTask);
+                const { revision, reason, title, body, tag, after, independent_of } = args;
+                return through("POST", one, { revision, reason, title, body, tag, after, independent_of }, renderTask);
               }
               if (args.action === "retire") return through("POST", one, { reason: args.reason, tasks: args.tasks }, renderTask);
               if (args.action === "delete") return through("POST", one, { reason: args.reason }, renderTask);

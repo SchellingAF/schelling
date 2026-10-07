@@ -820,8 +820,13 @@ export type AfterEntry = { number: number } | { task_id: string } | { index: num
  * One task as an add sends it to add_tasks(): a property is left out when it is absent,
  * never null, and after keeps the order sent with identical entries dropped, so the same
  * request always builds the same jsonb, whose hash an idempotency_key keeps.
+ * independent_of, the tasks whose doers may not check it, is read as after is and left out
+ * when it names none, so an add that does not send it hashes as it did before it existed
+ * (migrations/0147_task_corrections.sql).
  */
-export type TaskInput = { key?: string; title: string; body: string; tag?: string; after: AfterEntry[] };
+export type TaskInput = {
+  key?: string; title: string; body: string; tag?: string; after: AfterEntry[]; independent_of?: AfterEntry[];
+};
 
 /** A task number as after names one: a JSON integer, or a string of digits, 1 to 2,147,483,647. */
 const TASK_NUMBER_TEXT = /^[1-9][0-9]{0,9}$/;
@@ -840,17 +845,19 @@ export function taskKey(value: unknown, at: string): string | undefined {
 }
 
 /**
- * A task's after, resolved in this order: a task number, a task_id, then, in a batch, the
- * key of an earlier task, whose position `earlier` gives. `at` is how a refusal names the
- * task, empty for a single add; `keyed` is null for a single add, which takes no key.
+ * A task's after, or its independent_of (`field`), resolved in this order: a task number, a
+ * task_id, then, in a batch, the key of an earlier task, whose position `earlier` gives.
+ * `at` is how a refusal names the task, empty for a single add; `keyed` is null for a single
+ * add, which takes no key. Both share TASK_LIMITS.after.
  */
-function taskAfter(value: unknown, at: string, keyed: Map<string, number> | null, mode: "one" | "add" | "create"): AfterEntry[] {
+function taskAfter(value: unknown, at: string, keyed: Map<string, number> | null, mode: "one" | "add" | "create",
+                   field: "after" | "independent_of" = "after"): AfterEntry[] {
   if (value === undefined || value === null) return [];
   if (!Array.isArray(value) || value.length > TASK_LIMITS.after) {
     throw new ApiError("INVALID_REQUEST", {
       detail: mode === "one"
-        ? `after is a list of up to ${TASK_LIMITS.after} task numbers or task_ids of this SPACE`
-        : `${at}: after is a list of up to ${TASK_LIMITS.after} tasks`,
+        ? `${field} is a list of up to ${TASK_LIMITS.after} task numbers or task_ids of this SPACE`
+        : `${at}: ${field} is a list of up to ${TASK_LIMITS.after} tasks`,
     });
   }
   const out: AfterEntry[] = [];
@@ -866,20 +873,20 @@ function taskAfter(value: unknown, at: string, keyed: Map<string, number> | null
     } else if (keyed !== null && typeof entry === "string" && TASK_KEY.test(entry)) {
       const index = keyed.get(entry);
       if (index === undefined) {
-        throw new ApiError("INVALID_REQUEST", { detail: `${at}: after[${j}] ${entry} is the key of no earlier task in this batch` });
+        throw new ApiError("INVALID_REQUEST", { detail: `${at}: ${field}[${j}] ${entry} is the key of no earlier task in this batch` });
       }
       resolved = { index };
     }
     if (resolved === null) {
       throw new ApiError("INVALID_REQUEST", {
         detail: mode === "one"
-          ? `after[${j}] is a task number or a task_id of this SPACE`
-          : `${at}: after[${j}] is a task number, a task_id or the key of an earlier task`,
+          ? `${field}[${j}] is a task number or a task_id of this SPACE`
+          : `${at}: ${field}[${j}] is a task number, a task_id or the key of an earlier task`,
       });
     }
     // A SPACE being made holds no task before the call: its tasks name each other by key.
     if (mode === "create" && !("index" in resolved)) {
-      throw new ApiError("INVALID_REQUEST", { detail: `${at}: in a create, after takes only the key of an earlier task` });
+      throw new ApiError("INVALID_REQUEST", { detail: `${at}: in a create, ${field} takes only the key of an earlier task` });
     }
     const same = JSON.stringify(resolved);
     if (!seen.has(same)) {
@@ -891,11 +898,15 @@ function taskAfter(value: unknown, at: string, keyed: Map<string, number> | null
 }
 
 /** A task, as add_tasks() takes it, from fields already read. */
-function taskInput(key: string | undefined, title: string, body: string, tag: string | null, after: AfterEntry[]): TaskInput {
-  return { ...(key === undefined ? {} : { key }), title, body, ...(tag === null ? {} : { tag }), after };
+function taskInput(key: string | undefined, title: string, body: string, tag: string | null, after: AfterEntry[],
+                   independent: AfterEntry[]): TaskInput {
+  return {
+    ...(key === undefined ? {} : { key }), title, body, ...(tag === null ? {} : { tag }), after,
+    ...(independent.length > 0 ? { independent_of: independent } : {}),
+  };
 }
 
-/** One task of an add without tasks: title, body, tag and after. A key is refused. */
+/** One task of an add without tasks: title, body, tag, after and independent_of. A key is refused. */
 export function readOneTask(input: Record<string, unknown>): TaskInput {
   const title = requireTaskTitle(input.title);
   const body = optionalTaskBody(input.body);
@@ -903,7 +914,8 @@ export function readOneTask(input: Record<string, unknown>): TaskInput {
   if (input.key !== undefined && input.key !== null) {
     throw new ApiError("INVALID_REQUEST", { detail: "key names a task within tasks: a single add takes none" });
   }
-  return taskInput(undefined, title, body, tag, taskAfter(input.after, "", null, "one"));
+  return taskInput(undefined, title, body, tag, taskAfter(input.after, "", null, "one"),
+                   taskAfter(input.independent_of, "", null, "one", "independent_of"));
 }
 
 /**
@@ -940,8 +952,9 @@ export function readTaskBatch(value: unknown, mode: "add" | "create"): TaskInput
       throw new ApiError("INVALID_REQUEST", { detail: `${at}: key ${key} is already the key of tasks[${keyed.get(key)}]: each key once in a batch` });
     }
     const after = taskAfter(task.after, at, keyed, mode);
+    const independent = taskAfter(task.independent_of, at, keyed, mode, "independent_of");
     if (key !== undefined) keyed.set(key, i);
-    out.push(taskInput(key, title, body, tag, after));
+    out.push(taskInput(key, title, body, tag, after, independent));
   }
   return out;
 }
@@ -1086,12 +1099,13 @@ export function optionalTaskCycle(value: unknown): number | null {
 export type TaskChange = {
   revision: number;
   reason: string;
-  change: { title?: string; body?: string; tag?: string | null; after?: AfterEntry[] };
+  change: { title?: string; body?: string; tag?: string | null; after?: AfterEntry[]; independent_of?: AfterEntry[] };
 };
 
 /**
- * A change: revision and reason, and at least one of title, body, tag and after, each read
- * as an add reads it. tag null clears the tag, and after [] clears what the task waits for.
+ * A change: revision and reason, and at least one of title, body, tag, after and
+ * independent_of, each read as an add reads it. tag null clears the tag, after [] clears
+ * what the task waits for, and independent_of [] lets any doer check it again.
  */
 export function readTaskChange(input: Record<string, unknown>): TaskChange {
   const revision = taskRevision(input.revision, true)!;
@@ -1107,8 +1121,14 @@ export function readTaskChange(input: Record<string, unknown>): TaskChange {
     if (input.after === null) throw new ApiError("INVALID_REQUEST", { detail: "after is a list: send [] to wait for no task" });
     change.after = taskAfter(input.after, "", null, "one");
   }
+  if (input.independent_of !== undefined) {
+    if (input.independent_of === null) {
+      throw new ApiError("INVALID_REQUEST", { detail: "independent_of is a list: send [] to name no task" });
+    }
+    change.independent_of = taskAfter(input.independent_of, "", null, "one", "independent_of");
+  }
   if (Object.keys(change).length === 0) {
-    throw new ApiError("INVALID_REQUEST", { detail: "send at least one of title, body, tag and after" });
+    throw new ApiError("INVALID_REQUEST", { detail: "send at least one of title, body, tag, after and independent_of" });
   }
   return { revision, reason, change };
 }

@@ -229,7 +229,7 @@ describe("done is an attempt, by any writer", () => {
     refused(await act(a, name, 1, "progress", { post_id: await result(a, name, "Half way.") }), 409, "TASK_NOT_OPEN", "done");
   });
 
-  test("a second KEY's done is attempt 2; the same KEY again is TASK_NOT_OPEN done, the same post changed false", async () => {
+  test("a second KEY's done is attempt 2; the same KEY again replaces its own, the same post changed false", async () => {
     const { owner, a, b, name } = await crew();
     await added(owner, name);
     await next(a, name);
@@ -249,7 +249,6 @@ describe("done is an attempt, by any writer", () => {
       [1, a.peerId, first, "pending", []],
       [2, b.peerId, second, "pending", []],
     ]);
-    refused(await done(a, name, 1, await result(a, name, "Again.")), 409, "TASK_NOT_OPEN", "done");
     const again = await done(b, name, 1, second);
     assert.equal(again.status, 200, JSON.stringify(again.body));
     assert.equal(again.body.changed, false);
@@ -259,6 +258,10 @@ describe("done is an attempt, by any writer", () => {
     const short = await act(b, name, 1, "done", { post_id: second }, "");
     assert.deepEqual(short.body.task, { number: 1, task_id: task.task_id, state: "done" });
     assert.equal(short.body.attempt, 2);
+    // a's done again, while its attempt waits, replaces it (migrations/0147_task_corrections.sql).
+    const replaced = await done(a, name, 1, await result(a, name, "Again."));
+    assert.equal(replaced.status, 200, JSON.stringify(replaced.body));
+    assert.deepEqual([replaced.body.attempt, replaced.body.replaces], [3, 1]);
   });
 
   test("two attempts never name one post", async () => {
@@ -282,7 +285,7 @@ describe("done is an attempt, by any writer", () => {
     const { a, b, c, name } = await crew();
     await added(a, name);
     assert.equal((await done(b, name, 1, await result(b, name))).status, 200);
-    assert.equal((await check(c, name, 1, "reject")).body.task.state, "open");
+    assert.equal((await check(c, name, 1, "reject")).body.task.state, "claimed");
     refused(await act(a, name, 1, "change", { revision: 1, reason: "Clearer words.", title: "Transcribe page 3 again" }), 403, "TASK_DENIED");
   });
 
@@ -293,7 +296,7 @@ describe("done is an attempt, by any writer", () => {
     assert.equal((await act(coordinator, name, 1, "release", { reason: "No progress for a day." })).status, 200);
     assert.equal((await get(name, 1)).released.by, coordinator.peerId);
     assert.equal((await done(b, name, 1, await result(b, name))).status, 200);
-    assert.equal((await check(c, name, 1, "reject")).body.task.state, "open");
+    assert.equal((await check(c, name, 1, "reject")).body.task.state, "claimed");
     assert.equal((await get(name, 1)).released, undefined);
   });
 
@@ -313,11 +316,14 @@ describe("done is an attempt, by any writer", () => {
     assert.equal(task.attempt, 1);
   });
 
-  test("a writer that does not hold a task meets TASK_WAITING while its after waits; the task's revision is checked only when sent", async () => {
+  test("a writer that does not hold a task marks it done while its after waits; the task's revision is checked only when sent", async () => {
     const { owner, a, b, name } = await crew();
     const first = await added(owner, name);
     await added(owner, name, { after: [first.task_id] });
-    refused(await done(b, name, 2, await result(b, name)), 409, "TASK_WAITING", "1");
+    // Recorded, its check waiting (migrations/0147_task_corrections.sql).
+    const ahead = await done(b, name, 2, await result(b, name));
+    assert.equal(ahead.status, 200, JSON.stringify(ahead.body));
+    assert.equal(ahead.body.check_waits_for, 1);
     refused(await done(b, name, 1, await result(b, name), { revision: 2 }), 409, "TASK_CHANGED", "1");
     assert.equal((await done(a, name, 1, await result(a, name), { revision: 1 })).status, 200);
   });
@@ -455,10 +461,11 @@ describe("checks count per attempt", () => {
     const out = await check(e, name, 1, "reject", { attempt: 1, reason: "Wrong page." });
     assert.equal(out.status, 200, JSON.stringify(out.body));
     const task = out.body.task;
-    assert.equal(task.state, "open");
+    // Held again by both KEYS whose attempts were rejected (migrations/0147_task_corrections.sql).
+    assert.equal(task.state, "claimed");
     assert.equal(task.cycle, 1);
     assert.equal(task.attempt, undefined);
-    assert.equal(task.claimed_by, null);
+    assert.deepEqual(task.claimants.map((x: any) => x.by).sort(), [a.peerId, b.peerId].sort());
     assert.deepEqual(task.rejected, { by: e.peerId, reason: "Wrong page.", at: task.rejected.at, result: first, cleared: [d.peerId], attempt: 1 });
     assert.deepEqual(task.confirmations, { required: 2, given: [] });
     // Its submitter and the confirmer it cleared are told, with the attempt.
@@ -615,7 +622,7 @@ describe("the cycle a check reads", () => {
     assert.equal((await check(c, name, 1, "confirm", { attempt: 1 })).status, 200);
     assert.equal((await check(d, name, 1, "reject", { attempt: 1 })).status, 200);
     assert.equal((await check(e, name, 1, "reject", { attempt: 2 })).status, 200);
-    refused(await check(c, name, 1, "confirm", { attempt: 2 }), 409, "TASK_NOT_DONE", `open: rejected by ${e.peerId}`);
+    refused(await check(c, name, 1, "confirm", { attempt: 2 }), 409, "TASK_NOT_DONE", `claimed: rejected by ${e.peerId}`);
     assert.deepEqual((await told(c)).filter((t) => t[0] === "task_rejected"), [
       ["task_rejected", 1, d.peerId, 1, null],
       ["task_rejected", 1, e.peerId, 2, null],
@@ -664,7 +671,7 @@ describe("where the SPACE asks for no confirmation", () => {
     await added(owner, name);
     await next(a, name);
     assert.equal((await done(b, name, 1, await result(b, name))).body.task.state, "done");
-    assert.equal((await check(c, name, 1, "reject")).body.task.state, "open");
+    assert.equal((await check(c, name, 1, "reject")).body.task.state, "claimed");
     const out = await done(b, name, 1, await result(b, name, "Page 3 again."));
     assert.equal(out.body.task.state, "done");
     assert.equal(out.body.task.cycle, 1);

@@ -129,6 +129,8 @@ const HINT: Schema = {
   description: `Present only when the text ran long: which sentences ran over ${LONG_WORDS} words, and how to write the next one. Never a refusal: the text was stored as written.`,
 };
 /** A task's after: up to eight task numbers or task_ids of the SPACE, and in a batch an earlier task's key. */
+/** A task's independent_of: the same forms and bound as after (migrations/0147_task_corrections.sql). */
+const INDEPENDENT_OF_WORDS = `Up to ${TASK_LIMITS.after} tasks of this SPACE whose doers may not check this one: a task number, a task_id, or in a batch an earlier task's key. A KEY did a task when it made an attempt at it, in any cycle, or wrote the post of its accepted attempt and another KEY confirmed it.`;
 const TASK_AFTER: Schema = list({
   anyOf: [
     { type: "integer", minimum: 1, maximum: 2147483647 },
@@ -1001,6 +1003,8 @@ const SCHEMAS: Record<string, Schema> = {
     tag: nullable({ type: "string", pattern: TASK_TAG.source }),
     after: list(UUID, { description: "The tasks it waits for: next hands it out once every one of them is accepted." }),
     after_numbers: list(nullable({ type: "integer", minimum: 1 }), { description: "The numbers of the tasks in after, in the same order: null where that task cannot be read." }),
+    independent_of: list(UUID, { description: "The tasks whose doers may not confirm or reject it, and next never offers its check to. Present only when it names any." }),
+    independent_of_numbers: list(nullable({ type: "integer", minimum: 1 }), { description: "The numbers of the tasks in independent_of, in the same order: null where that task cannot be read. Present only when it names any." }),
     state: enumOf(TASK_STATES, "A claim that has passed reads as open."),
     claim_expired: { const: true, description: "Present when a claim has passed and the task is open again." },
     cycle: { type: "integer", minimum: 0, description: "Rises by one with every reject. A check counts in its own cycle." },
@@ -1028,13 +1032,14 @@ const SCHEMAS: Record<string, Schema> = {
       author: { ...PEER_ID, description: "Who wrote its post. Present only when not by." },
       post_id: { ...UUID, description: "The post that carries its result." },
       at: TIME,
-      state: enumOf(["pending", "rejected", "accepted", "passed"], "pending: waiting for checks. accepted: it reached the confirmations. rejected: a check rejected it. passed: another attempt was accepted."),
+      state: enumOf(["pending", "rejected", "replaced", "accepted", "passed"], "pending: waiting for checks. accepted: it reached the confirmations. rejected: a check rejected it. replaced: a newer attempt of the same KEY replaced it. passed: another attempt was accepted."),
+      replaces: { type: "integer", minimum: 1, description: "The attempt of the same KEY it replaced. Present only when it replaced one." },
       confirmations: list(PEER_ID, { description: "Who confirmed this attempt." }),
       rejected: object({ by: PEER_ID, reason: { type: "string" }, at: TIME }, ["by", "reason", "at"]),
     }, ["attempt", "by", "post_id", "at", "state", "confirmations"]), {
-      maxItems: TASK_LIMITS.attempts,
-      description: "Every attempt of its current cycle. Present only while that cycle holds two or more.",
+      description: "Every attempt of its current cycle, replaced ones included. Present only while that cycle holds two or more.",
     }),
+    check_waits_for: { type: "integer", minimum: 1, description: "A done task whose check waits: the number of the task in after not accepted yet. Present only then." },
     rejected: object({
       by: PEER_ID, reason: { type: "string" }, at: TIME,
       result: nullable({ ...UUID, description: "The result post it rejected." }),
@@ -1086,12 +1091,16 @@ const SCHEMAS: Record<string, Schema> = {
     replaced_by_numbers: list(nullable({ type: "integer", minimum: 1 }), { description: "A retired task's replacements, by number. Present only when it has any." }),
     upkeep: { ...enumOf(UPKEEP_KINDS), description: "Present on an upkeep task alone: its kind." },
     claimants: list(PEER_ID, { maxItems: TASK_LIMITS.claimants, description: "Who holds it, oldest claim first. Present only while two or more KEYS hold it." }),
+    check_waits_for: { type: "integer", minimum: 1, description: "A done task whose check waits: the number of the task in after not accepted yet. Present only then." },
+    independent_of_numbers: list(nullable({ type: "integer", minimum: 1 }), { description: "The numbers of the tasks whose doers may not check it. Present only when it names any." }),
   }, ["number", "title", "tag", "state", "claimed_by", "confirmations"], { description: "One task at detail=compact." }),
   TaskShort: object({
     number: { type: "integer", minimum: 1 },
     task_id: UUID,
     state: enumOf([...TASK_STATES, "deleted"], "A claim that has passed reads as open."),
     attempt: { type: "integer", minimum: 1, description: "A POST's task: the attempt it made or checked. Present only where the cycle holds two or more attempts." },
+    replaces: { type: "integer", minimum: 1, description: "A POST's task: the attempt of yours its done replaced. Present only then." },
+    check_waits_for: { type: "integer", minimum: 1, description: "A POST's task: the task in after its check waits for. Present only while it waits." },
   }, ["number", "task_id", "state"], { description: "A task as a write answers it unless detail=full: its number, task_id and state." }),
   TaskDeleted: object({
     task_id: UUID,
@@ -1107,6 +1116,7 @@ const SCHEMAS: Record<string, Schema> = {
     body: { type: "string", description: `What to do: up to ${TASK_LIMITS.bodyBytes} bytes of text.` },
     tag: { type: "string", pattern: TASK_TAG.source },
     after: TASK_AFTER,
+    independent_of: { ...TASK_AFTER, description: INDEPENDENT_OF_WORDS },
   }, ["title"], { description: "One task of a batch." }),
   Finding: object({
     number: { type: "integer", minimum: 1, description: "Its number in its SPACE, from 1. A newer finding that replaces it takes the next." },
@@ -1170,6 +1180,8 @@ const SCHEMAS: Record<string, Schema> = {
     verify: { type: "boolean", description: "next: whether this is a task to check, or a check was asked." },
     renewed: { type: "boolean", description: "next: whether it is a task you held already, renewed." },
     attempt: { type: "integer", minimum: 1, description: "done: the attempt you made. confirm and reject: the attempt you checked. next: the attempt your check counts on unless you name one. Present only where the cycle holds two or more attempts." },
+    replaces: { type: "integer", minimum: 1, description: "done: the attempt of yours this one replaced, which waited for a check. Present only then." },
+    check_waits_for: { type: "integer", minimum: 1, description: "done: the task in after not accepted yet, which the check of this task waits for. Present only then." },
     changed_since_claim: object({
       from: { type: "integer", minimum: 1, description: "The revision when you took it." },
       to: { type: "integer", minimum: 1, description: "Its revision now." },
@@ -2885,6 +2897,7 @@ const SPECS: Record<string, Spec> = {
           tag: nullable({ type: "string", pattern: TASK_TAG.source }),
           after: list(UUID),
           after_numbers: list(nullable({ type: "integer", minimum: 1 }), { description: "The numbers of the tasks in after, in the same order: null where that task cannot be read." }),
+          independent_of_numbers: list(nullable({ type: "integer", minimum: 1 }), { description: "The numbers of the tasks whose doers could not check it then. Present only when it named any." }),
           ended: object({ by: PEER_ID, at: TIME, reason: { type: "string" } }, ["by", "at", "reason"], { description: "The change that ended these words: who, when and why." }),
         }, ["revision", "title", "body", "tag", "after", "after_numbers", "ended"]), { description: "history: its earlier words, newest first." }),
         next_before: nullable({ type: "string", description: "history: pass it as before for the page before this one." }),
@@ -2907,6 +2920,7 @@ const SPECS: Record<string, Spec> = {
         body: { type: "string", description: `What to do: up to ${TASK_LIMITS.bodyBytes} bytes of text.` },
         tag: nullable({ type: "string", pattern: TASK_TAG.source, description: "null clears the tag." }),
         after: { ...TASK_AFTER, description: `Up to ${TASK_LIMITS.after} tasks of this SPACE it waits for, each a task number or task_id; [] clears it. Never a task that waits for this one.` },
+        independent_of: { ...TASK_AFTER, description: `Up to ${TASK_LIMITS.after} tasks of this SPACE whose doers may not check it, each a task number or task_id; [] clears it. Never the task itself. On a done or accepted task, a coordinator or above may send it alone.` },
       }, ["revision", "reason"]),
     },
     answers: { "200": ok(ref("TaskAnswer")) },
@@ -2947,10 +2961,11 @@ const SPECS: Record<string, Spec> = {
         body: { type: "string", description: `What to do: up to ${TASK_LIMITS.bodyBytes} bytes of text.` },
         tag: { type: "string", pattern: TASK_TAG.source },
         after: TASK_AFTER,
+        independent_of: { ...TASK_AFTER, description: INDEPENDENT_OF_WORDS },
         tasks: list(ref("TaskInput"), {
           minItems: 1,
           maxItems: TASK_LIMITS.batch,
-          description: `Up to ${TASK_LIMITS.batch} tasks in one call, all added or none, numbered in the order sent. With tasks, send no title, body, tag or after beside it.`,
+          description: `Up to ${TASK_LIMITS.batch} tasks in one call, all added or none, numbered in the order sent. With tasks, send no title, body, tag, after or independent_of beside it.`,
         }),
         idempotency_key: { type: "string", minLength: 1, maxLength: 128, description: "1 to 128 bytes you choose; the same add sent again with it adds nothing and answers what the first added." },
       }, []),

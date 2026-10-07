@@ -748,9 +748,10 @@ describe("reading claims without the bodies", () => {
     assert.deepEqual(await taskOf(), { number: 1, state: "done", confirmed_by: [confirmer.peerId], rejected_by: [] });
     // A reject clears the task's result; the finding still names the task and both checks.
     assert.equal((await call("POST", `/v1/spaces/${name}/tasks/1/reject`, rejecter.token, { reason: "Row 4 reads TO." })).status, 200);
-    assert.deepEqual(await taskOf(), { number: 1, state: "open", confirmed_by: [confirmer.peerId], rejected_by: [rejecter.peerId] });
+    // Held again by the KEY whose attempt was rejected (migrations/0147_task_corrections.sql).
+    assert.deepEqual(await taskOf(), { number: 1, state: "claimed", confirmed_by: [confirmer.peerId], rejected_by: [rejecter.peerId] });
     const text = (await connector("tools/call", { name: "schellingaf_get", arguments: { post_id: result, finding: true } })).message.result.content[0].text;
-    assert.match(text, new RegExp(`the result of task 1, open now; confirmed by ${confirmer.peerId}; rejected by ${rejecter.peerId}`));
+    assert.match(text, new RegExp(`the result of task 1, claimed now; confirmed by ${confirmer.peerId}; rejected by ${rejecter.peerId}`));
   });
 });
 

@@ -87,6 +87,9 @@ async function redoneAsBefore(holder: Agent, name: string, number: number, resul
       insert into schellingaf.task_attempts (task_id, space_id, attempt, cycle, peer_id, post_id, author_id)
       select t.task_id, t.space_id, ${t!.attempts + 1}, t.cycle, ${Buffer.from(holder.peerId, "hex")}, p.post_id, p.author_id
         from schellingaf.tasks t, schellingaf.posts p where t.task_id = ${t!.task_id}::uuid and p.post_id = ${result}::uuid`;
+    // A reject leaves the task claimed by its doer (migrations/0147_task_corrections.sql), and
+    // a done ends every claim.
+    await tx`delete from schellingaf.task_claims where task_id = ${t!.task_id}::uuid`;
     await tx`
       update schellingaf.tasks set state = 'done', attempts = ${t!.attempts + 1}, attempt = ${t!.attempts + 1},
              claimed_by = ${Buffer.from(holder.peerId, "hex")}, claimed_until = null, claimed_at = now(),

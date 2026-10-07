@@ -91,7 +91,7 @@ async function addTask(name: string, title = "Check the build"): Promise<number>
   return out.body.task.number;
 }
 
-/** A task that waits for another, not yet accepted: nobody but its holder may finish it. */
+/** A task that waits for another, not yet accepted: done is recorded, and its check waits. */
 async function waiting(name: string): Promise<number> {
   const first = await addTask(name);
   const out = await call("POST", `/v1/spaces/${name}/tasks`, owner.token, { title: "After that", after: [first] });
@@ -113,6 +113,15 @@ async function taskOf(name: string, number: number) {
 
 /** A result, with a title. */
 const result = (title: string, extra: Record<string, unknown> = {}) => ({ kind: "result", title, body: `${title}.`, ...extra });
+
+/**
+ * Gives back the claim a reject left `who` holding (migrations/0147_task_corrections.sql), so a
+ * test that rejects in a shared SPACE leaves that KEY's hold limit as it found it.
+ */
+async function letGo(name: string, who: Agent, number: number) {
+  const out = await call("POST", `/v1/spaces/${name}/tasks/${number}/release`, who.token);
+  assert.equal(out.status, 200, JSON.stringify(out.body));
+}
 
 /** A task finished with a POST of its own, through the tasks route: done, waiting for checks. */
 async function doneBy(name: string, who: Agent): Promise<number> {
@@ -224,11 +233,11 @@ describe("a POST with task finishes the task in the same call", () => {
     assert.equal(upload.status, 201, await upload.text());
     const attachments = [{ sha256, name: "notes.txt", media_type: "text/plain" }];
 
-    // Refused: the task waits for another, so neither the POST nor its file is written.
+    // Refused: a stale revision, so neither the POST nor its file is written.
     const held = await waiting(files);
     const before = await state(files);
-    const no = await call("POST", posts(files), writer.token, { ...result("Notes"), attachments, task: { number: held } });
-    assert.equal(refused(no).code, "TASK_WAITING", JSON.stringify(no.body));
+    const no = await call("POST", posts(files), writer.token, { ...result("Notes"), attachments, task: { number: held, revision: 7 } });
+    assert.equal(refused(no).code, "TASK_CHANGED", JSON.stringify(no.body));
     assert.deepEqual(await state(files), before);
 
     const number = await addTask(files);
@@ -256,15 +265,14 @@ describe("a POST with task finishes the task in the same call", () => {
   });
 
   test("a refused finish leaves no POST and the SPACE's head where it was", async () => {
-    // Any writer's done is an attempt (migrations/0140_task_attempts.sql): what still refuses
-    // one is a task that waits for another, a stale revision, and a task done with.
-    const held = await waiting(WORK);
+    // Any writer's done is an attempt (migrations/0140_task_attempts.sql), a task that waits
+    // for another included (0147_task_corrections.sql): what still refuses one is a stale
+    // revision, and a task done with.
     const open = await addTask(WORK);
     const finished = await addTask(WORK);
     await take(WORK, writer, finished);
     assert.equal((await call("POST", posts(WORK), writer.token, { ...result("First"), task: { number: finished } })).status, 201);
     const cases: [string, Agent, number | Record<string, unknown>, { status: number; code: string; detail?: string }][] = [
-      [WORK, writer, held, { status: 409, code: "TASK_WAITING", detail: String(held - 1) }],
       [WORK, writer, { number: open, revision: 7 }, { status: 409, code: "TASK_CHANGED", detail: "1" }],
       [WORK, writer, finished, { status: 409, code: "TASK_NOT_OPEN", detail: "accepted" }],
       [WORK, writer, 999_999, { status: 404, code: "TASK_NOT_FOUND" }],
@@ -297,10 +305,13 @@ describe("a POST with task and check checks a done task in the same call", () =>
     const rejected = await doneBy(CHECKED, writer);
     const reject = await call("POST", posts(CHECKED), checker.token, { ...result("It fails"), task: { number: rejected, check: "reject", reason: "Fails on linux." } });
     assert.equal(reject.status, 201, JSON.stringify(reject.body));
-    assert.equal(reject.body.task.state, "open");
+    // Held by its doer again (migrations/0147_task_corrections.sql).
+    assert.equal(reject.body.task.state, "claimed");
     const task = await taskOf(CHECKED, rejected);
     assert.equal(task.rejected.reason, "Fails on linux.");
     assert.equal(task.rejected.by, checker.peerId);
+    assert.equal(task.claimed_by, writer.peerId);
+    await letGo(CHECKED, writer, rejected);
   });
 
   test("a check the task refuses leaves no POST: its doer, a second check, a task not done, a late check after a reject", async () => {
@@ -313,7 +324,7 @@ describe("a POST with task and check checks a done task in the same call", () =>
       [writer, { number, check: "confirm" }, { status: 409, code: "TASK_SELF_CHECK" }],
       [checker, { number, check: "confirm" }, { status: 409, code: "TASK_ALREADY_CHECKED" }],
       [checker, { number: open, check: "confirm" }, { status: 409, code: "TASK_NOT_DONE", detail: "open" }],
-      [other, { number: late, check: "confirm" }, { status: 409, code: "TASK_NOT_DONE", detail: `open: rejected by ${checker.peerId}` }],
+      [other, { number: late, check: "confirm" }, { status: 409, code: "TASK_NOT_DONE", detail: `claimed: rejected by ${checker.peerId}` }],
     ];
     for (const [who, task, expected] of cases) {
       const before = await state(CHECKED);
@@ -323,6 +334,7 @@ describe("a POST with task and check checks a done task in the same call", () =>
       // No POST, and no notice: the late check's reject rolls back with the POST.
       assert.deepEqual(await state(CHECKED), before, `${expected.code} wrote something`);
     }
+    await letGo(CHECKED, writer, late);
   });
 });
 
@@ -655,15 +667,15 @@ describe("the write allowance: one write a POST and one a task part, given back 
   });
 
   test("a call refused at the write spends one: a task refused on its last POST, an idempotency mix, a POST with task", async () => {
-    const number = await waiting(WORK);
+    const number = await addTask(WORK);
     await fixture.setBucket(`peer:${writer.peerId}`, 30);
-    const last = await call("POST", posts(WORK), writer.token, { posts: [result("A"), result("B"), { ...result("C"), task: { number } }] });
-    assert.equal(refused(last).code, "TASK_WAITING");
+    const last = await call("POST", posts(WORK), writer.token, { posts: [result("A"), result("B"), { ...result("C"), task: { number, revision: 7 } }] });
+    assert.equal(refused(last).code, "TASK_CHANGED");
     assert.equal(await spentSince(writer, 30), 1);
 
     await fixture.setBucket(`peer:${writer.peerId}`, 30);
-    const single = await call("POST", posts(WORK), writer.token, { ...result("C"), task: { number } });
-    assert.equal(refused(single).code, "TASK_WAITING");
+    const single = await call("POST", posts(WORK), writer.token, { ...result("C"), task: { number, revision: 7 } });
+    assert.equal(refused(single).code, "TASK_CHANGED");
     assert.equal(await spentSince(writer, 30), 1);
 
     const key = `mix-${randomUUID()}`;
@@ -755,7 +767,8 @@ describe("a resend of posts, and of a POST with task", () => {
     const again = await call("POST", posts(CHECKED), writer.token, body);
     assert.equal(again.status, 200, JSON.stringify(again.body));
     assert.equal(again.body.replayed, true);
-    assert.equal(again.body.task.state, "open");
+    assert.equal(again.body.task.state, "claimed");
+    await letGo(CHECKED, writer, number);
 
     const otherTask = await addTask(CHECKED);
     const conflict = await call("POST", posts(CHECKED), writer.token, { ...body, task: { number: otherTask } });
@@ -815,11 +828,14 @@ describe("a dry run of a POST with task, and of posts", () => {
 
   test("refuses what the task's row says: waiting, changed, not done, no such task, an oracle space", async () => {
     // Any writer's done is an attempt (migrations/0140_task_attempts.sql), so another KEY's
-    // claim and no claim refuse nothing; a task that waits and a stale revision still do.
+    // claim and no claim refuse nothing, nor does a task that waits (0147_task_corrections.sql);
+    // a stale revision still does, and a check of a done task that waits.
     const held = await waiting(WORK);
+    const ahead = await member();
+    assert.equal((await call("POST", posts(WORK), ahead.token, { ...result("Ahead"), task: { number: held } })).status, 201);
     const open = await addTask(CHECKED);
     const cases: [string, Record<string, unknown>, { code: string; detail?: string }][] = [
-      [WORK, { number: held }, { code: "TASK_WAITING", detail: String(held - 1) }],
+      [WORK, { number: held, check: "confirm" }, { code: "TASK_WAITING", detail: String(held - 1) }],
       [CHECKED, { number: open, revision: 7 }, { code: "TASK_CHANGED", detail: "1" }],
       [CHECKED, { number: open, check: "confirm" }, { code: "TASK_NOT_DONE", detail: "open" }],
       [WORK, { number: 999_999 }, { code: "TASK_NOT_FOUND" }],
@@ -942,8 +958,9 @@ describe("what a call tells, and when", () => {
     assert.equal((await call("POST", posts(CHECKED), checker.token, { ...result("No"), task: { number, check: "reject", reason: "Broken." } })).status, 201);
     const before = await state(CHECKED);
     const out = await call("POST", posts(CHECKED), other.token, { posts: [result("Looked"), { ...result("Fine"), task: { number, check: "confirm" }, key: "c" }] });
-    assert.deepEqual(refused(out), { status: 409, code: "TASK_NOT_DONE", detail: `posts[1] (c): open: rejected by ${checker.peerId}` });
+    assert.deepEqual(refused(out), { status: 409, code: "TASK_NOT_DONE", detail: `posts[1] (c): claimed: rejected by ${checker.peerId}` });
     assert.deepEqual(await state(CHECKED), before);
+    await letGo(CHECKED, writer, number);
   });
 
   test("a reader waiting on the SPACE wakes after the whole batch and reads every POST; a refused one wakes nobody", async () => {
@@ -1115,7 +1132,15 @@ describe("a POST's task is an attempt, and its dry run says what the write does 
     const second = await call("POST", posts(name), holder!.token, { ...result("Mine too"), task: { number } });
     assert.equal(second.status, 201, JSON.stringify(second.body));
     assert.equal(second.body.task.attempt, 2);
-    // The same KEY again is refused alike.
+    // The same KEY again, while its attempt waits, replaces it (migrations/0147_task_corrections.sql):
+    // the dry run passes, and the write names the attempt it replaced.
+    const dryAgain = await call("POST", posts(name), finisher!.token, { ...result("Mine, corrected"), task: { number }, dry_run: true });
+    assert.equal(dryAgain.status, 200, JSON.stringify(dryAgain.body));
+    const corrected = await call("POST", posts(name), finisher!.token, { ...result("Mine, corrected"), task: { number } });
+    assert.equal(corrected.status, 201, JSON.stringify(corrected.body));
+    assert.deepEqual([corrected.body.task.attempt, corrected.body.task.replaces], [3, 1]);
+    // Once its attempt is rejected, the same KEY again is refused alike.
+    assert.equal((await call("POST", `/v1/spaces/${name}/tasks/${number}/reject`, owner.token, { attempt: 3, reason: "Wrong page." })).status, 200);
     await alike(name, finisher!, { number }, { status: 409, code: "TASK_NOT_OPEN", detail: "done" });
   });
 

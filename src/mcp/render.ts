@@ -1638,6 +1638,9 @@ export function renderTasks(header: string, body: Record<string, any>): string {
   if (body.notice) lines.push(body.notice);
   if (items.length) {
     const waits = (t: any) => (Array.isArray(t.after_numbers) && t.after_numbers.length ? `, after ${taskNumbers(t.after_numbers)}` : "");
+    // The tasks whose doers may not check it (migrations/0147_task_corrections.sql).
+    const apart = (t: any) => (Array.isArray(t.independent_of_numbers) && t.independent_of_numbers.length
+      ? `, independent of ${taskNumbers(t.independent_of_numbers)}` : "");
     // A retired task's replacements, from a compact row or a whole task.
     const replaced = (t: any) => {
       const numbers = t.replaced_by_numbers ?? t.retired?.replaced_by_numbers;
@@ -1645,7 +1648,7 @@ export function renderTasks(header: string, body: Record<string, any>): string {
     };
     // An upkeep task says its kind; its words are fenced with the rest, as the list is whole.
     const upkeep = (t: any) => (typeof t.upkeep === "string" ? `, upkeep ${t.upkeep}` : "");
-    lines.push(delimit("tasks", items.map((t) => `${t.number}  ${t.state}${upkeep(t)}${replaced(t)}${t.progress ? `, progress ${t.progress.at}` : ""}${waits(t)}  ${t.tag ?? "-"}  ${t.title}`).join("\n")));
+    lines.push(delimit("tasks", items.map((t) => `${t.number}  ${t.state}${upkeep(t)}${replaced(t)}${t.progress ? `, progress ${t.progress.at}` : ""}${waits(t)}${apart(t)}  ${t.tag ?? "-"}  ${t.title}`).join("\n")));
   }
   return lines.join("\n");
 }
@@ -1673,8 +1676,10 @@ export function renderTask(header: string, body: Record<string, any>): string {
   }
   if (body.replayed) lines.push("this idempotency_key replayed and nothing new was added");
   if (!("title" in t)) {
-    lines.push(`task ${t.number} in ${spaceName(body.space)}: ${t.state === "done" ? "done, waiting for checks" : t.state}, task_id ${t.task_id}` +
-      (body.attempt !== undefined ? `; your call: attempt ${body.attempt}` : ""));
+    const waits = body.check_waits_for ?? t.check_waits_for;
+    lines.push(`task ${t.number} in ${spaceName(body.space)}: ${t.state === "done" ? (typeof waits === "number" ? `done; its check waits for task ${waits} to be accepted` : "done, waiting for checks") : t.state}, task_id ${t.task_id}` +
+      (body.attempt !== undefined ? `; your call: attempt ${body.attempt}` : "") +
+      (body.replaces !== undefined ? `, which replaces attempt ${body.replaces}` : ""));
     // A deleted task, read whole, holds no words but who deleted it, when and why.
     if (t.deleted) {
       lines.push(`  deleted by ${t.deleted.by} at ${t.deleted.at}: its words are erased`);
@@ -1690,7 +1695,8 @@ export function renderTask(header: string, body: Record<string, any>): string {
       : t.state === "open" && t.claim_expired
         ? "open: its claim passed"
         : t.state === "done"
-          ? `done by ${t.claimed_by} at ${t.done_at}, waiting for checks`
+          ? `done by ${t.claimed_by} at ${t.done_at}${typeof t.check_waits_for === "number"
+              ? `; its check waits for task ${t.check_waits_for} to be accepted` : ", waiting for checks"}`
           : t.state === "accepted"
             ? `accepted at ${t.accepted_at}, done by ${t.claimed_by}`
             : t.state === "retired" && t.retired
@@ -1720,6 +1726,11 @@ export function renderTask(header: string, body: Record<string, any>): string {
       ? `  waits for ${t.after_numbers.length === 1 ? "task" : "tasks"} ${taskNumbers(t.after_numbers)} (task_id ${ids})`
       : `  waits for ${ids}`);
   }
+  // Who may not check it: a doer of any task its independent_of names.
+  if (Array.isArray(t.independent_of) && t.independent_of.length) {
+    const numbers: (number | null)[] = Array.isArray(t.independent_of_numbers) ? t.independent_of_numbers : [];
+    lines.push(`  checked by no doer of ${numbers.length === 1 ? "task" : "tasks"} ${taskNumbers(numbers)} (task_id ${t.independent_of.join(" ")})`);
+  }
   if (t.done_post_id) lines.push(`  result post ${t.done_post_id}`);
   if (t.progress) lines.push(`  progress post ${t.progress.post_id} by ${t.progress.by} at ${t.progress.at}`);
   const c = t.confirmations ?? {};
@@ -1730,11 +1741,12 @@ export function renderTask(header: string, body: Record<string, any>): string {
   const attempts: any[] = Array.isArray(t.attempts) ? t.attempts : [];
   for (const a of attempts) {
     const confirmed: string[] = a.confirmations ?? [];
-    lines.push(`  attempt ${a.attempt} by ${a.by}${a.author ? `, post by ${a.author}` : ""}: ${a.state}${a.attempt === t.attempt ? ", of record" : ""}, ` +
+    lines.push(`  attempt ${a.attempt} by ${a.by}${a.author ? `, post by ${a.author}` : ""}: ${a.state}${a.attempt === t.attempt ? ", of record" : ""}` +
+      `${a.replaces ? `, replaces attempt ${a.replaces}` : ""}, ` +
       `confirmed ${confirmed.length}${confirmed.length ? `: ${confirmed.join(" ")}` : ""}; result post ${a.post_id}` +
       (a.rejected ? `; rejected by ${a.rejected.by} at ${a.rejected.at}` : ""));
   }
-  if (body.attempt !== undefined) lines.push(`your call: attempt ${body.attempt}`);
+  if (body.attempt !== undefined) lines.push(`your call: attempt ${body.attempt}${body.replaces !== undefined ? `, which replaces attempt ${body.replaces}` : ""}`);
   if (t.rejected) {
     const cleared: string[] = t.rejected.cleared ?? [];
     lines.push(`  last rejected by ${t.rejected.by} at ${t.rejected.at}${t.rejected.attempt ? `, attempt ${t.rejected.attempt}` : ""}` +
@@ -1814,6 +1826,9 @@ function historyLines(body: Record<string, any>): string[] {
     lines.push("", `revision ${h.revision}, ended by ${h.ended.by} at ${h.ended.at}`);
     if (Array.isArray(h.after) && h.after.length) {
       lines.push(`  waited for ${h.after_numbers.length === 1 ? "task" : "tasks"} ${taskNumbers(h.after_numbers)}`);
+    }
+    if (Array.isArray(h.independent_of_numbers) && h.independent_of_numbers.length) {
+      lines.push(`  checked by no doer of ${h.independent_of_numbers.length === 1 ? "task" : "tasks"} ${taskNumbers(h.independent_of_numbers)}`);
     }
     if (h.tag) lines.push(delimit("revision tag", h.tag));
     lines.push(...peerField("revision title", h.title));
