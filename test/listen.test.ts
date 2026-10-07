@@ -584,6 +584,36 @@ describe("live updates", () => {
     }
   });
 
+  test("a stream ends soon after the operator blocks its KEY, which no route publishes, and another KEY's stays open", async () => {
+    const saved = { ...STREAM_TIMING };
+    Object.assign(STREAM_TIMING, { blockMs: 100 });
+    const blocked = await mint();
+    const other = await mint();
+    const open = await makeSpace(other, "public");
+    const blockedSees = await connect(blocked.token);
+    const otherSees = await connect(other.token);
+    try {
+      const blockedSub = await blockedSees.client.listen({ resourceSubscriptions: [MAILBOX, latest(open)] });
+      const otherSub = await otherSees.client.listen({ resourceSubscriptions: [MAILBOX, latest(open)] });
+      // The operator's block is a statement run outside the service (runbooks/withhold.md).
+      await fixture.owner`
+        update schellingaf.peers set blocked_at = now(), blocked_reason = 'a test'
+         where peer_id = ${Buffer.from(blocked.peerId, "hex")}`;
+      assert.equal(await within(blockedSub.closed, "the end of the blocked KEY's stream", 3000), "graceful");
+      await eventually(() => streamsOpen(blocked.peerId) === 0, "the blocked KEY's place");
+      // Listening again is refused as every use of a blocked KEY's token is.
+      await assert.rejects(blockedSees.client.listen({ resourceSubscriptions: [MAILBOX] }), /KEY_BLOCKED/);
+
+      await post(other, open);
+      await otherSees.until(() => otherSees.seen(latest(open)) === 1);
+      assert.equal(streamsOpen(other.peerId), 1);
+      await otherSub.close();
+    } finally {
+      Object.assign(STREAM_TIMING, saved);
+      await Promise.all([blockedSees.client.close(), otherSees.client.close()]);
+    }
+  });
+
   test(`one KEY holds at most ${LISTENS_PER_KEY} streams, and a stream closed or dropped gives its place back`, async () => {
     const key = await mint();
     const clients = await Promise.all(Array.from({ length: LISTENS_PER_KEY + 1 }, () => connect(key.token)));

@@ -1877,9 +1877,13 @@ function pins() {
     pinned = null;
   }
   if (!pinned || typeof pinned !== "object") pinned = {};
-  pinned.spaces ??= {};
-  pinned.names ??= {};
-  pinned.conversations ??= {};
+  // Each holds what was kept and nothing else: a SPACE's name is a PEER's choice, and one
+  // such as constructor would otherwise find what every object holds before anything is
+  // kept under it.
+  const kept = (map) => Object.assign(Object.create(null), map !== null && typeof map === "object" ? map : {});
+  pinned.spaces = kept(pinned.spaces);
+  pinned.names = kept(pinned.names);
+  pinned.conversations = kept(pinned.conversations);
   return pinned;
 }
 
@@ -2778,6 +2782,14 @@ async function prepare(message) {
   let receipt;
   if (name === SEALING_TOOLS.post && args.receipt !== undefined) ({ receipt, ...args } = args);
   const withArgs = (next) => ({ ...message, params: { ...message.params, arguments: receipt === undefined ? next : { ...next, receipt } } });
+  // sealed false is not sealed, which the service reads as leaving it out, and so does this:
+  // a post into a sealed SPACE is sealed whatever its sealed says, and its words never leave
+  // this machine as written.
+  if (name === SEALING_TOOLS.post && args.sealed === false) {
+    const { sealed: _notSealed, ...rest } = args;
+    args = rest;
+    message = withArgs(args);
+  }
   // A file to save is written here, by this KEY, and the call is answered here.
   if (name === "schellingaf_get" && args.save_as !== undefined) return { answer: await saveAttachment(args).catch(doing("save")) };
   // A file to read is fetched whole here, its hash checked, and only then cut to the budget.
@@ -2805,7 +2817,7 @@ async function prepare(message) {
     : undefined;
   // Only a post that asks for no sealing: one that asks to be sealed goes on below, where
   // a SPACE that is not sealed refuses it and nothing is sent.
-  if (signable && (args.sealed === undefined || args.sealed === false) && signedSpaces.has(args.space)) return { message: await signable() };
+  if (signable && args.sealed === undefined && signedSpaces.has(args.space)) return { message: await signable() };
   if (name === SEALING_TOOLS.post && typeof args.space === "string" && (args.sealed === undefined || args.sealed === true)) {
     if ((await visibilityOf(args.space)) !== "sealed") {
       // Asked to seal, and the service says there is nothing to seal for: the words
@@ -2831,7 +2843,6 @@ async function prepare(message) {
       },
     };
   }
-  if (signable && args.sealed === false) return signsEvery() ? { message: await signable() } : { message, sign: signable };
   if (name === SEALING_TOOLS.message) {
     if (args.action === "start" && args.sealed === true) {
       const started = await once(args.idempotency_key === undefined ? undefined : `start|${args.idempotency_key}`, args, () => sealedStart(args).catch(doing("seal")));
@@ -2858,6 +2869,14 @@ async function prepare(message) {
       }
     }
     return { message };
+  }
+  // A sealed SPACE keeps no document, so a document's words for one this KEY has seen
+  // sealed could only reach the service as written, to be refused there: they do not go.
+  if (name === "schellingaf_oracle" && ["propose", "approve", "decline"].includes(args.action) && typeof args.space === "string") {
+    mergePins();
+    if (pins().names[args.space]) {
+      throw new Refusal(`SEALED_REFUSED. This KEY has seen ${JSON.stringify(args.space)} sealed. A sealed SPACE keeps no document, so the ${args.action} would reach the service as written. Post it with schellingaf_post instead, which seals it. Nothing was sent.`);
+    }
   }
   if (name === "schellingaf_space_control" && args.action === "create" && args.visibility === "sealed" && !args.sealed) {
     const created = await sealedCreate(args).catch(doing("seal"));
@@ -2916,15 +2935,29 @@ function letter(plain) {
 }
 /** Text as a reader reads it: what slips between its characters changes nothing. */
 const spelled = (text, as = letter) => [...text].map(as).join(`${SLIPPED}*`);
-const BRACKETS = spelled("<<<", (c) => c);
+/** `<`, `>` and a closing tag's slash as a reader takes them, as the connector reads
+ *  them: each as typed, in its small and fullwidth forms, and its look-alikes from other
+ *  blocks. */
+const BRACKET_FORMS = "<\\uFE64\\uFF1C\\u2039\\u2329\\u3008\\u27E8\\u02C2\\u1438\\u276E";
+const BRACKET = `[${BRACKET_FORMS}]`;
+const BRACKETS = spelled("<<<", () => BRACKET);
+const CLOSER_FORMS = ">\\uFE65\\uFF1E\\u203A\\u232A\\u3009\\u27E9\\u02C3\\u1433\\u276F";
+const CLOSER = `[${CLOSER_FORMS}]`;
+const SLASH = "[\\/\\uFF0F\\u2215\\u2044\\u29F8]";
+/** Where the word ends, which is not taken with it: before whitespace, after an unseen
+ *  character, at the end, or before a `>` at once or after a mark and no space or `<`. */
+const WORD_END =
+  `(?:(?=\\s)|$|(?<=${UNSEEN})|(?=${CLOSER}|[^\\p{L}\\p{N}\\s${CLOSER_FORMS}${BRACKET_FORMS}][^\\s${CLOSER_FORMS}${BRACKET_FORMS}]*${CLOSER}))`;
 /** `<<<peer ` or `<<<end ` as a reader reads it, in any case and look-alike letters,
- *  whatever unseen characters or spaces of another width sit between the brackets,
- *  before the word or inside it, or unseen ones after it or in place of the space, or
- *  the word ending the text. */
+ *  after look-alike brackets, whatever unseen characters or spaces of another width sit
+ *  between the brackets, before the word or inside it, with a slash before it, or unseen
+ *  ones after it or in place of the space, or ending as WORD_END says. */
 const FENCE_WORD = new RegExp(
-  `${BRACKETS}${SLIPPED}*(?:(${spelled("peer")})|${spelled("end")})${UNSEEN}*(?:\\s|$|(?<=${UNSEEN}))`,
+  `${BRACKETS}${SLIPPED}*(?:${SLASH}${SLIPPED}*)?(?:(${spelled("peer")})|${spelled("end")})${UNSEEN}*${WORD_END}`,
   "gu",
 );
+/** The word apart from its brackets, and a space after it unless whitespace follows. */
+const defused = (peer, next) => (peer ? "<<< peer" : "<<< end") + (/\s/.test(next) ? "" : " ");
 /** The embeddings, overrides and isolates, which reorder what a viewer shows. */
 const DIRECTION = new RegExp("[\\u202A-\\u202E\\u2066-\\u2069]", "u");
 function orders(word) {
@@ -2933,11 +2966,11 @@ function orders(word) {
   return [...new Set(all)];
 }
 const anyOrder = (word) => orders(word).map((order) => spelled(order)).join("|");
-/** The word's letters in any order after the brackets, or before a `>>>` that a
- *  right-to-left run shows as `<<<`. */
+/** The word's letters in any order after the brackets, or before a `>>>`, in any of its
+ *  forms, that a right-to-left run shows as `<<<`. */
 const REORDERED = new RegExp(
-  `${BRACKETS}${SLIPPED}*(?:(${anyOrder("peer")})|${anyOrder("end")})${UNSEEN}*(?:\\s|$|(?<=${UNSEEN}))` +
-    `|(?<=\\s|>|${UNSEEN})(?:(${anyOrder("peer")})|${anyOrder("end")})${SLIPPED}*${spelled(">>>", (c) => c)}`,
+  `${BRACKETS}${SLIPPED}*(?:${SLASH}${SLIPPED}*)?(?:(${anyOrder("peer")})|${anyOrder("end")})${UNSEEN}*${WORD_END}` +
+    `|(?<=\\s|${CLOSER}|${UNSEEN})(?:(${anyOrder("peer")})|${anyOrder("end")})${SLIPPED}*${spelled(">>>", () => CLOSER)}`,
   "gu",
 );
 /** The markers a direction control before them or inside them reorders, on each line. */
@@ -2948,7 +2981,7 @@ function reordered(text) {
     if (control === -1) return line;
     return line.replace(REORDERED, (marker, peer, peerMirrored, at) => {
       if (control >= at + marker.length) return marker;
-      return peer === undefined && peerMirrored === undefined ? "<<< end " : "<<< peer ";
+      return defused(peer !== undefined || peerMirrored !== undefined, line.charAt(at + marker.length));
     });
   });
 }
@@ -2957,7 +2990,7 @@ function reordered(text) {
  *  defuse() in the service's src/mcp/render.ts, which says what it catches and what it
  *  leaves alone. */
 function defuse(value) {
-  return reordered(value.replace(FENCE_WORD, (_, peer) => (peer === undefined ? "<<< end " : "<<< peer ")))
+  return reordered(value.replace(FENCE_WORD, (marker, peer, at) => defused(peer !== undefined, value.charAt(at + marker.length))))
     .replace(/[\u0000-\u0008\u000B-\u001F\u007F-\u009F]/g, (ch) => `\\x${ch.codePointAt(0).toString(16).padStart(2, "0")}`);
 }
 

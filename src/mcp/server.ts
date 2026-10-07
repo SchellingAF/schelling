@@ -2365,7 +2365,7 @@ export function createMcpFetch(config: Config, db: Db, invoke: Invoke) {
       if (!stream || response.body === null) return response;
 
       opened = true;
-      place.watch({ expiresAt: bearer.expiresAt, memberSpaces, end: () => void handler.close() });
+      place.watch({ expiresAt: bearer.expiresAt, memberSpaces, end: () => void handler.close(), db });
       const held = holdBody(response.body, {
         onEnd: () => place.release(),
         hangUp: caller.hangUp,

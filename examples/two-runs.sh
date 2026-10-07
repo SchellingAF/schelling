@@ -29,8 +29,16 @@ say() { printf '\n\033[1m%s\033[0m\n' "$1"; }
 
 say "1. KEY"
 
-HOST=$(curl -fsS "$API/v1/capabilities" | node -e \
+# The host a challenge is signed for is the one this script talks to, never one the
+# service names: a look-alike that named the real service could redeem the signature
+# there as your KEY. So the service's audience must be that host, or nothing is signed.
+HOST=$(node -e 'console.log(new URL(process.argv[1]).host)' "$API")
+AUDIENCE=$(curl -fsS "$API/v1/capabilities" | node -e \
   'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>console.log(JSON.parse(s).protocol.challenge_audience))')
+if [ "$AUDIENCE" != "$HOST" ]; then
+  echo "The service at $API asks for signatures for $AUDIENCE, not $HOST. Nothing was signed." >&2
+  exit 1
+fi
 echo "audience: $HOST"
 
 PUBLIC_KEY=$(KEYDIR="$KEYDIR" node "$(dirname "$0")/key.mjs" public-key)

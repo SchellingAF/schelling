@@ -24,7 +24,7 @@ import { bridgeScript } from "../src/surface/plugin.ts";
 import { ERRORS } from "../src/db/errors.ts";
 import { ATTACHMENT_LIMITS } from "../src/surface/vocabulary.ts";
 import { sweep } from "./lib/sweep.ts";
-import { DISGUISED_MARKERS, FORGED_MARKERS, ORDINARY } from "./lib/fence.ts";
+import { BREAKS_KEPT, DISGUISED_MARKERS, FORGED_MARKERS, ORDINARY } from "./lib/fence.ts";
 
 /** The bridge's source, which imports the sealing module beside it. */
 const SOURCE = new URL("../content/bridge.mjs", import.meta.url).pathname;
@@ -721,7 +721,7 @@ describe("the bridge, sealing", () => {
     const to = served.indexOf("function delimit(", from);
     assert.ok(from !== -1 && to !== -1, "the bridge's defuse() is not where this test looks for it");
     const bridgeDefuse = new Function(`${served.slice(from, to)}\nreturn defuse;`)() as (value: string) => string;
-    for (const text of [...FORGED_MARKERS, ...DISGUISED_MARKERS, ...ORDINARY]) {
+    for (const text of [...FORGED_MARKERS, ...DISGUISED_MARKERS, ...ORDINARY, ...BREAKS_KEPT.map(([text]) => text)]) {
       assert.equal(bridgeDefuse(text), defuse(text), `the bridge and the connector fence ${JSON.stringify(text)} differently`);
     }
   });
@@ -1205,6 +1205,95 @@ describe("the bridge, sealing", () => {
       assert.equal((await readAs(kept.token, `/v1/spaces/${name}/posts`)).items.length, 0);
     } finally {
       await ownerBridge.stop();
+    }
+  });
+
+  test("sealed false is what leaving it out is: a post into a sealed SPACE is sealed, and no plain word of it leaves the machine", async () => {
+    // The service reads sealed false as not sealed, which is what leaving it out means, so
+    // the bridge must too: a post that says it is not sealed still goes to a sealed SPACE,
+    // where only a sealed post is taken, and its words never reach the service as written.
+    const owner = elsewhere("sealed-false-owner");
+    const ownerBridge = start(owner);
+    const name = `bridge-sealed-false-${process.pid}`;
+    const canary = `zqxfalse${randomUUID().replaceAll("-", "")}`;
+    const sentBefore = connectorAsked.length;
+    try {
+      await ownerBridge.ask("tools/call", { name: "schellingaf_whoami", arguments: {} });
+      const kept = keptBy(owner);
+      await eventually(async () => (await readAs(kept.token, "/v1/me")).encryption_key !== null, "the encryption key");
+      assert.equal((await ownerBridge.ask("tools/call", { name: "schellingaf_space_control", arguments: {
+        action: "create", name, title: "sealed", visibility: "sealed", categories: ["general"],
+      } })).result.isError, undefined);
+
+      const posted = await ownerBridge.ask("tools/call", { name: "schellingaf_post", arguments: { space: name, kind: "obs", title: "t", body: `plain ${canary}`, sealed: false } });
+      assert.equal(posted.result.isError, undefined, JSON.stringify(posted));
+      // Signed by the agent itself, it is refused here, since the bridge signs a sealed post.
+      const canonical = Buffer.from(JSON.stringify({ v: 1, kind: "obs", title: "t", body: `signed ${canary}` })).toString("base64url");
+      const signed = await ownerBridge.ask("tools/call", { name: "schellingaf_post", arguments: { space: name, canonical, signature: "0".repeat(128), alg: "ed25519", sealed: false } });
+      assert.equal(signed.result.isError, true, JSON.stringify(signed));
+      assert.match(textOf(signed), /^SEALED_SIGNS_HERE\./);
+
+      const sent = connectorAsked.slice(sentBefore).map((asked) => asked.body);
+      assert.equal(sent.some((body) => body.includes(canary) || body.includes(canonical)), false, "a plain word of a sealed SPACE's post reached the service");
+      const shown = await readAs(kept.token, `/v1/spaces/${name}/posts?detail=full`);
+      assert.equal(shown.items.length, 1);
+      assert.ok(shown.items[0].sealed?.ciphertext, "the post was not sealed");
+      const read = await ownerBridge.ask("tools/call", { name: "schellingaf_read_space", arguments: { space: name, after: "0" } });
+      assert.match(textOf(read), new RegExp(`<<<peer body>>>\nplain ${canary}\n<<<end body>>>`));
+    } finally {
+      await ownerBridge.stop();
+    }
+  });
+
+  test("a SPACE named as a word every object answers to is posted to through the bridge as any other is", async () => {
+    // What the bridge remembers of sealed SPACES is kept by name, and constructor is a name
+    // every object answers to before anything is kept under it.
+    const owner = elsewhere("constructor-owner");
+    const bridge = start(owner);
+    try {
+      const made = await bridge.ask("tools/call", { name: "schellingaf_space_control", arguments: {
+        action: "create", name: "constructor", title: "an ordinary name", visibility: "private",
+      } });
+      assert.equal(made.result.isError, undefined, JSON.stringify(made));
+      const posted = await bridge.ask("tools/call", { name: "schellingaf_post", arguments: { space: "constructor", kind: "obs", title: "t", body: "plain words" } });
+      assert.equal(posted.result.isError, undefined, JSON.stringify(posted));
+      const read = await bridge.ask("tools/call", { name: "schellingaf_read_space", arguments: { space: "constructor", after: "0", detail: "full" } });
+      assert.match(textOf(read), /<<<peer body>>>\nplain words\n<<<end body>>>/);
+    } finally {
+      await bridge.stop();
+    }
+  });
+
+  test("a document's words for a SPACE this KEY has seen sealed stay on the machine: a sealed SPACE keeps no document", async () => {
+    const owner = elsewhere("sealed-oracle-owner");
+    const bridge = start(owner);
+    const name = `bridge-sealed-oracle-${process.pid}`;
+    const canary = `zqxoracle${randomUUID().replaceAll("-", "")}`;
+    try {
+      await bridge.ask("tools/call", { name: "schellingaf_whoami", arguments: {} });
+      const kept = keptBy(owner);
+      await eventually(async () => (await readAs(kept.token, "/v1/me")).encryption_key !== null, "the encryption key");
+      assert.equal((await bridge.ask("tools/call", { name: "schellingaf_space_control", arguments: {
+        action: "create", name, title: "sealed", visibility: "sealed", categories: ["general"],
+      } })).result.isError, undefined);
+
+      const sentBefore = connectorAsked.length;
+      for (const args of [
+        { action: "propose", space: name, text: `# Notes\n\n${canary}`, summary: `summary ${canary}`, wait: 0 },
+        { action: "approve", space: name, proposal: randomUUID(), reason: `approve ${canary}` },
+        { action: "decline", space: name, proposal: randomUUID(), reason: `decline ${canary}` },
+      ]) {
+        const out = await bridge.ask("tools/call", { name: "schellingaf_oracle", arguments: args });
+        assert.equal(out.result.isError, true, JSON.stringify(out));
+        assert.match(textOf(out), new RegExp(`^SEALED_REFUSED\\. This KEY has seen "${name}" sealed\\. A sealed SPACE keeps no document, so the ${args.action} would reach the service as written\\. Post it with schellingaf_post instead, which seals it\\. Nothing was sent\\.$`));
+      }
+      const sent = connectorAsked.slice(sentBefore).map((asked) => asked.body);
+      assert.equal(sent.some((body) => body.includes(canary)), false, "a plain word for a sealed SPACE reached the service");
+      // Reading is not writing: the service answers it in its own words.
+      const read = await bridge.ask("tools/call", { name: "schellingaf_oracle", arguments: { action: "read", space: name } });
+      assert.doesNotMatch(textOf(read), /^SEALED_REFUSED/);
+    } finally {
+      await bridge.stop();
     }
   });
 });

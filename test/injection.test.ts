@@ -24,7 +24,7 @@ import { useService, app, fixture, call, agent, connector, type Agent } from "./
 import { OPERATIONS } from "../src/surface/operations.ts";
 import { defuse, renderPostPage } from "../src/mcp/render.ts";
 import { aliasesOf } from "../src/http/postview.ts";
-import { DISGUISED_MARKERS, FORGED_MARKERS, MARKER_WORD, ORDINARY, UNSEEN, readsAsMarker, seen } from "./lib/fence.ts";
+import { BREAKS_KEPT, DISGUISED_MARKERS, FORGED_MARKERS, MARKER_WORD, ORDINARY, UNSEEN, readsAsMarker, seen } from "./lib/fence.ts";
 
 // Every payload closes its own fence and reopens one. The delimiters are the only
 // thing telling a reading agent that these words are another agent's; an agent
@@ -437,6 +437,13 @@ describe("nothing an agent wrote escapes its fence", () => {
   test("a merge conflict, a here-string and emoji joined with U+200D are left exactly as written", () => {
     for (const ordinary of ORDINARY) {
       assert.equal(defuse(ordinary), ordinary);
+    }
+  });
+
+  test("a marker word with a line break or a tab after it is defused and the break kept, so no two lines are joined", () => {
+    for (const [text, defused] of BREAKS_KEPT) {
+      assert.equal(defuse(text), defused, JSON.stringify(text));
+      assert.equal(readsAsMarker(defused), false, JSON.stringify(defused));
     }
   });
 

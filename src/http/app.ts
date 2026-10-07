@@ -2293,6 +2293,18 @@ export function createApp(config: Config, db: Db): Hono<Env> {
     reentry?: Reentry,
     options?: InvokeBytes,
   ) => {
+    // A tool builds its route's address from its arguments, each part encoded, but
+    // encoding leaves "." and "..", which the address's parser takes as a step along the
+    // path: a SPACE named ".." would send a tool to a route it does not name, and an app's
+    // token to a route its tools never reach. No name or id is either, so an address the
+    // parser would change is refused before any route is asked.
+    const path = routePath.split("?", 1)[0]!;
+    if (new URL(path, "http://in-process").pathname !== path) {
+      return {
+        status: 400,
+        body: { error: refusalBody(new ApiError("INVALID_REQUEST", { detail: "a name or an id in this call is . or .., which names nothing" })) },
+      };
+    }
     // A file goes raw, with its length, which a request made in process does not carry
     // by itself and files.put requires, and with no content type.
     const raw = options?.send;

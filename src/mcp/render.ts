@@ -74,18 +74,46 @@ function letter(plain: string): string {
 }
 /** Text as a reader reads it: what slips between its characters changes nothing. */
 const spelled = (text: string, as: (c: string) => string = letter) => [...text].map(as).join(`${SLIPPED}*`);
-const BRACKETS = spelled("<<<", (c) => c);
+/**
+ * `<` as a reader takes it: as typed, its small and fullwidth forms, the single angle
+ * quotation mark, the angle brackets (technical, CJK and mathematical), the modifier
+ * arrowhead, Canadian syllabics pa and the heavy angle quotation mark ornament.
+ */
+const BRACKET_FORMS = "<\\uFE64\\uFF1C\\u2039\\u2329\\u3008\\u27E8\\u02C2\\u1438\\u276E";
+const BRACKET = `[${BRACKET_FORMS}]`;
+const BRACKETS = spelled("<<<", () => BRACKET);
+/** `>` as a reader takes it: the right-hand partner of each form of `<` above, in order. */
+const CLOSER_FORMS = ">\\uFE65\\uFF1E\\u203A\\u232A\\u3009\\u27E9\\u02C3\\u1433\\u276F";
+const CLOSER = `[${CLOSER_FORMS}]`;
+/** A closing tag's slash as a reader takes it: as typed, fullwidth, and the division,
+ *  fraction and big solidus. */
+const SLASH = "[\\/\\uFF0F\\u2215\\u2044\\u29F8]";
+/**
+ * Where the word of a marker ends, which is not taken with it: before whitespace, after
+ * an unseen character standing in for it, at the end of the text, and before a closer
+ * with its field name dropped: `>` at once (`<<<end>>>`), or a mark that is no letter or
+ * digit and then a `>` before any space (`<<<end:body>>>`). A field name holds no
+ * bracket, so a `<` on the way ends the look: no look runs into the next marker, and a
+ * long text is read in one pass. A word run on into a mark and then a space, as a heredoc's
+ * `<<<END_SQL` and a kernel launch's `<<<end-start, 256>>>` are, ends nothing.
+ */
+const WORD_END =
+  `(?:(?=\\s)|$|(?<=${UNSEEN})|(?=${CLOSER}|[^\\p{L}\\p{N}\\s${CLOSER_FORMS}${BRACKET_FORMS}][^\\s${CLOSER_FORMS}${BRACKET_FORMS}]*${CLOSER}))`;
 /**
  * The word that opens or closes a fence, `<<<peer ` or `<<<end `, as a reader reads it:
- * in any case and in look-alike letters, with unseen characters and spaces of another
- * width between the brackets, before the word or inside it, unseen ones after it, and
- * followed by whitespace, by an unseen character standing in for it, or by the end of
- * the text, where delimit() puts the line break of the fence's own closer.
+ * in any case and in look-alike letters, after brackets that only look alike, with unseen
+ * characters and spaces of another width between the brackets, before the word or inside
+ * it, unseen ones after it, a closing tag's slash before it, and ending as WORD_END says,
+ * the end of the text included, where delimit() puts the line break of the fence's own
+ * closer.
  */
 const FENCE_WORD = new RegExp(
-  `${BRACKETS}${SLIPPED}*(?:(${spelled("peer")})|${spelled("end")})${UNSEEN}*(?:\\s|$|(?<=${UNSEEN}))`,
+  `${BRACKETS}${SLIPPED}*(?:${SLASH}${SLIPPED}*)?(?:(${spelled("peer")})|${spelled("end")})${UNSEEN}*${WORD_END}`,
   "gu",
 );
+/** A marker word defused: the word apart from its brackets, and a space after it unless
+ *  whitespace follows, which stays where it is. */
+const defused = (peer: boolean, next: string) => (peer ? "<<< peer" : "<<< end") + (/\s/.test(next) ? "" : " ");
 
 /**
  * The controls that change the order a viewer shows text in: the embeddings and
@@ -102,14 +130,14 @@ const anyOrder = (word: string) => orders(word).map((order) => spelled(order)).j
 /**
  * A marker a direction control can show the right way round: the word's letters in any
  * order after the brackets, ending as FENCE_WORD's does or at the end of the line, or
- * the word in any order followed by `>>>`, which a right-to-left run shows mirrored, as
- * `<<<`, before it. The second is found after a
- * bracket too, so defusing `end>>>` cannot leave a `dne>>>` written right after it
+ * the word in any order followed by `>>>`, in any of the forms CLOSER reads, which a
+ * right-to-left run shows mirrored, as `<<<`, before it. The second is found after a
+ * closer too, so defusing `end>>>` cannot leave a `dne>>>` written right after it
  * readable behind the space it gains.
  */
 const REORDERED = new RegExp(
-  `${BRACKETS}${SLIPPED}*(?:(${anyOrder("peer")})|${anyOrder("end")})${UNSEEN}*(?:\\s|$|(?<=${UNSEEN}))` +
-    `|(?<=\\s|>|${UNSEEN})(?:(${anyOrder("peer")})|${anyOrder("end")})${SLIPPED}*${spelled(">>>", (c) => c)}`,
+  `${BRACKETS}${SLIPPED}*(?:${SLASH}${SLIPPED}*)?(?:(${anyOrder("peer")})|${anyOrder("end")})${UNSEEN}*${WORD_END}` +
+    `|(?<=\\s|${CLOSER}|${UNSEEN})(?:(${anyOrder("peer")})|${anyOrder("end")})${SLIPPED}*${spelled(">>>", () => CLOSER)}`,
   "gu",
 );
 /** The markers a direction control before them or inside them reorders, on each line. */
@@ -119,9 +147,9 @@ function reordered(text: string): string {
   return text.replace(/[^\n]+/g, (line) => {
     const control = line.search(DIRECTION);
     if (control === -1) return line;
-    return line.replace(REORDERED, (marker: string, peer?: string, peerMirrored?: string, at = 0) => {
+    return line.replace(REORDERED, (marker: string, peer: string | undefined, peerMirrored: string | undefined, at: number) => {
       if (control >= at + marker.length) return marker;
-      return peer === undefined && peerMirrored === undefined ? "<<< end " : "<<< peer ";
+      return defused(peer !== undefined || peerMirrored !== undefined, line.charAt(at + marker.length));
     });
   });
 }
@@ -143,31 +171,37 @@ function reordered(text: string): string {
  * SPACE directory a caller with no token reads.
  *
  * Only the two words that open and close a fence are touched, and each becomes
- * `<<< peer ` or `<<< end `, in plain lowercase letters, with whatever disguised it
- * dropped. A reader still reads the word through each of these, so each is caught:
+ * `<<< peer` or `<<< end`, in plain lowercase letters, with whatever disguised it
+ * dropped, and a space after it unless whitespace already follows. A reader still reads
+ * the word through each of these, so each is caught:
  *
  * - capitals and mixed case, and letters that only look alike: Cyrillic, Greek,
  *   fullwidth, mathematical and small-capital forms of e, p, n, d and r (LOOKALIKES);
+ *   and brackets that only look alike, the small and fullwidth `<` and the angle
+ *   brackets and quotation marks that draw as one (BRACKET);
+ * - a closing tag's slash before the word, as typed or in a form that only looks like
+ *   it (SLASH); and no field name after it: the word followed at once by `>`, or by a
+ *   mark that is no letter or digit and then a `>` before any space, each `>` as typed
+ *   or in a form that only looks like it (CLOSER, WORD_END);
  * - a character nobody sees, or a space of another width than the ordinary one, between
  *   the brackets, before the word or inside it; and a character nobody sees after it
  *   or in place of the space, or the word ending the text (FENCE_WORD);
  * - a direction control (U+202A to U+202E, U+2066 to U+2069) before the word on its
  *   line or inside the marker, which lets a viewer show letters in another order than
  *   they are written: there the word's letters are read in any order after the
- *   brackets, and before a `>>>` that a right-to-left run shows as `<<<` (REORDERED).
+ *   brackets, and before a `>>>`, in any of its forms, that a right-to-left run shows
+ *   as `<<<` (REORDERED).
  *
- * An ordinary space, a tab or a line break is left where it is: it breaks the word just
- * as the space in `<<< end ` does. Everything else is left exactly as written:
- * `<<<<<<< HEAD` from a merge conflict and a shell here-string are ordinary content
- * in a service for coding agents, and so are emoji joined with U+200D, Cyrillic text,
- * and END in capitals outside a marker. Not caught: brackets that only look alike
- * (a fullwidth or an angle-quote <), look-alike letters outside that table (circled,
- * superscript, Armenian, Cherokee), a letter carrying a combining mark, U+2800 (the
- * braille blank, which draws as a space but is not a Unicode space), and right-to-left
- * text that reorders a line with no direction control in it. After a direction
+ * What follows the word stays where it is: an ordinary space, a tab or a line break
+ * breaks the word just as the space in `<<< end ` does, so no two lines of a PEER's text
+ * are ever joined. Everything else is left exactly as written: `<<<<<<< HEAD` from a
+ * merge conflict, a shell here-string, a PHP heredoc such as `<<<END_SQL` and a CUDA
+ * launch such as `<<<end-start, 256>>>` are ordinary content in a service for coding
+ * agents, and so are emoji joined with U+200D, Cyrillic text, END in capitals outside a
+ * marker, and the word run on into letters, as in `<<<endless`. After a direction
  * control, the rule reads a line as a viewer might, not as every viewer does: any
  * control earlier on the line counts, even one already closed or one that reorders
- * nothing, so `<<<den ` or ` end>>>` there is caught though a viewer may show it as
+ * nothing, so `<<<den ` or ` end>>>` there is changed though a viewer may show it as
  * written.
  * The JSON rendering is not touched at all: what is stored is returned byte-exact
  * there, and this is a presentation.
@@ -179,7 +213,7 @@ function reordered(text: string): string {
  */
 export function defuse(value: string): string {
   return (
-    reordered(value.replace(FENCE_WORD, (_, peer?: string) => (peer === undefined ? "<<< end " : "<<< peer ")))
+    reordered(value.replace(FENCE_WORD, (marker: string, peer: string | undefined, at: number) => defused(peer !== undefined, value.charAt(at + marker.length))))
       // And control characters, which are not content.
       //
       // A person reads these renderings in a terminal — that is the whole
@@ -838,8 +872,9 @@ export function renderResult(header: string, body: Record<string, any>): string 
     if (v === null || v === undefined || typeof v === "object") continue;
     // A write receipt carries the SPACE name, quoted like every other rendering
     // of it: approving or declining an ask names only a request id, so the
-    // receipt is where the agent first reads the name.
-    lines.push(k === "name" || k === "space" ? `${k}: ${spaceName(v)}` : `${k}: ${v}`);
+    // receipt is where the agent first reads the name. A fork's names the SPACE it
+    // came from, another KEY's name.
+    lines.push(k === "name" || k === "space" || k === "forked_from" ? `${k}: ${spaceName(v)}` : `${k}: ${v}`);
   }
   if (Array.isArray(body.contacts) && body.contacts.length) {
     lines.push(`contacts: ${body.contacts.map((k: any) => `${k.peer_id} (${k.role})`).join(", ")}`);

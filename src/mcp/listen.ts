@@ -52,9 +52,12 @@
 //   - when its KEY leaves, or is removed from, a private SPACE one of its addresses
 //     is in;
 //   - when its token expires;
-//   - after LISTEN_MAX_SECONDS, which bounds what a write made outside this process
-//     can leave standing: an operator's block, a SPACE withheld. Until then such a
-//     stream is told addresses, and every read through them is checked;
+//   - when the operator blocks its KEY, which is a statement run outside this process
+//     that no route publishes: while any stream is open, the KEYS holding them are
+//     looked up for a block every STREAM_TIMING.blockMs, in one read for them all;
+//   - after LISTEN_MAX_SECONDS, which bounds what any other write made outside this
+//     process can leave standing, such as a SPACE withheld. Until then such a stream
+//     is told addresses, and every read through them is checked;
 //   - when the service stops. From then on this process opens no stream at all, since
 //     a client told to listen again would otherwise be served by the process that is
 //     going away.
@@ -131,9 +134,10 @@ export const STREAM_HELD_BYTES = 64 * 1024;
 /** How long a client may take nothing from its stream while something waits. */
 export const STREAM_STALL_MS = 60_000;
 /** Those two as every stream reads them when it opens, with how often a stall is
- * looked for. The suite shortens them, as it lowers STREAM_LIMITS, to see a stalled
- * client hung up on without waiting a minute. */
-export const STREAM_TIMING = { heldBytes: STREAM_HELD_BYTES, stallMs: STREAM_STALL_MS, checkMs: 15_000 };
+ * looked for, and how often the KEYS holding streams are looked up for an operator's
+ * block. The suite shortens them, as it lowers STREAM_LIMITS, to see a stalled client
+ * hung up on, and a blocked KEY's stream ended, without waiting. */
+export const STREAM_TIMING = { heldBytes: STREAM_HELD_BYTES, stallMs: STREAM_STALL_MS, checkMs: 15_000, blockMs: 15_000 };
 /** How long a stream is kept before it ends and its client listens again. */
 export const LISTEN_MAX_SECONDS = envNumber("LISTEN_MAX_SECONDS", 900, { min: 0, integer: true });
 
@@ -280,7 +284,9 @@ export async function checkAddresses(
 
 // ── open streams ────────────────────────────────────────────────────────────
 
-type Open = { end: () => void };
+/** A stream's place: whose it is, and once it is open, the database its KEY is looked
+ * up in for a block. */
+type Open = { end: () => void; peer: string; db: Db | null };
 const streams = new Set<Open>();
 const perKey = new Map<string, number>();
 const perAddress = new Map<string, number>();
@@ -307,6 +313,8 @@ export type StreamPlace = {
     memberSpaces: Set<string>;
     /** End the stream gracefully. Called at most once. */
     end: () => void;
+    /** Where the KEY is looked up for an operator's block while the stream is open. */
+    db: Db;
   }): void;
   /** Give the place back, whichever way the stream ended. */
   release(): void;
@@ -341,6 +349,8 @@ export function takeStream(peer: string, tokenHash: string, address: string): St
   let ended = false;
   let endStream: (() => void) | null = null;
   const open: Open = {
+    peer,
+    db: null,
     end: () => {
       if (ended || endStream === null) return;
       ended = true;
@@ -385,6 +395,8 @@ export function takeStream(peer: string, tokenHash: string, address: string): St
       const lifetime = Math.max(0, Math.min(LISTEN_MAX_SECONDS * 1000, opts.expiresAt.getTime() - Date.now()));
       timer = setTimeout(() => open.end(), lifetime);
       timer.unref?.();
+      open.db = opts.db;
+      sweepSoon();
     },
     release() {
       if (released) return;
@@ -393,6 +405,10 @@ export function takeStream(peer: string, tokenHash: string, address: string): St
       if (timer !== null) clearTimeout(timer);
       stopListening();
       streams.delete(open);
+      if (sweep !== null && ![...streams].some((o) => o.db !== null)) {
+        clearTimeout(sweep);
+        sweep = null;
+      }
       count(perKey, peer, -1);
       count(perAddress, address, -1);
       count(perNetwork, network, -1);
@@ -403,7 +419,61 @@ export function takeStream(peer: string, tokenHash: string, address: string): St
 /** End every open stream gracefully, as the service stops, and open no more. */
 export function endAllStreams(): void {
   stopping = true;
+  if (sweep !== null) clearTimeout(sweep);
+  sweep = null;
   for (const open of [...streams]) open.end();
+}
+
+// ── an operator's block ─────────────────────────────────────────────────────
+//
+// The operator blocks a KEY by a statement of its own (runbooks/withhold.md), so no
+// route publishes it as a revocation is published. While any stream is open, the KEYS
+// holding open streams are looked up for a block within STREAM_TIMING.blockMs of a
+// stream opening and every STREAM_TIMING.blockMs after, in one read for them all, and
+// a blocked KEY's streams end as a revoked token's do. Listening again is then refused,
+// as every use of a blocked KEY's token is. No other stream is touched.
+
+let sweep: ReturnType<typeof setTimeout> | null = null;
+let sweepDue = 0;
+
+/** A look for blocks within STREAM_TIMING.blockMs from now, unless one is due sooner. */
+function sweepSoon(): void {
+  const due = Date.now() + STREAM_TIMING.blockMs;
+  if (stopping || (sweep !== null && sweepDue <= due)) return;
+  if (sweep !== null) clearTimeout(sweep);
+  sweepDue = due;
+  sweep = setTimeout(() => {
+    sweep = null;
+    void endBlockedStreams().finally(() => {
+      if ([...streams].some((o) => o.db !== null)) sweepSoon();
+    });
+  }, STREAM_TIMING.blockMs);
+  sweep.unref?.();
+}
+
+async function endBlockedStreams(): Promise<void> {
+  const byDb = new Map<Db, Set<string>>();
+  for (const open of streams) {
+    if (open.db === null) continue;
+    const peers = byDb.get(open.db) ?? new Set<string>();
+    byDb.set(open.db, peers.add(open.peer));
+  }
+  for (const [db, peers] of byDb) {
+    let rows: { peer: string }[];
+    try {
+      // The table a bearer is checked against, read as the token lookups read it.
+      rows = await db.read<{ peer: string }[]>`
+        select encode(peer_id, 'hex') as peer
+          from schellingaf.peers
+         where blocked_at is not null
+           and peer_id in (select decode(p, 'hex') from unnest(${[...peers]}::text[]) p)`;
+    } catch {
+      // Left to the next look, and to the stream's lifetime.
+      continue;
+    }
+    const blocked = new Set(rows.map((r) => r.peer));
+    for (const open of [...streams]) if (open.db === db && blocked.has(open.peer)) open.end();
+  }
 }
 
 /** For the suite, which goes on after it has stopped the service's streams, as a
