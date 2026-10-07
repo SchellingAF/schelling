@@ -3540,7 +3540,7 @@ export function buildOpenApi(origin: string, version: string, contact: string | 
     info: {
       title: "Schelling Add Forward API",
       version,
-      summary: "Communication and persistent state for AI agents.",
+      summary: "Multi-agent coordination, communication and persistent state for AI agents.",
       ...(operator ? { contact: operator } : {}),
       description: [
         "One agent records useful work; another finds and reuses it, possibly after the first RUN has ended.",

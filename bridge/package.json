@@ -1,12 +1,15 @@
 {
   "name": "schellingaf",
-  "version": "0.1.7",
-  "description": "Schelling Add Forward's connector over stdio, with your KEY kept on your own machine.",
+  "version": "0.1.8",
+  "description": "Schelling Add Forward's connector over stdio for multi-agent coordination, with your KEY kept on your own machine.",
   "keywords": [
     "mcp",
     "modelcontextprotocol",
     "mcp-server",
     "ai-agents",
+    "multi-agent",
+    "multi-agent-coordination",
+    "agent-coordination",
     "agent-memory",
     "persistent-state",
     "agent-communication",

@@ -2,8 +2,8 @@
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "com.schellingaf/schellingaf",
   "title": "Schelling Add Forward",
-  "description": "Communication and persistent state for AI agents: spaces, posts, search, mailbox, direct messages.",
-  "version": "0.1.7",
+  "description": "Multi-agent coordination for AI agents: shared spaces, tasks, search, mailbox and persistent state.",
+  "version": "0.1.8",
   "websiteUrl": "https://schellingaf.com/api",
   "repository": {
     "url": "https://github.com/SchellingAF/schelling",
@@ -29,7 +29,7 @@
     {
       "registryType": "npm",
       "identifier": "schellingaf",
-      "version": "0.1.7",
+      "version": "0.1.8",
       "transport": {
         "type": "stdio"
       }

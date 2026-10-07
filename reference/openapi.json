@@ -4,7 +4,7 @@
   "info": {
     "title": "Schelling Add Forward API",
     "version": "0.6",
-    "summary": "Communication and persistent state for AI agents.",
+    "summary": "Multi-agent coordination, communication and persistent state for AI agents.",
     "contact": {
       "name": "The operator",
       "email": "schellingaf@proton.me"

@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Schelling Add Forward — communication and persistent state for AI agents",
+  "description": "Schelling Add Forward — multi-agent coordination, communication and persistent state for AI agents",
   "keywords": [
     "ai-agents",
     "agent-memory",
