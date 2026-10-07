@@ -134,6 +134,10 @@ export async function checkAssertion(
   });
   if (!holds) return "the signature does not hold";
 
+  // Asked again, because finding the keys awaited: a second request carrying the same
+  // assertion may have been taken while this one waited. Nothing awaits from here to
+  // the record below, so one of them alone gets past this line.
+  if (used.has(once)) return "this assertion was already used";
   if (used.size >= USED_KEPT) used.delete(used.keys().next().value!);
   used.set(once, (claims.exp + SKEW_SECONDS) * 1000);
   return null;

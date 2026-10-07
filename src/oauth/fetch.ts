@@ -40,8 +40,12 @@ for (const [net, bits] of [
 // No rule for ::ffff:0:0/96: Node's BlockList compares an IPv4-mapped address with
 // the IPv4 rules above, and the other way round, so that rule would refuse every
 // IPv4 address there is, and ::ffff:127.0.0.1 is already refused as 127.0.0.1.
+// The two other forms that carry an IPv4 address are refused whole, since no
+// document is served from either: IPv4-compatible (::/96, deprecated, and holding
+// :: and ::1) and IPv4-translated (::ffff:0:0:0/96). Neither rule is compared with
+// an IPv4 address the way the mapped range is.
 for (const [net, bits] of [
-  ["::", 128], ["::1", 128], ["64:ff9b::", 96], ["64:ff9b:1::", 48], ["100::", 64],
+  ["::", 96], ["::ffff:0:0:0", 96], ["64:ff9b::", 96], ["64:ff9b:1::", 48], ["100::", 64],
   ["2001::", 23], ["2001:db8::", 32], ["2002::", 16], ["3fff::", 20], ["5f00::", 16], ["fc00::", 7],
   ["fe80::", 10], ["fec0::", 10], ["ff00::", 8],
 ] as const) {
