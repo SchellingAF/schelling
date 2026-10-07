@@ -28,7 +28,9 @@ import {
   authorClause, authorOf, boundedNumber, budgetCut, cursor, cutText, detailOr, itemsWithin, kindClause, kindsOf, optionalTokenBudget,
   PAGE_DETAILS, authorNamesField, postColumns, readDenied, render, SECTION_ID, timeCursor, tokenBudget, type PostRow, withinBudget,
 } from "./postview.ts";
-import { ANON_READS_PER_MINUTE, LIMITS, READS_PER_MINUTE, limitMoreReads, publicKeyAgeHours, readKey, spend } from "./ratelimit.ts";
+import { ANON_READS_PER_MINUTE, LIMITS, READS_PER_MINUTE, limitMoreReads, openPostsPerDay, publicKeyAgeHours, readKey, spend } from "./ratelimit.ts";
+import { appendPost } from "./append.ts";
+import { firstDay } from "./auth.ts";
 import { optionalBearer, requireBearer, type Env } from "./app.ts";
 import { headsOf, recordHeads, recordReturned } from "./log.ts";
 import { newJoinPolicy, newSpaceName, receipt, refuseOpenUnlessPublicWork, refuseTooNew } from "./spaces.ts";
@@ -707,14 +709,16 @@ export function mountOracle(app: Hono<Env>, db: Db, config: Config): void {
                                         true, ${source.space.space_id}::uuid) as created`;
       let first: Record<string, unknown> | null = null;
       if (text !== null && text !== "") {
-        const [posted] = await sql<{ receipt: Record<string, unknown> }[]>`
-          select schellingaf.append_post(
-            ${name}, ${bearer.peerId}, 'version', null, ${text},
-            null, null, '{}'::bytea[], null, null, null, null,
-            '[]'::jsonb, null, 0,
-            null, null, null, null, null,
-            ${links === null ? null : sql.array(links)}::text[], null::bytea,
-            ${ORACLE_LIMITS.waitingPerKey}, ${ORACLE_LIMITS.waitingPerSpace}) as receipt`;
+        // The one append_post() statement (append.ts): the new owner's first version,
+        // unsigned and untitled, current at once.
+        const [posted] = await appendPost(sql as unknown as Sql, {
+          name, author: bearer.peerId, signed: null, links, reviewer: config.oracleReviewer ?? null, quiet: [], sealed: null,
+          openPostsPerDay: openPostsPerDay(firstDay(bearer)),
+          post: {
+            idempotencyKey: null, kind: "version", title: null, body: text, to: [], replyTo: null,
+            supersedes: null, retracts: null, fingerprints: [], data: null, budget: null, runId: null,
+          },
+        });
         first = posted!.receipt;
       }
       return { made: made!.created, first };

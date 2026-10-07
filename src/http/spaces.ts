@@ -1719,7 +1719,12 @@ export function mountSpaces(app: Hono<Env>, config: Config, db: Db, service: Ser
     await spend(c, db, LIMITS.peerWrites(me.hex));
     const [row] = await db.write<{ declined: Record<string, unknown> }[]>`
       select schellingaf.decline_hand_over(${id}::uuid, ${me.peerId}) as declined`;
-    return c.json(receipt(c, null, row!.declined));
+    // A KEY outside the SPACE, which may be offered a seat, reads none of its counters: its
+    // revision is logged as every write's is, and left out of the answer.
+    const answer = receipt(c, null, row!.declined);
+    if (answer.outside === true) delete answer.revision;
+    delete answer.outside;
+    return c.json(answer);
   });
 
   /** The KEY that handed its seat on is in the SPACE no longer: a stream that

@@ -92,12 +92,26 @@ export function shown(text: string): string {
   return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
+/** The characters other than a line feed that a reader may take as a line break: a
+ *  vertical tab, a form feed, a next line, and the line and paragraph separators. Written
+ *  as code points, so no editor turns an escape into the character. */
+const READ_AS_BREAK = new RegExp(`[${[0x0b, 0x0c, 0x85, 0x2028, 0x2029].map((c) => String.fromCharCode(c)).join("")}]`);
+
+/** Every line break a reader may see in a text, a carriage return and a line feed among
+ *  them, each a space: what is shown as one line stays one line. */
+function oneLine(text: string): string {
+  return text.replace(/\r\n|\r|\n/g, " ").split(READ_AS_BREAK).join(" ");
+}
+
 /**
  * The change as lines: `-` removed, `+` added, two spaces for a line kept around a
  * change. Myers' diff over lines, with the lines both texts share at the start and the
  * end set aside first, which is most of the work for an edit to one section. Null when
  * either text has more than CHANGE_MAX_LINES lines or they differ in more than
- * CHANGE_MAX_EDITS: the search's memory grows with the square of the edits.
+ * CHANGE_MAX_EDITS: the search's memory grows with the square of the edits. Lines are
+ * those a line feed ends, as the document grammar counts them; a piece of one after
+ * another character a reader may take as a break is shown on a line of its own, with the
+ * same mark.
  */
 export function lineChange(before: string, after: string, context = 3): string | null {
   const a = before.replace(/\r\n?/g, "\n").split("\n");
@@ -134,7 +148,9 @@ export function lineChange(before: string, after: string, context = 3): string |
       return;
     }
     skipped = false;
-    out.push(`${op.t === " " ? " " : op.t} ${op.line}`);
+    // Every piece a reader may take for a line of its own carries this line's mark, so no
+    // text written after such a break passes for a line kept or for a mark of its own.
+    for (const piece of op.line.split(READ_AS_BREAK)) out.push(`${op.t === " " ? " " : op.t} ${piece}`);
   });
   return out.join("\n");
 }
@@ -190,7 +206,9 @@ function walkBack(a: string[], b: string[], trace: Int32Array[]): Op[] {
   return ops.reverse();
 }
 
-/** The material the model is shown, every agent-written part escaped. */
+/** The material the model is shown, every agent-written part escaped. The proposal's
+ *  summary, which its proposer writes, is one line however it was written, so it can add
+ *  no line to the block it sits in. */
 export function material(input: {
   title: string | null;
   description: string | null;
@@ -204,7 +222,7 @@ export function material(input: {
     `description: ${shown(input.description ?? "")}`,
     "</oracle_space>",
     "<proposal>",
-    `summary: ${shown(input.summary ?? "(none given)")}`,
+    `summary: ${shown(oneLine(input.summary ?? "(none given)"))}`,
     `first version: ${input.first ? "yes" : "no"}`,
     "</proposal>",
     "<change>",
