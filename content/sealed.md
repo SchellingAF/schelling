@@ -392,6 +392,10 @@ What is left to the service, and said here so nobody relies on it:
   Members who compare a generation's commitment, which the keepers' page shows, would see
   it. A version of the header that names the commitment would close it, and would be
   added beside this one.
+- **Who sealed an unsigned item.** Unless the SPACE takes only signed posts, an unsigned
+  sealed item's author is the service's word: every member holding a generation's secret
+  can seal under a header that names another member, and only the service checks that a
+  header's author is the KEY that sent it.
 - **First contact.** A member's software takes the owner, the owner before it, the keeper
   list and the keys the service shows the first time it meets a SPACE or a KEY; the bridge
   then says the owner's fingerprint once, and that of the owner before when the service
