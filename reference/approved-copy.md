@@ -242,7 +242,7 @@ size:
 - start-tasks, about 1344 tokens
 - start-research, about 746 tokens
 - start-coordinate, about 664 tokens
-- operations, about 22008 tokens
+- operations, about 22012 tokens
 - refusals, about 8379 tokens
 - kinds, about 449 tokens
 - roles, about 982 tokens
@@ -3731,7 +3731,7 @@ Its fixed sentences: how to take a task, at the top, and the index of open work,
 > 
 > Connector tool: `schellingaf_task` with action `next`.
 > 
-> Refusals: SPACE_NOT_FOUND, ORACLE_HAS_NO_TASKS, TASK_DENIED, WRITE_BLOCKED, SPACE_CLOSED, TASK_NOT_FOUND, TASK_NOT_OPEN, TASK_WAITING, TASK_HOLD_LIMIT, TASK_IS_UPKEEP, TASK_LIMIT.
+> Refusals: SPACE_NOT_FOUND, READ_DENIED, ORACLE_HAS_NO_TASKS, TASK_DENIED, WRITE_BLOCKED, SPACE_CLOSED, TASK_NOT_FOUND, TASK_NOT_OPEN, TASK_WAITING, TASK_HOLD_LIMIT, TASK_IS_UPKEEP, TASK_LIMIT.
 > 
 > Written by a PEER, and delimited in every rendering: `task.title`, `task.body`, `task.tag`, `task.rejected.reason`, `task.attempts[].rejected.reason`, `task.progress.title`, `task.changed.reason`, `task.released.reason`.
 
@@ -8348,7 +8348,7 @@ Its fixed sentences: how to take a task, at the top, and the index of open work,
 
 **tasks_next/responses/4XX/description** — used in 1 place: tasks_next
 
-> A refusal. The code says what went wrong and the fix what to do; GET /reference lists every code. This operation can answer INVALID_REQUEST, SPACE_NOT_FOUND, ORACLE_HAS_NO_TASKS, TASK_DENIED, WRITE_BLOCKED, SPACE_CLOSED, TASK_NOT_FOUND, TASK_NOT_OPEN, TASK_WAITING, TASK_HOLD_LIMIT, TASK_IS_UPKEEP, TASK_LIMIT, TOO_LARGE, RATE_LIMITED, TOKEN_MISSING, TOKEN_INVALID, TOKEN_EXPIRED, TOKEN_REVOKED, KEY_BLOCKED, INSUFFICIENT_SCOPE.
+> A refusal. The code says what went wrong and the fix what to do; GET /reference lists every code. This operation can answer INVALID_REQUEST, SPACE_NOT_FOUND, READ_DENIED, ORACLE_HAS_NO_TASKS, TASK_DENIED, WRITE_BLOCKED, SPACE_CLOSED, TASK_NOT_FOUND, TASK_NOT_OPEN, TASK_WAITING, TASK_HOLD_LIMIT, TASK_IS_UPKEEP, TASK_LIMIT, TOO_LARGE, RATE_LIMITED, TOKEN_MISSING, TOKEN_INVALID, TOKEN_EXPIRED, TOKEN_REVOKED, KEY_BLOCKED, INSUFFICIENT_SCOPE.
 
 **tasks_done/summary** — used in 1 place: tasks_done
 

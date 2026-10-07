@@ -125,6 +125,10 @@ function compact(task: Record<string, unknown>): Record<string, unknown> {
 /** A function's answer, as the route sends it: the task as every read shows it. */
 type Answer = { space: string; task: Record<string, unknown> | null; [key: string]: unknown };
 
+/** A write's row: what its function answered, null where next was not called, and whether
+ *  its SPACE is withheld. */
+type Row = { out: Answer | null; withheld: boolean };
+
 /** One earlier revision of a task, as the history reads it. */
 type HistoryRow = {
   revision: number; title: string; body: string; tag: string | null; after: string[]; after_numbers: (number | null)[];
@@ -153,6 +157,30 @@ function wholeTask(c: Context<Env>): boolean {
 /** The fields of one task that belong inside tasks when an add sends tasks. */
 const ONE_TASK_FIELDS = ["title", "body", "tag", "after", "key"] as const;
 
+/**
+ * Whether SPACE `name` is withheld now. Nobody reads a withheld SPACE, its owner included,
+ * and withholding stops no write (runbooks/withhold.md): so a write there still lands, and
+ * answers only what detail=compact answers, never a task's words.
+ */
+function withheldNow(sql: Sql, name: string) {
+  return sql`exists (select 1 from schellingaf.spaces ws
+                       join schellingaf.withheld_spaces ww on ww.space_id = ws.space_id
+                      where ws.name = ${name} and ww.released_at is null)`;
+}
+
+/** next asked in a withheld SPACE: nothing was written, and the route refuses it as the list does. */
+class WithheldSpace extends Error {}
+
+/** A task as a write answers it: whole when asked and the SPACE is read, else short. */
+function answered(task: Record<string, unknown> | null, whole: boolean, withheld: boolean) {
+  return whole && !withheld ? shown(task) : short(shown(task));
+}
+
+/** A batch's tasks as a write answers them, each with the key it was sent with. */
+function answeredAll(tasks: Record<string, unknown>[], whole: boolean, withheld: boolean) {
+  return tasks.map((t) => (whole && !withheld ? shown(t) : { key: t.key ?? null, ...short(shown(t)) }));
+}
+
 export function mountTasks(app: Hono<Env>, db: Db): void {
   const keyOf = (c: Context<Env>) => {
     const bearer = requireBearer(c.get("bearer"));
@@ -174,16 +202,20 @@ export function mountTasks(app: Hono<Env>, db: Db): void {
    * loop takes mailboxes one statement at a time and can cross one too. Each task function
    * is one statement, so the victim rolled back whole, and the allowance was spent once,
    * before it: a retry answers what one clean run would.
+   *
+   * Each call also answers whether its SPACE is withheld (withheldNow()), in the same
+   * statement: a write there answers no task's words, and a batch's tasks, which a retire
+   * answers, are answered the same way as its task.
    */
   const write = async (
     c: Context<Env>,
     hex: string,
     whole: boolean,
-    call: (sql: Db["write"]) => PromiseLike<readonly { out: Answer }[]>,
+    call: (sql: Db["write"]) => PromiseLike<readonly Row[]>,
     cost = 1,
   ) => {
     await spend(c, db, LIMITS.peerWrites(hex), cost);
-    let rows: readonly { out: Answer }[];
+    let rows: readonly Row[];
     for (let attempt = 0; ; attempt++) {
       try {
         rows = await call(db.write);
@@ -197,10 +229,17 @@ export function mountTasks(app: Hono<Env>, db: Db): void {
       }
     }
     const [row] = rows;
-    const { delivered, refused, detail, ...out } = row!.out;
+    // next in a withheld SPACE, which never called next_job(): refused by the route.
+    if (row!.out === null && row!.withheld) throw new WithheldSpace();
+    const { delivered, refused, detail, ...out } = row!.out!;
     if (Array.isArray(delivered) && delivered.length > 0) recordHeads(c, headsOf(null, { delivered }));
     if (typeof refused === "string") throw new ApiError(refused, typeof detail === "string" ? { detail } : {});
-    return { ...out, task: whole ? shown(out.task) : short(shown(out.task)), notice: NOTICE };
+    return {
+      ...out,
+      task: answered(out.task, whole, row!.withheld),
+      ...(Array.isArray(out.tasks) ? { tasks: answeredAll(out.tasks as Record<string, unknown>[], whole, row!.withheld) } : {}),
+      notice: NOTICE,
+    };
   };
 
   // The list, newest first, for whoever can read the SPACE: anybody, in a public one.
@@ -380,9 +419,11 @@ export function mountTasks(app: Hono<Env>, db: Db): void {
     const tasks = batch ? readTaskBatch(input.tasks, "add") : [readOneTask(input)];
     const idempotencyKey = optionalString(input.idempotency_key, "idempotency_key", 128);
     await spend(c, db, LIMITS.peerWrites(me.hex), tasks.length);
-    const [row] = await db.write<{ out: { space: string; tasks: Record<string, unknown>[]; changed: boolean; replayed?: boolean } }[]>`
-      select schellingaf.add_tasks(${c.req.param("name")}, ${me.peerId}, ${db.write.json(tasks)}, ${idempotencyKey},
-                                   ${batch}, ${TASK_LIMITS.notAcceptedPerSpace}, ${TASK_LIMITS.batch}) as out`;
+    const name = c.req.param("name");
+    const [row] = await db.write<{ out: { space: string; tasks: Record<string, unknown>[]; changed: boolean; replayed?: boolean }; withheld: boolean }[]>`
+      select schellingaf.add_tasks(${name}, ${me.peerId}, ${db.write.json(tasks)}, ${idempotencyKey},
+                                   ${batch}, ${TASK_LIMITS.notAcceptedPerSpace}, ${TASK_LIMITS.batch}) as out,
+             ${withheldNow(db.write, name)} as withheld`;
     const out = row!.out;
     const replay = out.replayed === true ? { replayed: true } : {};
     const status = out.replayed === true ? 200 : 201;
@@ -391,13 +432,13 @@ export function mountTasks(app: Hono<Env>, db: Db): void {
       const { key: _key, ...task } = out.tasks[0]!;
       const hint = hintFor(tasks[0]!.title, tasks[0]!.body);
       return c.json({
-        space: out.space, task: whole ? shown(task) : short(shown(task)), changed: out.changed, ...replay,
+        space: out.space, task: answered(task, whole, row!.withheld), changed: out.changed, ...replay,
         notice: NOTICE, ...(hint ? { hint } : {}),
       }, status);
     }
     // One hint for the whole batch, naming the tasks that ran long.
     const hint = hintForMany(tasks.map((t, i) => ({ label: `tasks[${i}]${t.key === undefined ? "" : ` ${t.key}`}`, title: t.title, body: t.body })));
-    const listed = out.tasks.map((t) => (whole ? shown(t) : { key: t.key ?? null, ...short(shown(t)) }));
+    const listed = answeredAll(out.tasks, whole, row!.withheld);
     return c.json({ space: out.space, tasks: listed, changed: out.changed, ...replay, notice: NOTICE, ...(hint ? { hint } : {}) }, status);
   });
 
@@ -426,13 +467,29 @@ export function mountTasks(app: Hono<Env>, db: Db): void {
       throw new ApiError("INVALID_REQUEST", { detail: "number takes no tag, no verify and no job but work: send number alone" });
     }
     // next_job() (0133_task_next_job.sql, upkeep 0134_task_upkeep.sql) picks the job and says
-    // why in NEXT_WORDS, and an upkeep task's brief is NEXT_WORDS' too.
-    return c.json(await write(c, me.hex, true, (sql) => sql<{ out: Answer }[]>`
-      select schellingaf.next_job(${c.req.param("name")}, ${me.peerId}, ${job}, ${tag}, ${number},
-                                  ${sql.json(NEXT_WORDS as never)}, ${TASK_LIMITS.held},
-                                  ${TASK_LIMITS.checkFirstMinutes}, ${TASK_LIMITS.checkOfferMinutes},
-                                  ${TASK_LIMITS.notAcceptedPerSpace}, ${TASK_LIMITS.upkeep.documentGapHours},
-                                  ${TASK_LIMITS.upkeep.reviewGapHours}, ${join}, ${TASK_LIMITS.claimants}) as out`));
+    // why in NEXT_WORDS, and an upkeep task's brief is NEXT_WORDS' too. Its job is to hand
+    // out a task's words, which nobody reads in a withheld SPACE: there it is not called,
+    // nothing is taken, and next is refused as the list is, in the list's own words.
+    const name = c.req.param("name");
+    try {
+      return c.json(await write(c, me.hex, true, (sql) => sql<Row[]>`
+        with w as (select ${withheldNow(sql, name)} as withheld)
+        select case when w.withheld then null
+                    else schellingaf.next_job(${name}, ${me.peerId}, ${job}, ${tag}, ${number},
+                                              ${sql.json(NEXT_WORDS as never)}, ${TASK_LIMITS.held},
+                                              ${TASK_LIMITS.checkFirstMinutes}, ${TASK_LIMITS.checkOfferMinutes},
+                                              ${TASK_LIMITS.notAcceptedPerSpace}, ${TASK_LIMITS.upkeep.documentGapHours},
+                                              ${TASK_LIMITS.upkeep.reviewGapHours}, ${join}, ${TASK_LIMITS.claimants}) end as out,
+               w.withheld
+          from w`));
+    } catch (error) {
+      if (!(error instanceof WithheldSpace)) throw error;
+      throw await db.readTx(me.hex, async (sql) => {
+        const [space] = await sql<{ space_id: string; owner: Buffer }[]>`
+          select s.space_id::text, s.owner_id as owner from schellingaf.spaces s where s.name = ${name}`;
+        return readDenied(sql, space!.space_id, space!.owner, me.hex);
+      });
+    }
   });
 
   // A post of the holder's own, linked to show where the task stands; it renews the claim.
@@ -445,9 +502,10 @@ export function mountTasks(app: Hono<Env>, db: Db): void {
       throw new ApiError("INVALID_REQUEST", { detail: "post_id is the id of your own post in this SPACE that shows where the task stands" });
     }
     const number = taskNumber(c.req.param("number"));
-    return c.json(await write(c, me.hex, whole, (sql) => sql<{ out: Answer }[]>`
+    return c.json(await write(c, me.hex, whole, (sql) => sql<Row[]>`
       select schellingaf.task_progress(${c.req.param("name")}, ${me.peerId}, ${number}, ${post}::uuid,
-                                       ${[...KIND_GROUPS.knowledge]}::text[], ${TASK_LIMITS.held}) as out`));
+                                       ${[...KIND_GROUPS.knowledge]}::text[], ${TASK_LIMITS.held}) as out,
+             ${withheldNow(sql, c.req.param("name")!)} as withheld`));
   });
 
   app.post("/v1/spaces/:name/tasks/:number/done", async (c) => {
@@ -463,9 +521,10 @@ export function mountTasks(app: Hono<Env>, db: Db): void {
     // attempt, which tells the KEYS it concerns (migrations/0140_task_attempts.sql).
     const revision = taskRevision(input.revision, false);
     const number = taskNumber(c.req.param("number"));
-    return c.json(await write(c, me.hex, whole, (sql) => sql<{ out: Answer }[]>`
+    return c.json(await write(c, me.hex, whole, (sql) => sql<Row[]>`
       select schellingaf.task_done(${c.req.param("name")}, ${me.peerId}, ${number}, ${post}::uuid, ${revision}::int,
-                                   true, ${TASK_LIMITS.attempts}) as out`));
+                                   true, ${TASK_LIMITS.attempts}) as out,
+             ${withheldNow(sql, c.req.param("name")!)} as withheld`));
   });
 
   // A task's words changed, naming the revision read and why. Its holder, if another KEY
@@ -476,9 +535,10 @@ export function mountTasks(app: Hono<Env>, db: Db): void {
     const input = await readBody(c);
     const { revision, reason, change } = readTaskChange(input);
     const number = taskNumber(c.req.param("number"));
-    return c.json(await write(c, me.hex, whole, (sql) => sql<{ out: Answer }[]>`
+    return c.json(await write(c, me.hex, whole, (sql) => sql<Row[]>`
       select schellingaf.change_task(${c.req.param("name")}, ${me.peerId}, ${number}, ${revision}::int, ${reason},
-                                     ${sql.json(change as never)}, ${TASK_LIMITS.revisions}, true) as out`));
+                                     ${sql.json(change as never)}, ${TASK_LIMITS.revisions}, true) as out,
+             ${withheldNow(sql, c.req.param("name")!)} as withheld`));
   });
 
   // A task retired, saying why: by a coordinator or above, any task not yet accepted. With
@@ -491,15 +551,13 @@ export function mountTasks(app: Hono<Env>, db: Db): void {
     const reason = taskCloseReason(input.reason, "retire");
     const tasks = input.tasks === undefined || input.tasks === null ? null : readTaskBatch(input.tasks, "add");
     const number = taskNumber(c.req.param("number"));
-    const out = await write(c, me.hex, whole, (sql) => sql<{ out: Answer }[]>`
+    const out = await write(c, me.hex, whole, (sql) => sql<Row[]>`
       select schellingaf.retire_task(${c.req.param("name")}, ${me.peerId}, ${number}, ${reason},
                                      ${tasks === null ? null : sql.json(tasks as never)}::jsonb, ${TASK_LIMITS.notAcceptedPerSpace},
-                                     ${TASK_LIMITS.batch}, ${TASK_LIMITS.revisions}, true) as out`, 1 + (tasks?.length ?? 0));
-    const added = ((out as Record<string, unknown>).tasks as Record<string, unknown>[] | undefined) ?? [];
-    return c.json({
-      ...out,
-      tasks: added.map((t) => (whole ? shown(t) : { key: t.key ?? null, ...short(shown(t)) })),
-    });
+                                     ${TASK_LIMITS.batch}, ${TASK_LIMITS.revisions}, true) as out,
+             ${withheldNow(sql, c.req.param("name")!)} as withheld`, 1 + (tasks?.length ?? 0));
+    // Its replacements, answered as its task is (write()).
+    return c.json({ ...out, tasks: (out as Record<string, unknown>).tasks ?? [] });
   });
 
   // An untaken task deleted, saying why: its words are erased and its number stays.
@@ -509,8 +567,9 @@ export function mountTasks(app: Hono<Env>, db: Db): void {
     const input = await readBody(c);
     const reason = taskCloseReason(input.reason, "delete");
     const number = taskNumber(c.req.param("number"));
-    return c.json(await write(c, me.hex, whole, (sql) => sql<{ out: Answer }[]>`
-      select schellingaf.delete_task(${c.req.param("name")}, ${me.peerId}, ${number}, ${reason}, true) as out`));
+    return c.json(await write(c, me.hex, whole, (sql) => sql<Row[]>`
+      select schellingaf.delete_task(${c.req.param("name")}, ${me.peerId}, ${number}, ${reason}, true) as out,
+             ${withheldNow(sql, c.req.param("name")!)} as withheld`));
   });
 
   // A claimed task given back. reason is why, which a coordinator giving back another KEY's
@@ -521,8 +580,9 @@ export function mountTasks(app: Hono<Env>, db: Db): void {
     const input = await readBody(c);
     const reason = taskReason(input.reason, false);
     const number = taskNumber(c.req.param("number"));
-    return c.json(await write(c, me.hex, whole, (sql) => sql<{ out: Answer }[]>`
-      select schellingaf.task_release(${c.req.param("name")}, ${me.peerId}, ${number}, ${reason}::text, true) as out`));
+    return c.json(await write(c, me.hex, whole, (sql) => sql<Row[]>`
+      select schellingaf.task_release(${c.req.param("name")}, ${me.peerId}, ${number}, ${reason}::text, true) as out,
+             ${withheldNow(sql, c.req.param("name")!)} as withheld`));
   });
 
   /**
@@ -540,10 +600,11 @@ export function mountTasks(app: Hono<Env>, db: Db): void {
     const cycle = optionalTaskCycle(input.cycle);
     const number = taskNumber(c.req.param("number"));
     const name = c.req.param("name")!;
-    return c.json(await write(c, me.hex, whole, (sql) => sql<{ out: Answer }[]>`
+    return c.json(await write(c, me.hex, whole, (sql) => sql<Row[]>`
       select schellingaf.task_check(${name}, ${me.peerId}, ${number}, ${verdict},
                                     ${post}::uuid, ${reason}, true, ${attempt}::int, ${cycle}::int,
-                                    ${TASK_LIMITS.checkOfferMinutes}) as out`));
+                                    ${TASK_LIMITS.checkOfferMinutes}) as out,
+             ${withheldNow(sql, name)} as withheld`));
   };
   app.post("/v1/spaces/:name/tasks/:number/confirm", check("confirm"));
   app.post("/v1/spaces/:name/tasks/:number/reject", check("reject"));
