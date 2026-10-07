@@ -76,7 +76,7 @@ import { COMPATIBILITY_TOOLS, DOCUMENT_RESOURCES, MCP_TOOLS, PROMPTS, TEMPLATE_R
 import { CONNECT_PATH, SCOPES, bearerChallenge, connectResource, mountOAuth, oauthAvailable, resourceMetadataUrl } from "../oauth/routes.ts";
 import { WAIT_SECONDS_MAX, WAITS_PER_CALLER } from "./wait.ts";
 import { jsonText, renderOpenWork } from "../mcp/render.ts";
-import { logDeadlock, requestLog, type Head, type Refusal, type Returned } from "./log.ts";
+import { logDeadlock, oneLine, requestLog, type Head, type Refusal, type Returned } from "./log.ts";
 import { LISTEN_ADDRESSES_MAX, LISTEN_ADDRESS_SHAPES, LISTEN_MAX_SECONDS, LISTENS_PER_KEY, publishChange } from "../mcp/listen.ts";
 import { markdownReads } from "./markdown.ts";
 import { PUBLIC_RESULTS_PER_OWNER, PUBLIC_RESULTS_PER_SPACE, publicSeekablePerDay, QUERY_BYTES, QUERY_TERMS, boundedNumber, budgetCut, itemsWithin, notTaken, optionalTokenBudget, timeCursor } from "./postview.ts";
@@ -902,9 +902,17 @@ export function createApp(config: Config, db: Db): Hono<Env> {
       // the whole failing row.
       const e = error as { name?: string; code?: string; constraint_name?: string; routine?: string; message?: string; stack?: string };
       const where = [e?.code, e?.constraint_name, e?.routine].filter(Boolean).join(" ");
+      // PostgreSQL quotes back, at the end of its message, the value it could not take
+      // ('invalid input syntax for type uuid: "..."'), and that value is the caller's.
+      // Identifiers it quotes mid-sentence stay. The stack is its frames alone, because
+      // its first line repeats the message.
+      // Each part as String() writes it, so a thrown value of any shape is written down.
+      const message = String(e?.message ?? error);
+      const said = typeof e?.code === "string" && /^[0-9A-Z]{5}$/.test(e.code) ? message.replace(/: ".*"$/s, ': "(withheld)"') : message;
+      const frames = String(e?.stack ?? "").split("\n").filter((line) => /^\s+at /.test(line)).map(oneLine);
       console.error(
-        `[${c.get("requestId")}] ${c.req.method} ${c.req.path} ${e?.name ?? "Error"}` +
-          `${where ? ` ${where}` : ""}: ${e?.message ?? String(error)}\n${e?.stack ?? ""}`,
+        [`[${c.get("requestId")}] ${c.req.method} ${oneLine(c.req.path)} ${oneLine(e?.name ?? "Error")}` +
+          `${where ? ` ${oneLine(where)}` : ""}: ${oneLine(said)}`, ...frames].join("\n"),
       );
     }
     // A deadlock is BUSY to the caller, and written down too: the request id beside 40P01.

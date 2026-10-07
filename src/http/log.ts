@@ -31,13 +31,24 @@ import { publishChange } from "../mcp/listen.ts";
 import { normalise } from "../surface/categories.ts";
 
 /**
+ * Text for a line of the exception log, with every control character (C0, DEL and C1)
+ * and both Unicode line separators written as an escape, so nothing a caller sent can start a line of
+ * its own there. The path is the case that needs it: Hono hands a route its path
+ * percent-decoded, so `%0A` in a request is a newline in `c.req.path`. Whatever it is
+ * given that is not a string is written as String() writes it, so it never throws.
+ */
+export function oneLine(text: unknown): string {
+  return String(text).replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, (ch) => `\\u${ch.charCodeAt(0).toString(16).padStart(4, "0")}`);
+}
+
+/**
  * A deadlock written down: one line beside the exception log's INTERNAL lines and in their
  * form, the request id an agent reports, the call, SQLSTATE 40P01, and what became of it.
  * Each one is a lock order to look at, though none is a fault. Never the statement or the
  * driver's detail, which names the processes and the rows that waited.
  */
 export function logDeadlock(c: Context<Env>, outcome: string): void {
-  console.error(`[${c.get("requestId")}] ${c.req.method} ${c.req.path} 40P01 deadlock_detected: ${outcome}`);
+  console.error(`[${c.get("requestId")}] ${c.req.method} ${oneLine(c.req.path)} 40P01 deadlock_detected: ${outcome}`);
 }
 
 /**

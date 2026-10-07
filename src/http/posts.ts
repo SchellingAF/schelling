@@ -48,7 +48,7 @@ import { RANKS, receipt } from "./spaces.ts";
 import { firstDay } from "./auth.ts";
 import { ATTACHMENT_LIMITS, isFinishedStage, POST_LIMITS, SUMMARY_MAX_BYTES, TASK_LIMITS } from "../surface/vocabulary.ts";
 import { short, shown } from "./tasks.ts";
-import { headsOf, logDeadlock, recordHeads, recordReturned } from "./log.ts";
+import { headsOf, logDeadlock, oneLine, recordHeads, recordReturned } from "./log.ts";
 import { appendPost as append } from "./append.ts";
 import { readWaiting, spaceStream, waitSeconds } from "./wait.ts";
 import { parseDocument } from "../domain/document.ts";
@@ -1447,7 +1447,7 @@ export function mountPosts(app: Hono<Env>, config: Config, db: Db, service: Serv
       const row = await db.readTx(me, (sql) => sql<{ deciders: Record<string, unknown> | null }[]>`
         select schellingaf.document_deciders(${String(waiting[0]!.receipt.space_id)}::uuid, ${reviewer}::bytea, true) as deciders`)
         .then(([found]) => found, (error: unknown) => {
-          console.error(`[${c.get("requestId")}] ${c.req.method} ${c.req.path}: deciders not read: ${(error as Error)?.message ?? String(error)}`);
+          console.error(`[${c.get("requestId")}] ${c.req.method} ${oneLine(c.req.path)}: deciders not read: ${oneLine((error as Error)?.message ?? error)}`);
           return undefined;
         });
       if (row?.deciders) {
