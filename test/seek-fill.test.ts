@@ -169,8 +169,8 @@ describe("the route", () => {
   test("names the public SPACE whose hits did not fit", async () => {
     const r = await call("GET", "/v1/seek?fingerprint=subject:fill-one-print&limit=3", null);
     assert.equal(r.body.items.length, 3);
-    assert.equal(r.body.truncated_note, LEFT_OUT_NOTE("fill-one"));
-    assert.match(r.body.truncated_note, /public SPACES than this page holds: fill-one\. Name one with space/);
+    assert.equal(r.body.truncated_note, LEFT_OUT_NOTE('"fill-one"'));
+    assert.match(r.body.truncated_note, /public SPACES than this page holds: "fill-one"\. Name one with space/);
   });
 
   test("fills a place its kind would empty, and names a SPACE only for posts the kind keeps", async () => {
@@ -197,7 +197,7 @@ describe("the route", () => {
     assert.equal(all.body.items.length, 6);
     const cut = await call("GET", "/v1/seek?q=granitefill&limit=4", null);
     assert.equal(cut.body.items.length, 4);
-    assert.equal(cut.body.truncated_note, LEFT_OUT_NOTE("fill-one"), "the SPACE was not named, or a second note said the same");
+    assert.equal(cut.body.truncated_note, LEFT_OUT_NOTE('"fill-one"'), "the SPACE was not named, or a second note said the same");
   });
 
   test("one owner's many SPACES take no more than their turn of the names", async () => {
@@ -259,7 +259,7 @@ describe("several ways in at once", () => {
       assert.equal(ids.filter((id) => honest.includes(id)).length, 5, "the flood's filling took an honest place");
       const lastHonest = Math.max(...honest.map((id) => ids.indexOf(id)));
       assert.ok(lastHonest <= 6, `the flood took ${lastHonest - 5} places ahead of an honest hit, beyond its round 1`);
-      assert.equal(r.body.truncated_note, LEFT_OUT_NOTE("arms-flood"));
+      assert.equal(r.body.truncated_note, LEFT_OUT_NOTE('"arms-flood"'));
     });
   }
 });
@@ -272,7 +272,7 @@ describe("the note's names", () => {
       left("w-1", "w", 2), left("w-1", "w", 3), left("w-2", "w", 2), left("w-3", "w", 2),
       left("a", "a", 2), left("b", "b", 3), left("c", "c", 1),
     ]);
-    assert.equal(note, LEFT_OUT_NOTE("c, w-1, a, b, w-2 and more"));
+    assert.equal(note, LEFT_OUT_NOTE('"c", "w-1", "a", "b", "w-2" and more'));
   });
 
   test("none left out, no note", () => {

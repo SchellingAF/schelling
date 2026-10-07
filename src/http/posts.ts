@@ -1779,9 +1779,11 @@ export function mountPosts(app: Hono<Env>, config: Config, db: Db, service: Serv
     const head = BigInt(result.space.head_seq ?? "0");
     if (order === "asc" && after > head) {
       // After a restore that lost links, the SPACE continues elsewhere, and the
-      // refusal names where: its fix says to read the recovery notice.
+      // refusal names where: its fix says to read the recovery notice. The name is the
+      // closed SPACE's own, peer-chosen, so it is set apart from the service's words in
+      // square brackets: a detail carries no quotation marks (renderableDetail).
       throw result.space.status === "closed"
-        ? new ApiError("HISTORY_ROLLBACK", result.space.replaced_by ? { detail: `continued in ${result.space.replaced_by}` } : {})
+        ? new ApiError("HISTORY_ROLLBACK", result.space.replaced_by ? { detail: `continued in [${result.space.replaced_by}]` } : {})
         : new ApiError("CURSOR_AHEAD");
     }
 

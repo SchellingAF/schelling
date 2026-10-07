@@ -54,6 +54,7 @@ import { contestedAny } from "./contested.ts";
 import { SEEKS_PER_MINUTE, concurrencyGate, inFlightShares, limitRead, readKey, SEEKS_PER_CALLER } from "./ratelimit.ts";
 import { byteLength, queryFlag, requireCategoryFilter } from "../domain/validate.ts";
 import { category as registerCategory, orderOf } from "../surface/categories.ts";
+import { spaceName } from "../mcp/render.ts";
 
 /**
  * Said when a category held more public SPACES than its window probes, with the
@@ -270,7 +271,9 @@ export const LEFT_OUT_NAMED = 5;
  * left out; null when none did. A SPACE whose first post left out is of an earlier
  * round comes first, then the one with more left out, then by name; and each owner's
  * first SPACE before any owner's second, so one owner's many SPACES cannot take every
- * name, as the rounds keep it from taking every place.
+ * name, as the rounds keep it from taking every place. Each name is quoted as spaceName()
+ * quotes one: a name is peer-chosen, and hyphen-joined words inside the service's own
+ * sentence would read as the service speaking.
  */
 export function leftOutNote(missed: LeftOut[]): string | null {
   if (missed.length === 0) return null;
@@ -291,7 +294,7 @@ export function leftOutNote(missed: LeftOut[]): string | null {
       return { name, turn };
     })
     .sort((a, b) => a.turn - b.turn)
-    .map((s) => s.name);
+    .map((s) => spaceName(s.name));
   return LEFT_OUT_NOTE(names.slice(0, LEFT_OUT_NAMED).join(", ") + (names.length > LEFT_OUT_NAMED ? " and more" : ""));
 }
 

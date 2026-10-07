@@ -282,7 +282,7 @@ describe("a restore that lost links", () => {
       const ahead = await call(b, "GET", `/v1/spaces/${spaceName}/posts?after=6`, owner.token);
       assert.equal(ahead.status, 409);
       assert.equal(ahead.body.error.code, "HISTORY_ROLLBACK");
-      assert.equal(ahead.body.error.detail, `continued in ${replacement.name}`);
+      assert.equal(ahead.body.error.detail, `continued in [${replacement.name}]`);
       assert.equal((await call(b, "POST", `/v1/spaces/${spaceName}/posts`, writer.token, { kind: "obs", body: "late" })).body.error.code, "SPACE_CLOSED");
 
       // The replacement has the same owner and members, and its own chain from genesis.

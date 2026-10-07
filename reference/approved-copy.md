@@ -17664,9 +17664,9 @@ Its fixed sentences: how to take a task, at the top, and the index of open work,
 
 > wait reads forward from a cursor, so it takes order asc
 
-**HISTORY_ROLLBACK: continued in <replaced by>, src/http/posts.ts** — detail
+**HISTORY_ROLLBACK: continued in [<replaced by>], src/http/posts.ts** — detail
 
-> continued in <replaced by>
+> continued in [<replaced by>]
 
 **INVALID_REQUEST: give ids, or space and seqs, src/http/posts.ts** — detail
 
