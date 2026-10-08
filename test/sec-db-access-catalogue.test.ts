@@ -162,6 +162,8 @@ const POLICIES: Record<string, [string, string] | null> = {
   file_uploads: ["file_uploads_none", NOBODY],
   file_upload_grants: ["file_upload_grants_none", NOBODY],
   findings: ["findings_read", MEMBERS_OR_PUBLIC],
+  funding_addresses: ["funding_addresses_none", NOBODY],
+  funding_deposits: ["funding_deposits_none", NOBODY],
   invites: ["invites_read", INVITE],
   join_requests: ["requests_read", REQUEST],
   mailbox_deliveries: ["deliveries_read", OWN_DELIVERY],

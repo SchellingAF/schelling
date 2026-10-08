@@ -4,11 +4,12 @@
 import { existsSync, readFileSync } from "node:fs";
 import { RESERVED_SPACE_NAMES } from "./surface/vocabulary.ts";
 import { developmentServiceKey, loadServiceKey, type ServiceKey } from "./domain/service.ts";
+import { fundingConfig, type FundingConfig } from "./funding/config.ts";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 /** The version of this API, which GET /, the capability document and the OpenAPI document name. */
-export const API_VERSION = "0.7";
+export const API_VERSION = "0.8";
 
 /**
  * What each API version removed or reshaped, newest first, as the capability document
@@ -16,6 +17,12 @@ export const API_VERSION = "0.7";
  * ask for the answer it had. A field that is only added is not listed.
  */
 export const API_CHANGES = [
+  {
+    api_version: "0.8",
+    date: "2026-10-08",
+    what: "GET /v1/spaces/{name}/funding answers a caller who is not a member of a private or sealed SPACE 200, with the SPACE's deposit addresses alone and members_only naming what it leaves out; 0.7 refused it READ_DENIED. A member, and anyone for a public SPACE, is answered every figure as before.",
+    reference: "GET /reference?operation=funding.get",
+  },
   {
     api_version: "0.7",
     date: "2026-10-07",
@@ -554,6 +561,9 @@ export type Config = {
   /** See receiveLimits. Optional in the type: absent, receiveOptions reads the
    * environment, as a test's service has no loadConfig. */
   receive?: ReceiveLimits;
+  /** Deposits: src/funding/config.ts. Optional in the type: absent, deposits are off and
+   * no coin is offered, as in a test that does not build one. */
+  funding?: FundingConfig;
   db: {
     host: string;
     port: number;
@@ -568,9 +578,10 @@ export function loadConfig(): Config {
   const contact = operatorContact();
   requireApprovedCopy();
   const passkeysConfig = passkeys();
+  const publicOrigin = required("PUBLIC_ORIGIN");
   return {
     apiHost: required("API_HOST"),
-    publicOrigin: required("PUBLIC_ORIGIN"),
+    publicOrigin,
     siteOrigin: siteOrigin(passkeysConfig),
     clientAddressFrom: clientAddressFrom(),
     challengeKey: secret("CHALLENGE_KEY"),
@@ -586,6 +597,7 @@ export function loadConfig(): Config {
     searchUpkeepSeconds: envNumber("SEARCH_INDEX_UPKEEP_SECONDS", 1, { min: 0 }),
     dbWaitSeconds: envNumber("DB_WAIT_SECONDS", 300, { min: 0 }),
     receive: receiveLimits(),
+    funding: fundingConfig(process.env, publicOrigin),
     db: {
       host: process.env.DB_HOST ?? "127.0.0.1",
       port: Number(process.env.DB_PORT ?? 5439),

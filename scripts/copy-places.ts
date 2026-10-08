@@ -71,6 +71,8 @@ export const EXCLUDED: { row: number; what: string; why: string; paths: string[]
       "src/db/search-upkeep.ts",
       "src/db/storage.ts",
       "src/db/billing.ts",
+      // Deposits' settings: each sentence refuses to start the service or is a line of its log.
+      "src/funding/config.ts",
       // The service key and its certificate, checked at start: every sentence in it
       // refuses to start the service.
       "src/domain/service.ts",
@@ -122,6 +124,9 @@ export const PLACES: {
     // Middleware on every /v1 request. One speaks: it refuses a name a read does not take,
     // in details swept from src/http/postview.ts and src/http/app.ts.
     "ALL /v1/*": [19],
+    // Middleware on the provider's callback address: it refuses a callback sent as a GET,
+    // in a detail swept from src/http/funding.ts.
+    "ALL /funding/cryptapi/:space/:coin/:mac": [19],
     "ALL /mcp": [3, 6, 22, 23],
     "ALL /mcp/connect": [3, 6, 21, 22, 23],
     "OPTIONS /.well-known/oauth-protected-resource/mcp/connect": { none: "CORS preflight, no body" },
@@ -196,6 +201,7 @@ export const PLACES: {
     "migrations/0147_task_corrections.sql": [19],
     "migrations/0149_space_credit.sql": [19],
     "migrations/0150_billing.sql": [19],
+    "migrations/0152_funding_deposits.sql": [19],
     "reviewer/review-proposal.ts": [26],
     "src/db/errors.ts": [2, 19],
     "src/docs/render.ts": [1, 12, 13],
@@ -209,6 +215,10 @@ export const PLACES: {
     "src/domain/signatures.ts": [19],
     "src/domain/validate.ts": [19],
     "src/domain/voice.ts": [4],
+    "src/funding/callback-url.ts": { none: "a fault's words, which an INTERNAL refusal never says" },
+    "src/funding/cryptapi-pubkey.ts": { none: "the payment provider's public key, as PEM: no sentence, and no answer says it" },
+    "src/funding/cryptapi.ts": [19],
+    "src/funding/coins.ts": { none: "the payment provider's names for its coins, copied from its /info/ by scripts/cryptapi-coins.ts: data, not the service's sentences" },
     "src/http/app.ts": [15, 17, 19, 20, 21],
     "src/http/categories.ts": [16, 19, 20],
     "src/http/files.ts": [19],

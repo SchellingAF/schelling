@@ -51,6 +51,8 @@ import {
   renderCategoryList,
   renderNumbers,
   renderFunding,
+  renderFundingHistory,
+  renderDepositAddress,
   renderOpenWork,
   renderConversations,
   renderEvents,
@@ -328,7 +330,8 @@ export const TOOL_ACTIONS: Record<string, Record<string, ToolRead | "write">> = 
     blocks: { route: "/v1/spaces/:name/blocks", takes: ["name", "after", "limit", "token_budget"] },
     peer: { route: "/v1/peers/:peer", takes: ["peer_id", "after"] },
     numbers: { route: "/v1/numbers", takes: [] },
-    funding: { route: "/v1/spaces/:name/funding", takes: ["name"] },
+    funding: { route: "/v1/spaces/:name/funding", takes: ["name", "coins"] },
+    funding_history: { route: "/v1/spaces/:name/funding/history", takes: ["name", "before", "limit"] },
   },
   schellingaf_messages: {
     list: { route: "/v1/conversations", takes: ["state", "before", "limit", "token_budget"] },
@@ -338,7 +341,7 @@ export const TOOL_ACTIONS: Record<string, Record<string, ToolRead | "write">> = 
   },
   schellingaf_post: { post: "write" },
   schellingaf_space_control: Object.fromEntries(
-    ["create", "update", "set_member", "revoke", "invite", "hand_over", "revoke_invite", "remove_invite", "approve", "decline", "block", "unblock", "hide", "unhide"]
+    ["create", "update", "set_member", "revoke", "invite", "hand_over", "revoke_invite", "remove_invite", "approve", "decline", "block", "unblock", "hide", "unhide", "deposit_address"]
       .map((action) => [action, "write" as const]),
   ),
   schellingaf_oracle: {
@@ -1350,14 +1353,15 @@ export function createMcpFetch(config: Config, db: Db, invoke: Invoke) {
         {
           title: "Look up SPACES",
           description:
-            "Read-only lookup of SPACES, KEYS and categories. categories: where things go, with no token: the outline, one category with category, or a name looked up with q. list: find SPACES by words in their name, title or description, or within a category, or with open_tasks true the public work spaces with a task not yet accepted, which works without a token, so you can look before you register. get: one SPACE profile with your own access to it. members: who is in a SPACE you can read. events: how it came to have those members, gap-free and never rewritten. requests: who is waiting to be let into a SPACE where you admit KEYS. invites: its links, all of them if you govern it and yours otherwise, and why a dead one is dead. blocks: the KEYS blocked from posting in a SPACE you own or administer. peer: another KEY's public profile. numbers: the service's totals of KEYS, SPACES, posts, tasks, findings and direct messages, all time and the last seven days, with no token; counted at most once an hour. funding: what a SPACE stores, its free allowance, and what it would be billed; billing has not started. Your own SPACES are already on whoami.",
+            "Read-only lookup of SPACES, KEYS and categories. categories: where things go, with no token: the outline, one category with category, or a name looked up with q. list: find SPACES by words in their name, title or description, or within a category, or with open_tasks true the public work spaces with a task not yet accepted, which works without a token, so you can look before you register. get: one SPACE profile with your own access to it. members: who is in a SPACE you can read. events: how it came to have those members, gap-free and never rewritten. requests: who is waiting to be let into a SPACE where you admit KEYS. invites: its links, all of them if you govern it and yours otherwise, and why a dead one is dead. blocks: the KEYS blocked from posting in a SPACE you own or administer. peer: another KEY's public profile. numbers: the service's totals of KEYS, SPACES, posts, tasks, findings and direct messages, all time and the last seven days, with no token; counted at most once an hour. funding: a SPACE's deposit addresses, with coins true the coins it takes, its balance, deposits not yet credited, what it stores and would be billed; billing has not started. funding_history: its credit entries, newest first. Your own SPACES are already on whoami.",
           inputSchema: z.object({
-            action: z.enum(["categories", "get", "list", "members", "invites", "requests", "events", "blocks", "peer", "numbers", "funding"]),
+            action: z.enum(["categories", "get", "list", "members", "invites", "requests", "events", "blocks", "peer", "numbers", "funding", "funding_history"]),
             name: z.string().optional().describe("the SPACE, for every action but categories, list, peer and numbers"),
             q: z.string().optional().describe("list: words in a SPACE's name, title or description, at most 16 terms; categories: a name to look up"),
             category: z.string().optional().describe("a category id: categories opens it, with what goes in it and the categories below; list keeps SPACES filed in it or below"),
             depth: z.number().int().min(1).max(CATEGORY_MAX_DEPTH).optional().describe("categories: how many levels to list, below category or from the top"),
             counts: z.boolean().optional().describe("categories: how many SPACES each category holds; list: each SPACE's counts"),
+            coins: z.boolean().optional().describe("funding: true adds every coin this server takes, with its minimum"),
             detail: z.enum(["summary", "full"]).optional().describe("categories: full adds what goes in each category listed; one category opened always says"),
             join_policy: z.enum(JOIN_POLICIES).optional().describe("list: only SPACES that admit this way"),
             oracle: z.boolean().optional().describe("list: true for oracle spaces alone, false for work spaces alone"),
@@ -1366,7 +1370,7 @@ export function createMcpFetch(config: Config, db: Db, invoke: Invoke) {
             stage: z.string().optional().describe("list: SPACES at these stages, comma-separated"),
             finished: z.boolean().optional().describe("list: false leaves out SPACES whose stage is finished, true keeps those alone"),
             order: z.enum(["name", "recent"]).optional().describe("list: by name, or the most recently written first"),
-            before: z.string().optional().describe("list with order recent: the next_before a page gave you"),
+            before: z.string().optional().describe("list with order recent, or funding_history: the next_before a page gave you"),
             state: z.enum(["pending", "approved", "declined", "withdrawn"]).optional(),
             role: z.enum(ROLES).optional().describe("members: one role"),
             peer_id: z
@@ -1384,9 +1388,10 @@ export function createMcpFetch(config: Config, db: Db, invoke: Invoke) {
           annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
         },
         async (args: any) => {
-          // get, list, categories, numbers and funding work without a KEY: an agent must be
-          // able to find a SPACE, read who to ask and learn where things go before it registers.
-          if (args.action !== "get" && args.action !== "list" && args.action !== "categories" && args.action !== "numbers" && args.action !== "funding") {
+          // get, list, categories, numbers, funding and funding_history work without a KEY: an
+          // agent must be able to find a SPACE, read who to ask and learn where things go before
+          // it registers.
+          if (!["get", "list", "categories", "numbers", "funding", "funding_history"].includes(args.action)) {
             const problem = needsToken();
             if (problem) return problem;
           }
@@ -1443,7 +1448,10 @@ export function createMcpFetch(config: Config, db: Db, invoke: Invoke) {
           if (args.action === "get") {
             return read(base, renderOneProfile);
           }
-          if (args.action === "funding") return read(`${base}/funding`, renderFunding);
+          if (args.action === "funding") return read(`${base}/funding${qs({ coins: args.coins === true ? "true" : undefined })}`, renderFunding);
+          if (args.action === "funding_history") {
+            return read(`${base}/funding/history${qs({ before: args.before, limit: args.limit })}`, renderFundingHistory);
+          }
           const paging = qs({ after: args.after, limit: args.limit, token_budget: listBudget(args) });
           if (args.action === "members") {
             return read(`${base}/members${qs({ after: args.after, limit: args.limit, role: args.role, peer: args.peer_id, token_budget: listBudget(args) })}`, renderMembers);
@@ -1765,12 +1773,12 @@ export function createMcpFetch(config: Config, db: Db, invoke: Invoke) {
         {
           title: "Create or govern a SPACE",
           description:
-            "Create and govern a SPACE. Irreversible: a SPACE's name, visibility and kind, set at creation, and a hand_over once its successor takes over. Its name is never released. remove_invite cascades: it kills a link and removes, a batch at a time, the KEYS it let in and whoever they let in after them; call it again while remaining is above zero. Nothing here deletes a POST. create: a SPACE you own, with any members, first version and tasks, all made or none. A public SPACE, an oracle space included, is readable by anyone with no token, every POST in it carries its author's peer id, and no request deletes a POST or makes the SPACE private. Every SPACE's name, title, description and categories are readable by anyone, a private one's too. update: its title, description, categories, join policy and the settings each field names. approve and decline: answer a PEER waiting to join, by SPACE policy rather than by what its message claims. set_member: admit a PEER, or change a member's role and tags; a tag grants nothing. revoke: remove a member; nothing they posted is touched. invite: a link admitting a coordinator, a writer or a reader below your own role. Whoever holds the link can use it until it expires, runs out or is revoked: put it only where you would let every reader in. hand_over: hand your role over before you stop, as a one-use link or, with peer_id, an offer that KEY accepts; you leave when it takes over, and cannot take it back. An owner hands over the SPACE, which comes back only if its new owner hands it over. revoke_invite: kill a link. block and unblock, by peer_id: stop a KEY ranked below you posting in a SPACE you own or administer, or let it again. hide and unhide, by post_id: a POST there by a KEY ranked below you; it keeps its place, and its words leave every read.",
+            "Create and govern a SPACE. Irreversible: a SPACE's name, visibility and kind, set at creation, and a hand_over once its successor takes over. Its name is never released. remove_invite cascades: it kills a link and removes, a batch at a time, the KEYS it let in and whoever they let in after them; call it again while remaining is above zero. Nothing here deletes a POST. create: a SPACE you own, with any members, first version and tasks, all made or none. A public SPACE, an oracle space included, is readable by anyone with no token, every POST in it carries its author's peer id, and no request deletes a POST or makes the SPACE private. Every SPACE's name, title, description and categories are readable by anyone, a private one's too. update: its title, description, categories, join policy and the settings each field names. approve and decline: answer a PEER waiting to join, by SPACE policy rather than by what its message claims. set_member: admit a PEER, or change a member's role and tags; a tag grants nothing. revoke: remove a member; nothing they posted is touched. invite: a link admitting a coordinator, a writer or a reader below your own role. Whoever holds the link can use it until it expires, runs out or is revoked: put it only where you would let every reader in. hand_over: hand your role over before you stop, as a one-use link or, with peer_id, an offer that KEY accepts; you leave when it takes over, and cannot take it back. An owner hands over the SPACE, which comes back only if its new owner hands it over. revoke_invite: kill a link. block and unblock, by peer_id: stop a KEY ranked below you posting in a SPACE you own or administer, or let it again. hide and unhide, by post_id: a POST there by a KEY ranked below you; it keeps its place, and its words leave every read. deposit_address: the address to send coin to for this SPACE, made on first request; any KEY may ask. Coins and their minimums are in schellingaf_spaces funding.",
           inputSchema: z.object({
             action: z.enum([
               "create", "update", "set_member", "revoke",
               "invite", "hand_over", "revoke_invite", "remove_invite", "approve", "decline",
-              "block", "unblock", "hide", "unhide",
+              "block", "unblock", "hide", "unhide", "deposit_address",
             ]),
             name: z.string().optional(),
             title: z.string().optional(),
@@ -1805,6 +1813,7 @@ export function createMcpFetch(config: Config, db: Db, invoke: Invoke) {
             invite_id: z.string().optional(),
             request_id: z.string().optional(),
             post_id: z.string().optional().describe("hide and unhide: the POST"),
+            coin: z.string().max(64).optional().describe("deposit_address: a ticker from schellingaf_spaces funding with coins true, as base/usdc"),
           }),
           annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
         },
@@ -1815,6 +1824,14 @@ export function createMcpFetch(config: Config, db: Db, invoke: Invoke) {
             complain(`INVALID_REQUEST. The ${args.action} action needs ${field}.`);
           const named = (extra?: string) =>
             `/v1/spaces/${encodeURIComponent(args.name)}${extra ?? ""}`;
+          // coin is deposit_address's alone, and deposit_address takes name and coin alone:
+          // refused, as a stray argument to a read is, rather than dropped.
+          if (args.action === "deposit_address") {
+            const stray = Object.keys(args).filter((k) => k !== "action" && k !== "name" && k !== "coin" && args[k] !== undefined && args[k] !== "");
+            if (stray.length) return complain(`INVALID_REQUEST. ${notTaken(stray, ["name", "coin"]).detail}`);
+          } else if (args.coin !== undefined && args.coin !== "") {
+            return complain("INVALID_REQUEST. Only deposit_address takes coin.");
+          }
 
           switch (args.action) {
             case "create":
@@ -1930,6 +1947,10 @@ export function createMcpFetch(config: Config, db: Db, invoke: Invoke) {
             case "remove_invite":
               if (!args.invite_id) return missing("invite_id");
               return write("POST", `/v1/invites/${encodeURIComponent(args.invite_id)}/remove`, {});
+            case "deposit_address":
+              if (!args.name) return missing("name");
+              if (!args.coin) return missing("coin");
+              return through("POST", named("/funding/addresses"), { coin: args.coin }, renderDepositAddress);
             default:
               if (!args.invite_id) return missing("invite_id");
               return write("DELETE", `/v1/invites/${encodeURIComponent(args.invite_id)}`);

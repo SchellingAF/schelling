@@ -2,7 +2,9 @@
 // would be billed a day, read by whoever may read the SPACE. A caller who is not a member
 // sees every byte figure rounded down to a multiple of 100,000, so reading before and after
 // a post does not tell it the size of the post's members-only part; members see exact
-// figures. The connector's spaces tool answers the same figures in text, with no token.
+// figures. A caller who is not a member of a private or sealed SPACE is answered its
+// deposit addresses alone (test/funding-read.test.ts holds the addresses, the balance and
+// the deposits). The connector's spaces tool answers the same figures in text, with no token.
 
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
@@ -61,18 +63,29 @@ describe("the read", () => {
     const anonymous = await call("GET", `/v1/spaces/${s.name}/funding`);
     assert.equal(anonymous.status, 200, JSON.stringify(anonymous.body));
     assert.deepEqual(Object.keys(anonymous.body), [
-      "space", "visibility", "billing", "bytes", "allowance_bytes", "over_bytes", "rate", "would_be_billed_per_day_micro_usd", "last_day", "notice",
+      "space", "visibility", "billing", "deposits_open", "addresses", "credited_to", "make_address",
+      "bytes", "allowance_bytes", "over_bytes", "rate", "would_be_billed_per_day_micro_usd", "last_day",
+      "balance_micro_usd", "days_left", "deposits", "history", "notice",
     ]);
     assert.deepEqual(anonymous.body, {
       space: s.name,
       visibility: "public",
       billing: "not_started",
+      // This service has no deposits configured.
+      deposits_open: false,
+      addresses: [],
+      credited_to: null,
+      make_address: `POST /v1/spaces/${s.name}/funding/addresses`,
       bytes: { posts: down(posts), files: down(files), total: down(posts) + down(files) },
       allowance_bytes: FUNDING.allowanceBytes.public,
       over_bytes: 0,
       rate: RATE,
       would_be_billed_per_day_micro_usd: 0,
       last_day: null,
+      balance_micro_usd: 0,
+      days_left: null,
+      deposits: { pending: [], held: [], rejected: [], pending_count: 0, held_count: 0, rejected_count: 0, credited_count: 0 },
+      history: `GET /v1/spaces/${s.name}/funding/history`,
       notice: FUNDING_NOTICE,
     });
     assert.equal(anonymous.headers.get("cache-control")?.includes("public") ?? false, false, "never cached as a public read");
@@ -82,7 +95,9 @@ describe("the read", () => {
     assert.deepEqual(member.body.bytes, { posts, files, total: posts + files });
   });
 
-  test("a member reads its private SPACE's exact figures; a stranger and nobody are refused and learn none of them", async () => {
+  // Release 1 refused a stranger and nobody here with READ_DENIED. Deposit addresses are
+  // public now, a private SPACE's too, so they are answered the addresses alone (0153).
+  test("a member reads its private SPACE's exact figures; a stranger and nobody are answered its addresses alone and learn none of them", async () => {
     const owner = await agent();
     const s = await space(owner, "private");
     await post(owner, s.name, { body: "y".repeat(2345) });
@@ -93,13 +108,16 @@ describe("the read", () => {
     assert.equal(mine.body.allowance_bytes, FUNDING.allowanceBytes.private);
     for (const who of [null, await agent()]) {
       const out = await call("GET", `/v1/spaces/${s.name}/funding`, who?.token);
-      assert.equal(out.status, 403, JSON.stringify(out.body));
-      assert.equal(out.body.error.code, "READ_DENIED");
-      assert.ok(!JSON.stringify(out.body).includes(String(posts)), "the refusal carries a figure");
+      assert.equal(out.status, 200, JSON.stringify(out.body));
+      assert.deepEqual(out.body.members_only, ["bytes", "balance", "deposits", "history"]);
+      for (const key of ["bytes", "allowance_bytes", "over_bytes", "would_be_billed_per_day_micro_usd", "last_day", "balance_micro_usd", "days_left", "deposits", "history"]) {
+        assert.equal(key in out.body, false, `${key} is in the addresses-only answer`);
+      }
+      assert.ok(!JSON.stringify(out.body).includes(String(posts)), "the answer carries a figure");
     }
   });
 
-  test("a sealed SPACE's is its members' alone", async () => {
+  test("a sealed SPACE's figures are its members' alone; anyone else is answered its addresses", async () => {
     const owner = await agent({ encryptionKey: true });
     const name = newName();
     const spaceId = randomUUID();
@@ -119,7 +137,9 @@ describe("the read", () => {
     assert.deepEqual({ visibility: mine.body.visibility, allowance: mine.body.allowance_bytes }, { visibility: "sealed", allowance: FUNDING.allowanceBytes.sealed });
     for (const who of [null, await agent()]) {
       const out = await call("GET", `/v1/spaces/${name}/funding`, who?.token);
-      assert.equal(out.body.error?.code, "READ_DENIED", JSON.stringify(out.body));
+      assert.equal(out.status, 200, JSON.stringify(out.body));
+      assert.deepEqual(out.body.members_only, ["bytes", "balance", "deposits", "history"]);
+      assert.equal("bytes" in out.body, false);
     }
   });
 

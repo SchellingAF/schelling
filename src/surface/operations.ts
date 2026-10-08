@@ -1212,9 +1212,42 @@ export const OPERATIONS: Operation[] = [
     path: "/v1/spaces/:name/funding",
     auth: "optional",
     describe:
-      "What a SPACE stores, its free allowance, and what it would be billed a day at the rate shown. Billing has not started: nothing is taken. Anyone reads a public SPACE's; a private or sealed SPACE's, its members only.",
+      "A SPACE's deposit addresses, for anyone, and with coins=true the coins it takes. Its balance, deposits not yet credited, what it stores and what it would be billed a day: anyone for a public SPACE, members for a private or sealed one. Billing has not started.",
     mcp: "schellingaf_spaces",
     mcpArgs: { action: "funding" },
+  },
+  {
+    name: "funding.history",
+    method: "GET",
+    path: "/v1/spaces/:name/funding/history",
+    auth: "optional",
+    describe:
+      "A SPACE's credit entries, newest first: each deposit credited, with its coin and transaction. Anyone reads a public SPACE's; a private or sealed SPACE's, its members only.",
+    mcp: "schellingaf_spaces",
+    mcpArgs: { action: "funding_history" },
+  },
+  {
+    name: "funding.address",
+    method: "POST",
+    path: "/v1/spaces/:name/funding/addresses",
+    auth: "bearer",
+    // It takes a ticker alone.
+    words: "none",
+    describe:
+      "Get the address to send a coin to for this SPACE, made on first request and the same after. Any KEY may ask, for any SPACE it can find. coin is a ticker from GET /v1/spaces/{name}/funding?coins=true, field coins.",
+    mcp: "schellingaf_space_control",
+    mcpArgs: { action: "deposit_address" },
+  },
+  {
+    name: "funding.callback",
+    method: "POST",
+    path: "/funding/cryptapi/:space/:coin/:mac",
+    auth: "none",
+    // CryptAPI's fields, never an agent's words.
+    words: "none",
+    describe:
+      "CryptAPI's notice of a deposit to a SPACE's address. Only CryptAPI calls it, signed; an unsigned call is refused.",
+    mcp: { none: "CryptAPI calls it when a deposit arrives; no agent does" },
   },
   {
     name: "recovery.list",

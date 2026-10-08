@@ -534,6 +534,18 @@ const NEITHER: Record<string, string> = {
   storage_recount_spaces: "lists the SPACES with a post, by id, for the recount",
   // A SPACE's credit (0149): the billing job's check of every balance against its ledger.
   credit_reconcile: "records each SPACE whose balance disagrees with its ledger",
+  // Deposit addresses (0151): the POST asks for the address already made before it spends an
+  // allowance, after its own checks of the SPACE; an address is public.
+  funding_address_find: "answers a SPACE's deposit address for a coin and wallet, which is public",
+  funding_addresses_of: "answers a SPACE's deposit addresses, which are public, a private or sealed SPACE's too; none while it is withheld",
+  // A GET to a callback URL is logged only when the URL is an address's own: true or
+  // false, never a row.
+  funding_callback_known: "answers whether a mac, a SPACE and a coin segment are one deposit address's, which tells nothing a mac does not",
+  // GET /v1/spaces/{name}/funding names where a replaced SPACE's deposits are credited.
+  funding_credited_space: "answers the end of a SPACE's replaced_by chain, which GET /v1/spaces/{name} shows link by link to anyone",
+  // Deposits (0152): the provider's signed callback, found by its mac; no KEY calls it, and
+  // it answers an outcome and ids, never a word of a SPACE.
+  funding_callback: "records a deposit from the provider's verified callback and credits it once confirmed",
   // The shadow bill (0150): the billing job's days, candidates, bills and summary, which
   // carry counts and ids, never a word of a SPACE.
   billing_last_day: "answers the latest day the billing job finished",

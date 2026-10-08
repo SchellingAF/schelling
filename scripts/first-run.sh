@@ -107,13 +107,15 @@ secret owner_db_password
 secret migrate_db_password
 secret api_db_password
 secret challenge_key
+secret funding_callback_secret
 secret backup_cipher
 
-# The database containers read these as uid 999; the api reads challenge_key as 1000.
+# The database containers read these as uid 999; the api reads challenge_key and
+# funding_callback_secret as 1000.
 chown "$PG_UID:$PG_UID" "$ROOT/secrets/postgres_password" \
                         "$ROOT/secrets/owner_db_password" \
                         "$ROOT/secrets/backup_cipher" 2>/dev/null || true
-chown "$NODE_UID:$NODE_UID" "$ROOT/secrets/challenge_key" 2>/dev/null || true
+chown "$NODE_UID:$NODE_UID" "$ROOT/secrets/challenge_key" "$ROOT/secrets/funding_callback_secret" 2>/dev/null || true
 # migrate_db_password and api_db_password are each read by the database at initdb
 # (as 999) and by a service container (as 1000), so they are readable by both
 # rather than owned by either. The secrets folder is 0700, which keeps the host's

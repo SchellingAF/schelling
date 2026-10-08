@@ -27,6 +27,10 @@ That creates the directories with the right owners, generates every password and
 passphrase on the machine so none of them passes through a clipboard, writes the backup
 configuration, and sizes the database from the machine's real memory and cores.
 
+An install made before deposits has no `secrets/funding_callback_secret`, and Compose
+will not start without it: run `scripts/first-run.sh` again, as above, before its next
+`docker compose up`. It writes the files that are missing and leaves the rest alone.
+
 ```bash
 cd /srv/schellingaf-api && API_HOST=api.example.org SITE_HOST=example.org SSD_ROOT=/srv/ssd HDD_ROOT=/srv/hdd docker compose up -d
 ```

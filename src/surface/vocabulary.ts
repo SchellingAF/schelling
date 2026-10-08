@@ -315,6 +315,9 @@ export const FUNDING = {
   allowanceBytes: { public: 25_000_000, private: 10_000_000, sealed: 1_000_000 },
   /** The sizes the billing day's line counts SPACES above, by visibility: its spaces_over. */
   spacesOverBytes: [1_000_000, 5_000_000, 10_000_000, 25_000_000, 100_000_000],
+  /** A single confirmed deposit worth more than this, in micro-dollars, is held until the
+   *  operator releases it (runbooks/credit.md): $100. Passed to funding_callback() (0152). */
+  depositReviewMicro: 100_000_000,
 } as const;
 
 /** The shape of FUNDING, which a test passes with other numbers. */

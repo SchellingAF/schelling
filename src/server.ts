@@ -4,6 +4,8 @@
 import type { Server } from "node:http";
 import { serve } from "@hono/node-server";
 import { loadConfig } from "./config.ts";
+import { depositsOpen, fundingConfigLine } from "./funding/config.ts";
+import { pubkeyCheckLine } from "./funding/cryptapi.ts";
 import { openDb, warm } from "./db/sql.ts";
 import { startPrune } from "./db/prune.ts";
 import { startBilling } from "./db/billing.ts";
@@ -16,6 +18,8 @@ import { receiveOptions, watchBodies } from "./http/receive.ts";
 import { shutdown, shutdownDeadlineSeconds } from "./shutdown.ts";
 
 const config = loadConfig();
+// Families only, never a wallet: see src/funding/config.ts.
+if (config.funding) process.stdout.write(`${fundingConfigLine(config.funding)}\n`);
 
 // Before anything that queries: a platform may start this before the database
 // answers, or before the migration runner of the same release has run. The wait is
@@ -106,6 +110,13 @@ startPrune(db);
 // UTC day, at boot and hourly after; nothing is taken. See db/billing.ts. Never while
 // read-only, as checkpoints are not: it writes the day's bills and its run.
 if (!config.readOnly) startBilling(db);
+
+// The key CryptAPI answers at /pubkey/ now, against the key callbacks are checked with, as
+// one funding.pubkey line; never awaited, so a slow provider cannot hold the start. Only
+// when deposits are open and the service writes: nothing else may reach the provider.
+if (!config.readOnly && depositsOpen(config.funding)) {
+  void pubkeyCheckLine(config.funding).then((line) => process.stdout.write(`${line}\n`));
+}
 
 // Checkpoints over every chain that has grown, at boot and every minute after, and
 // the checkpoint log compacted at boot and daily after. See db/checkpoints.ts, and

@@ -750,6 +750,21 @@ export const ERRORS: Record<string, ErrorSpec> = {
     message: "INTERNAL. A post's stored fields would not have matched its object.",
     fix: "Report this with the request id. Nothing was written, and nothing you sent can cause it.",
   },
+  COIN_NOT_OFFERED: {
+    status: 400,
+    message: "COIN_NOT_OFFERED. This server takes no deposit in that coin.",
+    fix: "Send coin as a ticker from coins in GET /v1/spaces/{name}/funding?coins=true. A coin on another network is another ticker.",
+  },
+  FUNDING_UNAVAILABLE: {
+    status: 503,
+    message: "FUNDING_UNAVAILABLE. No deposit address can be made now.",
+    fix: "The detail says why. Deposits not open on this server stay closed when you retry. Otherwise wait the seconds in Retry-After and send the same request again: it is safe to retry.",
+  },
+  CALLBACK_SIGNATURE_INVALID: {
+    status: 401,
+    message: "CALLBACK_SIGNATURE_INVALID. This callback's signature does not verify.",
+    fix: "Only the payment provider calls this address, signing each callback with its key in x-ca-signature. Nothing was recorded.",
+  },
   BUSY: {
     status: 503,
     message: "BUSY. The service is busy.",

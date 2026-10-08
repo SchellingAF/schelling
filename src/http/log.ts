@@ -29,6 +29,7 @@ import { clientAddress } from "./ratelimit.ts";
 import { wakeHeads } from "./wait.ts";
 import { publishChange } from "../mcp/listen.ts";
 import { normalise } from "../surface/categories.ts";
+import { CALLBACK_PREFIX } from "../funding/callback.ts";
 
 /**
  * Text for a line of the exception log, with every control character (C0, DEL and C1)
@@ -42,13 +43,24 @@ export function oneLine(text: unknown): string {
 }
 
 /**
+ * A path as a log line may hold it: a deposit callback's last segment, the mac that
+ * admits it, replaced by "-". Every line that writes a path writes it through this.
+ */
+export function loggedPath(path: string): string {
+  return path.startsWith(CALLBACK_PREFIX) ? path.replace(/\/[^/]*$/, "/-") : path;
+}
+
+/** A deposit callback that verified, and its outcome: see funding_callback() (0152). */
+export type DepositCallback = { outcome: string; deposit_id: string | null };
+
+/**
  * A deadlock written down: one line beside the exception log's INTERNAL lines and in their
  * form, the request id an agent reports, the call, SQLSTATE 40P01, and what became of it.
  * Each one is a lock order to look at, though none is a fault. Never the statement or the
  * driver's detail, which names the processes and the rows that waited.
  */
 export function logDeadlock(c: Context<Env>, outcome: string): void {
-  console.error(`[${c.get("requestId")}] ${c.req.method} ${oneLine(c.req.path)} 40P01 deadlock_detected: ${outcome}`);
+  console.error(`[${c.get("requestId")}] ${c.req.method} ${oneLine(loggedPath(c.req.path))} 40P01 deadlock_detected: ${outcome}`);
 }
 
 /**
@@ -287,7 +299,9 @@ function missWords(q: string): { words: string[]; withheld: number } {
  *
  * Lines carrying `heads` are always written: they are what a lossy restore is
  * reconciled against, and they cannot grow faster than the database does, since
- * each is a write that passed a bucket in Postgres. Everything else (the reads
+ * each is a write that passed a bucket in Postgres. So are lines carrying a
+ * deposit callback's outcome, which only a callback with the provider's signature
+ * writes, so their number is the provider's deposits and retries. Everything else (the reads
  * that feed "read by somebody else" and "SEEK followed by an open", the refusals,
  * a KEY's ordinary traffic) is counted in the once-a-minute rollup instead once
  * today's file passes this size, so the report keeps its numbers as counts and loses that day's ids, and says so.
@@ -617,7 +631,11 @@ export function requestLog(directory: string | null): MiddlewareHandler<Env> {
     const wrapper = c.get("atConnector") === true;
     // An upload authorization acts as its KEY at the file PUT, and is logged as that KEY.
     const keyed = bearer?.state === "valid" || bearer?.state === "upload";
-    if (heads.length === 0 && returned === undefined && refusal === undefined && (wrapper || !keyed)) {
+    // A deposit callback whose signature verified is written, its outcome with it: the
+    // provider never sends again what was answered *ok*, so after a restore this is how
+    // a credit the restore lost is found. A callback that did not verify is not.
+    const deposit = c.get("depositCallback");
+    if (heads.length === 0 && returned === undefined && refusal === undefined && deposit === undefined && (wrapper || !keyed)) {
       // The bounded exception, for the two events a public read surface is
       // measured by: an anonymous read that found nothing, and an anonymous
       // refusal. They are counted here and written as one rollup line a minute
@@ -647,9 +665,10 @@ export function requestLog(directory: string | null): MiddlewareHandler<Env> {
     // log reached its daily size limit.
     if (refusalSpent) return;
 
-    // Past the day's ceiling, only restore evidence is written. See
-    // LOG_BYTES_PER_DAY for why that line is drawn exactly there.
-    if (heads.length === 0 && pastCeiling(day)) {
+    // Past the day's ceiling, only restore evidence is written: heads, and what a
+    // deposit callback did, which a restore that lost the credit is checked against.
+    // See LOG_BYTES_PER_DAY for why that line is drawn exactly there.
+    if (heads.length === 0 && deposit === undefined && pastCeiling(day)) {
       tally(now, day, {
         over_ceiling: 1,
         ...(c.res.status === 501 ? { planned: 1 } : {}),
@@ -667,7 +686,7 @@ export function requestLog(directory: string | null): MiddlewareHandler<Env> {
       // The path as routed, not as sent: a SPACE name is peer-authored, and a
       // log is read by people and by scripts that were not written with that in
       // mind.
-      path: c.req.matchedRoutes.at(-1)?.path ?? c.req.path,
+      path: loggedPath(c.req.matchedRoutes.at(-1)?.path ?? c.req.path),
       status: c.res.status,
       ms: Date.now() - started,
       peer,
@@ -682,6 +701,8 @@ export function requestLog(directory: string | null): MiddlewareHandler<Env> {
       ...(returned ? { returned } : {}),
       // And why an app's sign-in was refused.
       ...(refusal ? { refusal } : {}),
+      // And what a deposit callback did.
+      ...(deposit ? { deposit } : {}),
     });
 
     append(line, day);

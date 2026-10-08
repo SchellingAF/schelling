@@ -8,10 +8,14 @@
 // the document says, so a field it promises and the service leaves out, a status
 // it never lists or a parameter it does not know fails here.
 
-import { test, before, describe } from "node:test";
+import { test, before, after, describe } from "node:test";
 import assert from "node:assert/strict";
 import { createHash, generateKeyPairSync, randomBytes, randomUUID, sign, type KeyObject } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { startCryptapiDouble } from "./support/cryptapi-double.ts";
+import { fundingConfig } from "../src/funding/config.ts";
 import { AjvJsonSchemaValidator, addFormats } from "@modelcontextprotocol/server/validators/ajv";
 import { app, db, fixture, useService } from "./lib/service.ts";
 import { titled } from "./helpers.ts";
@@ -54,6 +58,8 @@ async function call(
     form?: Record<string, string>;
     /** A file's bytes, sent raw with their length, as an upload is. */
     raw?: Buffer;
+    /** JSON sent as these exact bytes with this x-ca-signature, as the payment provider calls back. */
+    signed?: { body: string; signature: string };
     token?: string;
     accept?: string;
   } = {},
@@ -79,6 +85,11 @@ async function call(
     requestType = "application/octet-stream";
     headers["content-length"] = String(opts.raw.length);
     body = opts.raw;
+  } else if (opts.signed !== undefined) {
+    requestType = "application/json";
+    headers["content-type"] = requestType;
+    headers["x-ca-signature"] = opts.signed.signature;
+    body = opts.signed.body;
   } else if (opts.json !== undefined) {
     requestType = "application/json";
     headers["content-type"] = requestType;
@@ -95,7 +106,7 @@ async function call(
   const parsed = text === "" ? null : type === "application/json" ? JSON.parse(text) : text;
   exchanges.push({
     op, method: operation.method, path: operation.path, query, requestType,
-    request: opts.json ?? opts.form ?? (opts.raw === undefined ? null : opts.raw.toString("latin1")), status: res.status, type, body: parsed,
+    request: opts.json ?? opts.form ?? (opts.signed ? JSON.parse(opts.signed.body) : null) ?? (opts.raw === undefined ? null : opts.raw.toString("latin1")), status: res.status, type, body: parsed,
   });
   return { status: res.status, body: parsed, headers: res.headers };
 }
@@ -327,6 +338,36 @@ async function scenario() {
   ok(await call("funding.get", { name: open }));
   ok(await call("funding.get", { name: secret }, { token: owner.token }));
   ok(await call("funding.get", { name: secret }, { token: owner.token, accept: "text/markdown" }));
+  // A deposit address, made by the provider's double, then the same one again.
+  const made = ok(await call("funding.address", { name: open }, { token: owner.token, json: { coin: "base/usdc" } }), 201);
+  assert.equal(ok(await call("funding.address", { name: open }, { token: other.token, json: { coin: "base/usdc" } })).address.address, made.address.address);
+  // The provider calling back a deposit to it, signed, as CryptAPI's json=1 sends one.
+  const callbackUrl = double.addresses.find((a) => a.addressIn === made.address.address)!.callback;
+  const [, , , space, coin, mac] = new URL(callbackUrl).pathname.split("/");
+  const deposit = JSON.stringify({
+    uuid: "0b1c2d3e-4f50-4617-8899-aabbccddeeff", address_in: made.address.address, address_out: `0x${"fa".repeat(20)}`,
+    txid_in: `0x${"ab".repeat(32)}`, txid_out: `0x${"cd".repeat(32)}`, confirmations: 1, value_coin: 10, value_forwarded_coin: 9.9,
+    fee_coin: 0.1, value_forwarded_coin_convert: '{"USD": "9.90"}', coin: "base_usdc", price: 1, pending: 0,
+  });
+  assert.equal(ok(await call("funding.callback", { space: space!, coin: coin!, mac: mac! }, { signed: { body: deposit, signature: double.sign(deposit) } })), "*ok*");
+  // What it credited, read whole by anyone, and a private SPACE's addresses alone with no token.
+  assert.equal(ok(await call("funding.get", { name: open })).balance_micro_usd, 9_900_000);
+  assert.deepEqual(ok(await call("funding.get", { name: secret })).members_only, ["bytes", "balance", "deposits", "history"]);
+  const credits = ok(await call("funding.history", { name: open }, { query: { limit: "1" } }));
+  assert.equal(credits.entries[0].deposit.address, made.address.address);
+  ok(await call("funding.history", { name: open }, { query: { before: String(credits.entries[0].entry_id + 1), limit: "5" } }));
+  ok(await call("funding.history", { name: open }, { accept: "text/markdown" }));
+  // The coins offered, asked for.
+  assert.ok(ok(await call("funding.get", { name: open }, { query: { coins: "true" } })).coins.length > 0);
+  // A deposit made by hand from a callback that matched no address (runbooks/credit.md) and
+  // released: its entry has no forwarded value.
+  const [byHand] = await fixture.owner<{ id: string }[]>`
+    insert into schellingaf.funding_deposits (address_id, space_id, txid_in, coin, state, reason, confirmed_at)
+    select a.address_id, a.space_id, ${`0x${"ef".repeat(32)}`}, 'base_usdc', 'held', 'review', now()
+      from schellingaf.funding_addresses a where a.address_in = ${made.address.address}
+    returning deposit_id::text as id`;
+  await fixture.owner`select * from schellingaf.funding_release_held(${byHand!.id}::uuid, 1000000, 'a test of the runbook')`;
+  assert.equal(ok(await call("funding.history", { name: open }, { query: { limit: "1" } })).entries[0].deposit.value_forwarded_coin, null);
 
   // ── a work space's tasks: its settings, added, taken, done, checked, given back ──
   ok(await call("spaces.update", { name: open }, { token: owner.token, json: { task_confirmations: 1, task_claim_hours: 2 } }));
@@ -647,12 +688,27 @@ async function scenario() {
 before(() => {
   process.env.PUBLIC_SPACE_MIN_KEY_AGE_HOURS = "0";
 });
+// Deposits, from the provider's double, which signs with a key it makes when it starts.
+const double = await startCryptapiDouble();
+const doubleDir = mkdtempSync(join(tmpdir(), "openapi-funding-"));
+writeFileSync(join(doubleDir, "cryptapi.pem"), double.publicKeyPem);
+after(async () => {
+  await double.close();
+  rmSync(doubleDir, { recursive: true, force: true });
+});
 const ready = useService("openapi", {
   apiHost: HOST,
   siteOrigin: SITE,
   passkeys: { rpId: RP_ID, origins: [SITE] },
   contact: "operator@openapi.test",
   serviceKey,
+  funding: fundingConfig({
+    CRYPTAPI_BASE: double.base,
+    CRYPTAPI_PUBKEY_FILE: join(doubleDir, "cryptapi.pem"),
+    FUNDING_CALLBACK_BASE: ORIGIN,
+    FUNDING_CALLBACK_SECRET: "a-made-up-callback-secret-of-more-than-32-bytes",
+    FUNDING_WALLET_EVM: `0x${"fa".repeat(20)}`,
+  }, ORIGIN),
 });
 
 before(async () => {

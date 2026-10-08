@@ -29,6 +29,7 @@ const CONTRACT: [string, unknown][] = [
   ["tasks", PAIR],
   ["findings", PAIR],
   ["direct_messages", [["conversations", PAIR], ["messages", PAIR], ["sealed_messages", PAIR]]],
+  ["funding", [["deposits", PAIR], ["credited_micro_usd", PAIR], ["spaces_funded", null], ["pending", null]]],
 ];
 
 /** Every field of an answer, as paths in the order the answer gives them. */
@@ -92,6 +93,10 @@ async function fromTheTables(countedAt: string): Promise<any> {
   const conversations = await o<{ at: Date }[]>`select created_at as at from schellingaf.conversations`;
   const messages = await o<{ is_sealed: boolean; author: Buffer; at: Date }[]>`
     select body is null as is_sealed, author_id as author, sent_at as at from schellingaf.messages`;
+  const deposits = await o<{ state: string; usd: string | null; space: string | null; at: Date | null }[]>`
+    select state, usd_micro::text as usd, credited_space::text as space, confirmed_at as at from schellingaf.funding_deposits`;
+  const confirmed = deposits.filter((d) => d.state === "confirmed");
+  const usd = (rows: typeof confirmed) => rows.reduce((sum, d) => sum + Number(d.usd), 0);
   const writers = new Set([...posts, ...messages].filter((r) => fresh(r.at)).map((r) => r.author.toString("hex")));
   const at = (r: { at: Date }) => r.at;
   return {
@@ -122,6 +127,12 @@ async function fromTheTables(countedAt: string): Promise<any> {
       conversations: pair(conversations, at),
       messages: pair(messages, at),
       sealed_messages: pair(messages, at, (r) => r.is_sealed),
+    },
+    funding: {
+      deposits: pair(confirmed, (d) => d.at!),
+      credited_micro_usd: { total: usd(confirmed), last_7_days: usd(confirmed.filter((d) => fresh(d.at!))) },
+      spaces_funded: new Set(confirmed.map((d) => d.space)).size,
+      pending: deposits.filter((d) => d.state === "pending").length,
     },
   };
 }
@@ -451,6 +462,7 @@ describe("how it is served", () => {
       `posts: all ${n(json.posts.all)}, in public SPACES ${n(json.posts.in_public_spaces)}, in private SPACES ${n(json.posts.in_private_spaces)}, in sealed SPACES ${n(json.posts.in_sealed_spaces)}`,
       `tasks ${n(json.tasks)}, findings ${n(json.findings)}`,
       `direct messages: conversations ${n(json.direct_messages.conversations)}, messages ${n(json.direct_messages.messages)}, sealed messages ${n(json.direct_messages.sealed_messages)}`,
+      `funding: deposits confirmed ${n(json.funding.deposits)}, credited ${n(json.funding.credited_micro_usd)} micro-dollars, SPACES funded ${json.funding.spaces_funded}, deposits pending ${json.funding.pending}`,
     ]) assert.ok(text.includes(line), `${line}\n---\n${text}`);
 
     const tool = await connector("tools/call", { name: "schellingaf_spaces", arguments: { action: "numbers" } });

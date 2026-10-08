@@ -247,6 +247,20 @@ export function fileBytesPerDay(young: boolean): number {
   return young ? FILE_BYTES_FIRST_DAY : FILE_BYTES_PER_DAY;
 }
 
+/** New deposit addresses one KEY may have made in a day, for any SPACES: 20 unless set. An
+ *  address already made is answered again and costs nothing. Its own bucket,
+ *  `fund-addr:<peer>`, so a refusal says its numbers. Read on each use. */
+export function fundingAddressesPerKeyDay(): number {
+  return envNumber("FUNDING_ADDRESSES_PER_KEY_DAY", 20, { min: 1, integer: true });
+}
+
+/** New deposit addresses the whole service makes in a day: 2,000 unless set. One shared
+ *  bucket, `fund-addr:all`, so a refusal is a flat minute with no numbers. Each new address
+ *  is a request to the payment provider. Read on each use. */
+export function fundingAddressesPerDay(): number {
+  return envNumber("FUNDING_ADDRESSES_PER_DAY", 2000, { min: 1, integer: true });
+}
+
 /** Reads a minute, per KEY. Wide: an agent paging a busy space legitimately
  * makes a lot of these; the number stops one caller monopolising the process. */
 export const READS_PER_MINUTE = envNumber("READS_PER_MINUTE", 600);
@@ -550,6 +564,8 @@ export const SHARED = {
    * "recently refused" would be a second record of the same fact, which can drift. */
   spaceRequestsByPeer: (spaceId: string, peerHex: string): Bucket =>
     daily(`req:${spaceId}:${peerHex}`, ASKS_PER_SPACE_PER_KEY_DAY, false),
+  /** New deposit addresses, the whole service's. */
+  fundingAddresses: (): Bucket => daily("fund-addr:all", fundingAddressesPerDay(), false),
 } as const;
 
 /** The caller's own buckets for governing and for asking. */
@@ -560,6 +576,8 @@ export const OWN = {
   control: (peerHex: string): Bucket => hourly(`ctl:${peerHex}`, CONTROL_PER_HOUR, true),
   /** Links made by one KEY, hand-overs and offers among them. */
   invites: (peerHex: string): Bucket => daily(`inv:${peerHex}`, LINKS_PER_DAY, true),
+  /** New deposit addresses made for one KEY. */
+  fundingAddresses: (peerHex: string): Bucket => daily(`fund-addr:${peerHex}`, fundingAddressesPerKeyDay(), true),
   /** Direct messages sent by one KEY: sixty a minute. Not the general write
    * bucket as well, whose thirty a minute would be the real limit if both were
    * spent. How many of them may be requests is counted in the database, which is
@@ -911,6 +929,15 @@ export async function spend(
     // confusing and a partial answer to a question the caller may not ask.
     shared: !bucket.own,
   });
+}
+
+/**
+ * Give back what `spend` took, for a request that then made nothing. A negative cost adds
+ * tokens; a bucket given back past its capacity is read at its capacity, since
+ * bucket_refilled() caps every read.
+ */
+export async function giveBack(db: Db, bucket: Bucket, cost = 1): Promise<void> {
+  await db.write`select schellingaf.take_tokens(${bucket.key}, ${bucket.capacity}, ${bucket.refillPerSec}, ${-cost})`;
 }
 
 /**

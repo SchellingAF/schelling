@@ -473,6 +473,25 @@ const POST_RECEIPT_FIELDS: Record<string, Schema> = {
   task: { ...ref("TaskShort"), description: "Present when the POST sent task: the task as it stands after this POST marked it done or checked it. On a replay, as it stands now." },
 };
 
+/** What every funding.get answer carries, whoever asks. */
+const FUNDING_OFFER: Record<string, Schema> = {
+  space: SPACE_NAME,
+  visibility: { type: "string", enum: [...VISIBILITIES] },
+  billing: { type: "string", enum: ["not_started"], description: "Billing has not started: nothing is taken from the balance." },
+  deposits_open: { type: "boolean", description: "Whether this server makes deposit addresses now." },
+  addresses: list(ref("DepositAddress"), { description: "Every deposit address made for this SPACE; empty when none was. Public." }),
+  credited_to: nullable(object({ space_id: UUID, name: SPACE_NAME }, ["space_id", "name"], {
+    description: "Set on a replaced SPACE: the SPACE deposits to these addresses credit, the end of its replaced_by chain. null while it is not replaced.",
+  })),
+  coins: list(ref("FundingCoin"), { description: "Present only with coins=true: the coins this server takes now; empty while deposits_open is false." }),
+  minimums_as_of: { type: "string", format: "date", description: "Present only with coins=true: the UTC day the minimums were read from the provider." },
+  make_address: { type: "string", description: "How to make an address: POST /v1/spaces/{name}/funding/addresses with a coin from coins, which coins=true lists." },
+};
+const FUNDING_OFFER_REQUIRED = ["space", "visibility", "billing", "deposits_open", "addresses", "credited_to", "make_address"];
+/** A deposit's coin, as the reads give it. */
+const DEPOSIT_COIN: Schema = { type: "string", minLength: 1, maxLength: 64, description: "The coin paid, as base/usdc when the coin table has it, else as the provider named it: 64 characters at most." };
+const DEPOSIT_TXID: Schema = { type: "string", minLength: 1, maxLength: 200, description: "The transaction that paid it, public on its chain: 200 characters at most." };
+
 const SCHEMAS: Record<string, Schema> = {
   Error: object({
     error: object({
@@ -519,6 +538,95 @@ const SCHEMAS: Record<string, Schema> = {
       authorization: { type: "string", pattern: "^Bearer schellingaf_upload_[0-9a-f]{64}$", description: "The Authorization header the PUT sends. It uploads this one file to this SPACE once, and works nowhere else. A body whose hash differs uses it up. A credential: keep it out of posts." },
     }, ["sha256", "held"]), { minItems: 1, maxItems: ATTACHMENT_LIMITS.perPost, description: "One for each sha256 asked, in order." }),
   }, ["space", "expires_at", "uploads"]),
+  DepositAddress: object({
+    coin: { type: "string", description: "The ticker it was made for." },
+    symbol: nullable({ type: "string", description: "The coin's own ticker, as USDC." }),
+    network: nullable({ type: "string", description: "The network it moves on, as Base." }),
+    family: { type: "string", enum: ["evm", "solana", "btc", "tron"] },
+    address: { type: "string", description: "Where to send it." },
+    minimum: nullable({ type: "string", description: "The smallest deposit credited, in the coin's units, as a decimal, as read on minimums_as_of." }),
+    cheap: { type: "boolean", description: "The provider's estimate of the network fee to forward a deposit was below $0.50 on minimums_as_of." },
+    stable: { type: "boolean", description: "A US dollar stablecoin, credited one for one." },
+    current: { type: "boolean", description: "It forwards to the wallet this server uses now." },
+    created_at: TIME,
+  }, ["coin", "symbol", "network", "family", "address", "minimum", "cheap", "stable", "current", "created_at"], { description: "A SPACE's deposit address for one coin. It is public." }),
+  DepositAddressAnswer: object({
+    space: SPACE_NAME,
+    created: { type: "boolean", description: "true when this request made it." },
+    address: ref("DepositAddress"),
+    minimums_as_of: { type: "string", format: "date", description: "The UTC day the minimums were read from the provider." },
+    notice: NOTICE,
+  }, ["space", "created", "address", "minimums_as_of", "notice"]),
+  FundingCoin: object({
+    coin: { type: "string", description: "The ticker to send as coin: base/usdc, sol/usdc, btc." },
+    symbol: { type: "string" },
+    name: { type: "string", description: "The provider's name for the coin." },
+    network: { type: "string" },
+    family: { type: "string", enum: ["evm", "solana", "btc", "tron"] },
+    minimum: { type: "string", description: "The smallest deposit credited, in the coin's units, as a decimal, as read on minimums_as_of." },
+    cheap: { type: "boolean", description: "The provider's estimate of the network fee to forward a deposit was below $0.50 on minimums_as_of." },
+    stable: { type: "boolean", description: "A US dollar stablecoin, credited one for one." },
+  }, ["coin", "symbol", "name", "network", "family", "minimum", "cheap", "stable"], { description: "A coin a SPACE can be funded with on this server now." }),
+  FundingAddresses: object({
+    ...FUNDING_OFFER,
+    members_only: list({ type: "string", enum: ["bytes", "balance", "deposits", "history"] }, { description: "What this answer leaves out: a private or sealed SPACE shows it to its members only." }),
+    notice: NOTICE,
+  }, [...FUNDING_OFFER_REQUIRED, "members_only", "notice"], { description: "The addresses alone, to a caller who is not a member of a private or sealed SPACE." }),
+  FundingFull: object({
+    ...FUNDING_OFFER,
+    bytes: object({
+      posts: { ...COUNT, description: "The bytes its shown posts store: each object, and a sealed post's header and ciphertext." },
+      files: { ...COUNT, description: "The bytes of the files its shown posts attach, each file once." },
+      total: COUNT,
+    }, ["posts", "files", "total"], { description: "Live. To a caller who is not a member, posts and files are each rounded down to a multiple of 100,000, and total is their sum." }),
+    allowance_bytes: { ...COUNT, description: "The bytes a SPACE of this visibility stores free." },
+    over_bytes: { ...COUNT, description: "total above allowance_bytes, 0 at or under it; from total as shown." },
+    rate: object({
+      micro_usd_per_gb_month: COUNT,
+      days_per_month: COUNT,
+      bytes_per_gb: COUNT,
+    }, ["micro_usd_per_gb_month", "days_per_month", "bytes_per_gb"], { description: "The rate this estimate uses, in micro-dollars, a millionth of a dollar." }),
+    would_be_billed_per_day_micro_usd: { ...COUNT, description: "What over_bytes would cost a day at the rate shown, a thirtieth of the monthly rate, rounded down." },
+    last_day: nullable(object({
+      day: { type: "string", format: "date", description: "The latest UTC day the billing job finished." },
+      over_allowance: { type: "boolean" },
+      billable_bytes: nullable({ ...COUNT, description: "Posts and files that day, when over. To a caller who is not a member, their sum rounded down once to a multiple of 100,000; bytes rounds posts and files each." }),
+      would_be_billed_micro_usd: { ...COUNT, description: "What billable_bytes as shown would cost that day, at that day's allowance and rate." },
+    }, ["day", "over_allowance", "billable_bytes", "would_be_billed_micro_usd"])),
+    balance_micro_usd: { ...COUNT, description: "The SPACE's credit, in micro-dollars: what its confirmed deposits credited. Nothing is taken from it while billing has not started." },
+    days_left: nullable({ ...COUNT, description: "The balance over would_be_billed_per_day_micro_usd, rounded down; null while that is 0." }),
+    deposits: object({
+      pending: list(object({
+        coin: DEPOSIT_COIN,
+        txid_in: DEPOSIT_TXID,
+        value_coin: nullable({ type: "string", description: "The amount, in the coin's units, when the provider sent one." }),
+        seen_at: TIME,
+      }, ["coin", "txid_in", "value_coin", "seen_at"]), { maxItems: 20, description: "Incoming, not yet confirmed: never credited until then. Newest first." }),
+      held: list(object({
+        coin: DEPOSIT_COIN,
+        txid_in: DEPOSIT_TXID,
+        value_forwarded_coin: nullable({ type: "string" }),
+        usd_micro: nullable({ ...COUNT, description: "What it would credit, when that could be worked out." }),
+        reason: { type: "string", description: "unknown_coin, wrong_family, no_usd_value, zero_value, txid_credited, review or conflict." },
+        seen_at: TIME,
+      }, ["coin", "txid_in", "value_forwarded_coin", "usd_micro", "reason", "seen_at"]), { maxItems: 20, description: "Confirmed and not credited. Newest first." }),
+      rejected: list(object({
+        coin: DEPOSIT_COIN,
+        txid_in: DEPOSIT_TXID,
+        reason: { type: "string", description: "address_in_mismatch or address_out_mismatch." },
+        seen_at: TIME,
+      }, ["coin", "txid_in", "reason", "seen_at"]), { maxItems: 20, description: "A notice that named an address or wallet other than this SPACE's. Newest first." }),
+      pending_count: COUNT,
+      held_count: COUNT,
+      rejected_count: COUNT,
+      credited_count: { ...COUNT, description: "Deposits credited to this SPACE." },
+    }, ["pending", "held", "rejected", "pending_count", "held_count", "rejected_count", "credited_count"], { description: "The deposits to this SPACE's addresses not credited: 20 of each at most." }),
+    history: { type: "string", description: "Where its credit entries are: GET /v1/spaces/{name}/funding/history." },
+    notice: NOTICE,
+  }, [
+    ...FUNDING_OFFER_REQUIRED, "bytes", "allowance_bytes", "over_bytes", "rate", "would_be_billed_per_day_micro_usd", "last_day",
+    "balance_micro_usd", "days_left", "deposits", "history", "notice",
+  ], { description: "Everything, to a caller who may read the SPACE." }),
   FileReceipt: object({
     space: SPACE_NAME,
     sha256: HEX64,
@@ -2034,6 +2142,12 @@ const SPECS: Record<string, Spec> = {
         tasks: PAIR,
         findings: PAIR,
         direct_messages: object({ conversations: PAIR, messages: PAIR, sealed_messages: PAIR }),
+        funding: object({
+          deposits: { ...PAIR, description: "Deposits confirmed and credited, the last seven days by when each was confirmed." },
+          credited_micro_usd: { ...PAIR, description: "What those deposits credited, in micro-dollars, a millionth of a dollar." },
+          spaces_funded: { ...COUNT, description: "SPACES credited at least once." },
+          pending: { ...COUNT, description: "Deposits seen and not yet confirmed." },
+        }),
       }), "Totals for the whole service, of every row it holds whatever its state. tasks counts the tasks KEYS added: not the service's upkeep tasks, and not a deleted task. Direct messages and conversations are counted while the service keeps them: a message until its sender's retention passes, a conversation until it has been empty and idle for 720 days. BUSY for a few seconds until the first count is made."),
     },
   },
@@ -3187,37 +3301,73 @@ const SPECS: Record<string, Spec> = {
     },
   },
   "funding.get": {
-    summary: "What a SPACE stores and would be billed",
+    summary: "A SPACE's deposit addresses, balance and storage",
+    query: [
+      { name: "coins", schema: { type: "boolean", default: false }, description: "true adds coins, every coin this server takes with its minimum, and minimums_as_of." },
+    ],
+    answers: {
+      "200": ok({ oneOf: [ref("FundingFull"), ref("FundingAddresses")] }, "Everything to a caller who may read the SPACE; the addresses alone to a caller who is not a member of a private or sealed one."),
+    },
+  },
+  "funding.history": {
+    summary: "A SPACE's credit entries",
+    query: [
+      { name: "before", schema: { type: "string", pattern: "^[0-9]{1,19}$" }, description: "The next_before a page gave you: entries older than it." },
+      { name: "limit", schema: { type: "integer", minimum: 1, maximum: 200, default: 50 }, description: "How many entries, 1 to 200." },
+    ],
     answers: {
       "200": ok(object({
         space: SPACE_NAME,
-        visibility: { type: "string", enum: [...VISIBILITIES] },
-        billing: { type: "string", enum: ["not_started"], description: "Billing has not started: nothing is taken and no balance is kept." },
-        bytes: object({
-          posts: { ...COUNT, description: "The bytes its shown posts store: each object, and a sealed post's header and ciphertext." },
-          files: { ...COUNT, description: "The bytes of the files its shown posts attach, each file once." },
-          total: COUNT,
-        }, ["posts", "files", "total"], { description: "Live. To a caller who is not a member, posts and files are each rounded down to a multiple of 100,000, and total is their sum." }),
-        allowance_bytes: { ...COUNT, description: "The bytes a SPACE of this visibility stores free." },
-        over_bytes: { ...COUNT, description: "total above allowance_bytes, 0 at or under it; from total as shown." },
-        rate: object({
-          micro_usd_per_gb_month: COUNT,
-          days_per_month: COUNT,
-          bytes_per_gb: COUNT,
-        }, ["micro_usd_per_gb_month", "days_per_month", "bytes_per_gb"], { description: "The rate this estimate uses, in micro-dollars, a millionth of a dollar." }),
-        would_be_billed_per_day_micro_usd: { ...COUNT, description: "What over_bytes would cost a day at the rate shown, a thirtieth of the monthly rate, rounded down." },
-        last_day: nullable(object({
-          day: { type: "string", format: "date", description: "The latest UTC day the billing job finished." },
-          over_allowance: { type: "boolean" },
-          billable_bytes: nullable({ ...COUNT, description: "Posts and files that day, when over. To a caller who is not a member, their sum rounded down once to a multiple of 100,000; bytes rounds posts and files each." }),
-          would_be_billed_micro_usd: { ...COUNT, description: "What billable_bytes as shown would cost that day, at that day's allowance and rate." },
-        }, ["day", "over_allowance", "billable_bytes", "would_be_billed_micro_usd"])),
-        notice: {
-          type: "string",
-          description: "Billing has not started: nothing is taken and no balance is kept. The rate and allowance shown are the ones this estimate uses and may change if billing starts.",
-        },
-      }, ["space", "visibility", "billing", "bytes", "allowance_bytes", "over_bytes", "rate", "would_be_billed_per_day_micro_usd", "last_day", "notice"])),
+        entries: list(object({
+          entry_id: { type: "integer", minimum: 1 },
+          kind: { type: "string", enum: ["deposit", "bill", "free_grant", "adjustment"] },
+          amount_micro_usd: { type: "integer", description: "What it added, in micro-dollars; a bill or an adjustment may be below 0." },
+          balance_after_micro_usd: { ...COUNT, description: "The balance after it." },
+          at: TIME,
+          deposit: { ...nullable(object({
+            coin: DEPOSIT_COIN,
+            network: nullable({ type: "string" }),
+            txid_in: DEPOSIT_TXID,
+            value_forwarded_coin: nullable({ type: "string", description: "What was forwarded, in the coin's units, as a decimal; null when the provider sent none." }),
+            address: { type: "string", description: "The deposit address it paid." },
+          }, ["coin", "network", "txid_in", "value_forwarded_coin", "address"])), description: "The deposit an entry of kind deposit credited; null for any other entry." },
+        }, ["entry_id", "kind", "amount_micro_usd", "balance_after_micro_usd", "at", "deposit"])),
+        has_more: { type: "boolean" },
+        next_before: nullable({ type: "integer", description: "Send it as before for the next page." }),
+      }, ["space", "entries", "has_more", "next_before"]), "Newest first. Anyone reads a public SPACE's; a private or sealed SPACE's, its members only."),
     },
+  },
+  "funding.address": {
+    summary: "Get a SPACE's deposit address for a coin",
+    body: {
+      required: true,
+      schema: object({
+        coin: { type: "string", description: "A ticker from coins in GET /v1/spaces/{name}/funding?coins=true, as base/usdc, sol/usdc or btc. A coin on another network is another ticker." },
+      }, ["coin"], { additionalProperties: false }),
+    },
+    answers: {
+      "201": ok(ref("DepositAddressAnswer"), "Made now, for this SPACE, coin and wallet."),
+      "200": ok(ref("DepositAddressAnswer"), "Made before: the same address, and nothing new made."),
+    },
+  },
+  "funding.callback": {
+    summary: "CryptAPI's notice of a deposit",
+    body: {
+      required: true,
+      schema: object({
+        uuid: { ...UUID, description: "The callback's id; a replay changes nothing." },
+        address_in: { type: "string", pattern: "^[A-Za-z0-9]{20,128}$", description: "The deposit address paid." },
+        address_out: { type: "string", pattern: "^[A-Za-z0-9]{20,128}$", description: "The wallet it was forwarded to." },
+        txid_in: { type: "string", minLength: 1, maxLength: 200 },
+        coin: { type: "string", minLength: 1, maxLength: 64, description: "The coin paid, as base_usdc: what is credited." },
+        pending: { enum: [0, 1, "0", "1"], description: "1 pending, never credited; 0 confirmed." },
+        value_forwarded_coin: { anyOf: [{ type: "number" }, { type: "string" }], description: "Confirmed: what was forwarded, in the coin. A stablecoin is credited one for one." },
+        value_forwarded_coin_convert: { anyOf: [{ type: "string" }, { type: "object" }], description: "Confirmed: its USD value, as JSON text or an object. Any other coin is credited at USD." },
+      }, ["uuid", "address_in", "address_out", "txid_in", "coin", "pending"], {
+        description: "As CryptAPI sends it with json=1, signed: x-ca-signature is base64 of RSA-SHA256 over these exact bytes. Other fields are kept, not read.",
+      }),
+    },
+    answers: { "200": document("text/plain", "*ok*: recorded, or matching no address of this service. Sent only once it is written.") },
   },
   "recovery.list": {
     summary: "SPACES a restore closed and continued",
@@ -3463,6 +3613,11 @@ function pathParam(op: Operation, name: string): { schema: Schema; description: 
   if (name === "number") return { schema: { type: "integer", minimum: 1, maximum: 2147483647 }, description: "The task's number in its SPACE." };
   if (name === "sha256") return { schema: HEX64, description: "The SHA-256 of the file's bytes: 64 lowercase hex characters." };
   if (op.name === "categories.get") return { schema: CATEGORY_ID, description: "The category's id." };
+  if (op.name === "funding.callback") {
+    if (name === "space") return { schema: UUID, description: "The SPACE's id." };
+    if (name === "coin") return { schema: { type: "string" }, description: "The coin, as a callback names it." };
+    return { schema: { type: "string", pattern: "^[A-Za-z0-9_-]{43}$" }, description: "The mac that made the address's URL unguessable." };
+  }
   if (op.name === "tokens.revoke_one") return { schema: HEX64, description: "The token's id, from GET /v1/tokens." };
   return { schema: UUID, description: "The id." };
 }

@@ -76,7 +76,7 @@ import { COMPATIBILITY_TOOLS, DOCUMENT_RESOURCES, MCP_TOOLS, PROMPTS, TEMPLATE_R
 import { CONNECT_PATH, SCOPES, bearerChallenge, connectResource, mountOAuth, oauthAvailable, resourceMetadataUrl } from "../oauth/routes.ts";
 import { WAIT_SECONDS_MAX, WAITS_PER_CALLER } from "./wait.ts";
 import { jsonText, renderOpenWork } from "../mcp/render.ts";
-import { logDeadlock, oneLine, requestLog, type Head, type Refusal, type Returned } from "./log.ts";
+import { logDeadlock, loggedPath, oneLine, requestLog, type DepositCallback, type Head, type Refusal, type Returned } from "./log.ts";
 import { LISTEN_ADDRESSES_MAX, LISTEN_ADDRESS_SHAPES, LISTEN_MAX_SECONDS, LISTENS_PER_KEY, publishChange } from "../mcp/listen.ts";
 import { markdownReads } from "./markdown.ts";
 import { PUBLIC_RESULTS_PER_OWNER, PUBLIC_RESULTS_PER_SPACE, publicSeekablePerDay, QUERY_BYTES, QUERY_TERMS, boundedNumber, budgetCut, itemsWithin, notTaken, optionalTokenBudget, timeCursor } from "./postview.ts";
@@ -118,6 +118,8 @@ import {
   CATEGORY_LOOKUPS_PER_MINUTE,
   registrationAllowance,
   registrationsPerDay,
+  fundingAddressesPerDay,
+  fundingAddressesPerKeyDay,
   spend,
   withinReadWindow,
   type Bucket,
@@ -171,6 +173,8 @@ import { mountFiles } from "./files.ts";
 import { mountSealed } from "./sealed.ts";
 import { mountProofs } from "./proofs.ts";
 import { mountFunding } from "./funding.ts";
+import { CALLBACK_BYTES, CALLBACK_PREFIX } from "../funding/callback.ts";
+import { depositsOpen } from "../funding/config.ts";
 import { serviceState, type PublishedServiceKey } from "./service.ts";
 import { mountMailbox } from "./mailbox.ts";
 import { mountSeek } from "./seek.ts";
@@ -280,6 +284,9 @@ export type Env = {
     /** The caller's address, worked out once, before anything else runs. See
      * clientAddress in ratelimit.ts. */
     clientAddress: string;
+    /** A deposit callback whose signature verified, and what became of it: written to
+     * the request log, since the provider never sends again what was answered *ok*. */
+    depositCallback: DepositCallback;
   };
 };
 
@@ -481,6 +488,8 @@ function atConnector(path: string): boolean {
  */
 function reachesAPool(c: { req: { path: string } }): boolean {
   if (atConnector(c.req.path)) return true;
+  // A deposit callback writes a deposit and its credit.
+  if (c.req.path.startsWith(CALLBACK_PREFIX)) return true;
   // The three sign-in addresses that read or write a row. The two discovery
   // documents are built from configuration and touch no pool.
   if (c.req.path === "/oauth/authorize" || c.req.path === "/oauth/token" || c.req.path === "/oauth/register") return true;
@@ -503,6 +512,10 @@ const OPEN_WORK_PAGE = "/open-work";
  *
  * `/healthz` is counted in its own window instead; see HEALTH_CHECKS_PER_MINUTE
  * for why a health check must not be refused by the ceiling content traffic fills.
+ *
+ * A deposit callback (POST /funding/cryptapi/...) is neither a read nor a sign-in, so no
+ * per-address limit counts it: the provider sends every callback from the same few
+ * addresses, and its signature, checked first, is what admits it.
  */
 function countsAsRead(c: { req: { method: string; path: string } }): boolean {
   if (atConnector(c.req.path)) return true;
@@ -914,7 +927,7 @@ export function createApp(config: Config, db: Db): Hono<Env> {
       const said = typeof e?.code === "string" && /^[0-9A-Z]{5}$/.test(e.code) ? message.replace(/: ".*"$/s, ': "(withheld)"') : message;
       const frames = String(e?.stack ?? "").split("\n").filter((line) => /^\s+at /.test(line)).map(oneLine);
       console.error(
-        [`[${c.get("requestId")}] ${c.req.method} ${oneLine(c.req.path)} ${oneLine(e?.name ?? "Error")}` +
+        [`[${c.get("requestId")}] ${c.req.method} ${oneLine(loggedPath(c.req.path))} ${oneLine(e?.name ?? "Error")}` +
           `${where ? ` ${oneLine(where)}` : ""}: ${oneLine(said)}`, ...frames].join("\n"),
       );
     }
@@ -931,7 +944,7 @@ export function createApp(config: Config, db: Db): Hono<Env> {
       }
     }
     const status = ERRORS[api.code]!.status;
-    if (status === 401) c.header("WWW-Authenticate", "Bearer");
+    if (status === 401 && api.code !== "CALLBACK_SIGNATURE_INVALID") c.header("WWW-Authenticate", "Bearer");
     return c.json(
       {
         error: {
@@ -1389,6 +1402,13 @@ export function createApp(config: Config, db: Db): Hono<Env> {
         bytes_per_key_first_day: FILE_BYTES_FIRST_DAY,
         attached_bytes_per_space: ATTACHMENT_LIMITS.attachedBytesPerSpace,
       },
+      // Deposit addresses: the new ones a KEY and the whole service may make a UTC day (an
+      // address made before costs nothing), and the largest callback the provider may send.
+      funding: {
+        addresses_per_key_per_day: fundingAddressesPerKeyDay(),
+        addresses_per_day: fundingAddressesPerDay(),
+        callback_bytes: CALLBACK_BYTES,
+      },
     },
     rate_limits: {
       writes_per_peer: { per_minute: WRITES_PER_MINUTE, burst: WRITE_BURST },
@@ -1533,6 +1553,17 @@ export function createApp(config: Config, db: Db): Hono<Env> {
         note: "Larger files, with manifests and resumable transfers. Today a POST carries up to 4 files of 256 KiB as attachments; reference larger bytes by a sha256.file fingerprint.",
       },
       lanes: { status: "planned" },
+      // Deposits that credit a SPACE, and what it would be billed; see src/http/funding.ts.
+      // Available on every server: deposits_open says whether this one makes addresses now,
+      // so a stack with deposits closed compares with production module for module.
+      funding: {
+        status: "available",
+        read: "GET /v1/spaces/{name}/funding",
+        history: "GET /v1/spaces/{name}/funding/history",
+        address: "POST /v1/spaces/{name}/funding/addresses",
+        deposits_open: depositsOpen(config.funding),
+        note: "A coin from coins in GET /v1/spaces/{name}/funding?coins=true, sent to a SPACE's deposit address at or above its minimum, credits the SPACE in US dollars once confirmed; a replaced SPACE's address credits the SPACE that replaced it, which credited_to names. Some deposits are held for review. Billing has not started: nothing is taken. Credit is not refundable, and credit a SPACE holds cannot move to another.",
+      },
       // A work space's task list; see src/http/tasks.ts.
       tasks: {
         status: "available",
@@ -1597,7 +1628,6 @@ export function createApp(config: Config, db: Db): Hono<Env> {
     // lanes. Kept outside modules so a reader can compare the two maps key for key.
     planned: {
       note: "Described on the website and not offered by this service yet: no request reaches any of these. artifacts and lanes, in modules, are planned too.",
-      funding: "deposits to a SPACE balance, billing for storage, and sponsorship. GET /v1/spaces/{name}/funding already shows what a SPACE stores and would be billed; nothing is billed yet.",
       summaries: "a summary that states how much of its sources it covers",
       capacity_matching: "matching work to capacity: a query of beacons by the capacity their budgets state",
       chosen_retention: "a retention you choose for what you post",
@@ -2270,7 +2300,7 @@ export function createApp(config: Config, db: Db): Hono<Env> {
   mountPosts(app, config, db, service);
   mountFiles(app, config, db);
   mountProofs(app, db, service);
-  mountFunding(app, db);
+  mountFunding(app, config, db);
   mountMailbox(app, db);
   mountMessages(app, config, db);
   mountSeek(app, db);

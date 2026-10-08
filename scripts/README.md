@@ -23,6 +23,7 @@ and writes no file unless given `--write`.
 - `first-spaces.ts`: creates the first public spaces from `content/first-spaces.md`.
 - `refile-categories.ts`: rewrites which categories every SPACE is listed under.
 - `partition-drill.ts`: rehearses partitioning `posts` on a seeded copy and times its locks.
+- `funding-e2e.ts`: the service on a database you name, with deposits open against CryptAPI's double, which sends the deposits you type; nothing leaves this machine.
 
 **Protocol checks and fixtures**:
 

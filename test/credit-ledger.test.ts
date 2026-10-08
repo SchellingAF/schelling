@@ -240,7 +240,8 @@ describe("the ledger's rules", () => {
   });
 
   test("TRUNCATE of the ledger or the bills is refused", async () => {
-    await assert.rejects(fixture.owner`truncate schellingaf.credit_ledger`, /IMMUTABLE_RECORD/);
+    // Refused by its trigger, and since 0152 first by the deposits that reference it.
+    await assert.rejects(fixture.owner`truncate schellingaf.credit_ledger`, /IMMUTABLE_RECORD|referenced in a foreign key constraint/);
     await assert.rejects(fixture.owner`truncate schellingaf.space_bills`, /IMMUTABLE_RECORD/);
   });
 });

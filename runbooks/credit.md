@@ -1,10 +1,12 @@
-# A SPACE's credit: adjustments and faults
+# A SPACE's credit: deposits, adjustments and faults
 
 A SPACE has one balance, in micro-dollars (a millionth of a dollar), and a ledger that
-every change to it writes (`migrations/0149_space_credit.sql`). In this release nothing is
-deposited and nothing is billed: billing is measured in shadow (`src/db/billing.ts`), and no
-route or role but the owner posts an entry. Two things are done by hand, as the migration
-role, through `psql`: an adjustment, and clearing a fault.
+every change to it writes (`migrations/0149_space_credit.sql`). Deposits reach it from
+CryptAPI's signed callbacks (`migrations/0152_funding_deposits.sql`, `src/http/funding.ts`).
+Nothing is billed: billing is measured in shadow (`src/db/billing.ts`). The rest is done by
+hand, as the migration role, through `psql`: an adjustment, clearing a fault, releasing a
+held deposit, recovering a deposit that matched no address, and acting on a changed
+provider key.
 
 Every amount is a whole number of micro-dollars: 1,000,000 is one dollar. An entry is never
 changed or deleted; a mistake is put right with another entry.
@@ -82,3 +84,152 @@ posting still goes through: a deposit that arrived is recorded whatever the stat
    commit;
    -- fault clear end
    ```
+
+## A held deposit
+
+A confirmed deposit is held, not credited, when its coin is not in the table
+(`unknown_coin`), is of another network family than its address (`wrong_family`), has no
+US dollar value (`no_usd_value`), is worth nothing once rounded (`zero_value`), is a second
+coin in a transaction already credited to that address (`txid_credited`), or is worth more
+than $100 (`review`, `FUNDING.depositReviewMicro`). Each `funding.callback` line with
+`"outcome":"held"` names the deposit. A second payment in one transaction is held too, as
+`conflict`: see below.
+
+1. Read what is held:
+
+   ```sql
+   select d.deposit_id, d.space_id, d.coin, d.reason, d.usd_micro, d.value_forwarded_coin, d.price_usd,
+          d.txid_in, d.confirmed_at
+     from schellingaf.funding_deposits d where d.state = 'held' order by d.confirmed_at;
+   ```
+
+2. Decide the amount in micro-dollars: `usd_micro` when it is known and right, otherwise
+   the value forwarded at the provider's price on the day. A deposit that should not be
+   credited stays held.
+
+3. Release it. The SPACE credited is the end of the address's SPACE's `replaced_by` chain,
+   as for every deposit. The ledger key is the one an automatic credit would use,
+   `deposit:cryptapi:<deposit_id>`, so a deposit is never credited twice; a second release,
+   or a release of a deposit that is not held, is refused `INVALID_REQUEST`:
+
+   ```sql
+   -- release begin
+   select * from schellingaf.funding_release_held('<deposit_id>', <amount in micro-dollars>, '<why, in a sentence>');
+   -- release end
+   ```
+
+   A release is also refused when the same transaction already credited another deposit
+   to the same address: a `txid_credited` or `conflict` deposit. Check on the chain that
+   the transaction paid twice into that address, once for each deposit. Only then release
+   it forced:
+
+   ```sql
+   -- release forced begin
+   select * from schellingaf.funding_release_held('<deposit_id>', <amount in micro-dollars>, '<why, in a sentence>', true);
+   -- release forced end
+   ```
+
+## A second payment in one transaction
+
+The provider may confirm one transaction into one address twice, under two uuids. When
+the second names another `value_forwarded_coin` or `txid_out` than the deposit already
+decided, it is a second payment, not a replay. It gets a row of its own, held as
+`conflict`, and is never credited automatically. The `funding.callback` line says
+`"outcome":"conflict"` with its `deposit_id`, `txid_in`, `txid_out` and
+`value_forwarded_coin`, all public on the chain. To recover it:
+
+1. Read it beside the deposit already decided:
+
+   ```sql
+   select d.deposit_id, d.state, d.reason, d.coin, d.value_forwarded_coin, d.txid_out, d.usd_micro, d.seen_at
+     from schellingaf.funding_deposits d
+    where (d.address_id, d.txid_in) = (select c.address_id, c.txid_in from schellingaf.funding_deposits c
+                                        where c.deposit_id = '<deposit_id>')
+    order by d.seen_at;
+   ```
+
+2. Check both forwarding transactions (`txid_out`) on the chain. A forwarding that never
+   happened, or one that is the first's, stays held.
+3. A real second payment: release it forced, as above, at its `usd_micro`.
+
+## A deposit that matched no address
+
+A signed callback whose URL matches no address is answered `*ok*` and recorded nowhere:
+the `funding.callback` line says `"outcome":"no_match"` with its `address_in`, `txid_in`,
+`uuid` and `coin`, which are public on the chain. To credit it:
+
+1. Find the address it was paid to, and check the transaction on the chain:
+
+   ```sql
+   select a.address_id, a.space_id, a.coin, a.family, a.created_at
+     from schellingaf.funding_addresses a where lower(a.address_in) = lower('<address_in>');
+   ```
+
+2. Make the deposit's row by hand, held for review, then release it as above. It carries
+   no signed body, so `scripts/funding-audit.ts` lists it from then on: say so in the
+   release's note.
+
+   Type the coin exactly as the callback spelled it, as `base_usdc`, never the table's
+   ticker `base/usdc`: the row is keyed by the callback's spelling.
+
+   ```sql
+   insert into schellingaf.funding_deposits (address_id, space_id, txid_in, coin, state, reason, confirmed_at)
+   values ('<address_id>', '<space_id>', '<txid_in>', '<coin>', 'held', 'review', now())
+   returning deposit_id;
+   ```
+
+## A callback sent as a GET
+
+Every address asks the provider to POST a JSON body. A callback sent as a GET to an
+address's own URL (its mac, its SPACE and its coin) is answered 503 `FUNDING_UNAVAILABLE`,
+and nothing of it is read or recorded. Its `funding.callback` line says `"outcome":"get"`
+with the SPACE's id, and the provider sends it again for three days. A GET to any other URL
+under `/funding/cryptapi/` is answered 404, as a path with no operation, and logs nothing.
+Read the address's settings at the provider and its `callback_url`, and correct
+whatever makes it send a GET. Callbacks lost past the three days are rebuilt from the
+provider's logs, as for a key change below.
+
+## A callback whose fields are not its signed body's
+
+`funding_callback()` reads the signed body again and refuses when a field the service
+parsed differs from it, or the amount is not the coin's own: a stablecoin's forwarded value,
+any other coin's USD. Nothing is written, the callback is answered 500, and the provider
+sends it again for three days. The `funding.callback` line says `"outcome":"mismatch"` with
+its `uuid`, `coin`, `address_in` and `txid_in`, all public on the chain. It is a fault in
+the service, never the provider's: find it in `src/funding/callback.ts`, deploy the fix, and
+the next retry is credited. Past the three days, rebuild the deposit as for one that matched
+no address above.
+
+## When the provider's key changes
+
+At start, while deposits are open, the service fetches CryptAPI's key from `/pubkey/` and
+logs `{"event":"funding.pubkey","same":true}`. The key callbacks are checked with is the
+committed one, `src/funding/cryptapi-pubkey.ts`; the fetched key is never used. On
+`"same":false`, callbacks signed with a new key fail as 401, and CryptAPI sends each again
+for three days.
+
+1. Fetch `https://api.cryptapi.io/pubkey/` again, from a second machine too, and compare.
+2. Replace `CRYPTAPI_PUBKEY_PEM` with the new key, with the date in its comment, and deploy.
+3. Callbacks that failed meanwhile arrive again within CryptAPI's three days. After that,
+   rebuild each from `GET https://api.cryptapi.io/<ticker>/logs/?callback=<the address's
+   callback_url>`: make its row and release it, as for a deposit that matched no address.
+
+An `"error"` instead of `same` means the key could not be fetched: look again at the next
+start.
+
+## Changing a wallet
+
+Set the family's `FUNDING_WALLET_` variable and deploy. A request for an address after that
+gets a new address, forwarding to the new wallet; the old rows stay, keep crediting, and
+show `current: false`.
+
+## The audit
+
+`scripts/funding-audit.ts` checks every confirmed or held deposit again: each body it keeps
+against the signature kept beside it, under the committed key. It prints the count checked
+and the ids that fail, and exits 1 when any does. A row that fails was not written by a
+signed callback; a row made by hand fails by design.
+
+```sh
+DB_NAME=schellingaf node scripts/funding-audit.ts
+```

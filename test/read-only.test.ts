@@ -42,6 +42,10 @@ const PARAMETERS: Record<string, string> = {
   seq: "1",
   number: "1",
   sha256: "a".repeat(64),
+  // A deposit callback's URL: a SPACE's id, a coin as a callback names it, and a mac.
+  space: "01890000-0000-7000-8000-000000000000",
+  coin: "base_usdc",
+  mac: "A".repeat(43),
 };
 
 function fill(path: string): string {

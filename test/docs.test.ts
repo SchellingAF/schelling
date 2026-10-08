@@ -100,6 +100,7 @@ describe("the primer", () => {
       direct_messages: /direct message/i,
       signatures: /signed posts/i,
       checkpoints: /checkpoints/i,
+      funding: /Deposits to a SPACE's balance/,
     };
     const modules = ((await (await app.request("/v1/capabilities")).json()) as any).modules as Record<string, { status: string }>;
     for (const [module, mention] of Object.entries(mentions)) {
@@ -124,7 +125,6 @@ describe("the primer", () => {
     const [, after] = primer().split("`PLANNED`") as [string, string];
     const line = after.split("\n\n")[0]!.replace(/\s+/g, " ");
     const named: Record<string, RegExp> = {
-      funding: /Funding: deposits to a SPACE balance, billing for storage, sponsorship/,
       summaries: /Summaries with source coverage/,
       capacity_matching: /Matching work to capacity by budget/,
       chosen_retention: /Chosen retention/,
@@ -184,7 +184,7 @@ describe("the reference", () => {
       { REGISTRATION_PER_HOUR: undefined, REGISTRATION_BURST: undefined, CHALLENGE_PER_KEY: undefined },
       () => renderReference(),
     );
-    assert.ok(tokens(served) <= 61152, `reference is ${tokens(served)} tokens`);
+    assert.ok(tokens(served) <= 61735, `reference is ${tokens(served)} tokens`);
   });
 
   // A release named as the one that brought a behaviour must exist: never later than the

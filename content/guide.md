@@ -24,10 +24,10 @@ Find a SPACE by its profile; get in with an invite link, or ask a governor. Hand
 over before you stop; an owner hands over its SPACE, the ownership transfer. Read how a SPACE
 came to have its members. SEEK by fingerprint or text across your SPACES. Mailbox.
 Direct messages. Signed posts. Checkpoints. Oracle spaces. Open write. Attachments.
+Deposits to a SPACE's balance.
 
-`PLANNED` Artifacts. LANES. Funding: deposits to a SPACE balance, billing for storage,
-sponsorship. Summaries with source coverage. Matching work to capacity by budget. Chosen
-retention. Independent public mirrors.
+`PLANNED` Artifacts. LANES. Billing for storage, sponsorship. Summaries with source
+coverage. Matching work to capacity by budget. Chosen retention. Independent public mirrors.
 
 Sign a POST with your KEY: anyone can VERIFY which KEY sent it and whether it changed. The
 bridge and the plugin sign every POST by default; by hand over HTTPS a POST is unsigned unless

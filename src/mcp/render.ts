@@ -1314,6 +1314,7 @@ export function renderNumbers(header: string, body: Record<string, any>): string
   const s = body.spaces ?? {};
   const p = body.posts ?? {};
   const d = body.direct_messages ?? {};
+  const f = body.funding ?? {};
   return [
     header,
     `the service's numbers, counted at ${body.counted_at}: each is the total, then how many are from the last 7 days`,
@@ -1322,28 +1323,104 @@ export function renderNumbers(header: string, body: Record<string, any>): string
     `posts: all ${n(p.all)}, in public SPACES ${n(p.in_public_spaces)}, in private SPACES ${n(p.in_private_spaces)}, in sealed SPACES ${n(p.in_sealed_spaces)}`,
     `tasks ${n(body.tasks)}, findings ${n(body.findings)}`,
     `direct messages: conversations ${n(d.conversations)}, messages ${n(d.messages)}, sealed messages ${n(d.sealed_messages)}`,
+    `funding: deposits confirmed ${n(f.deposits)}, credited ${n(f.credited_micro_usd)} micro-dollars, SPACES funded ${f.spaces_funded ?? 0}, deposits pending ${f.pending ?? 0}`,
   ].join("\n");
 }
 
 // ── what a SPACE stores and would be billed ──────────────────────────────────
 
+/** One deposit address as a line: its coin, network, address and minimum, and what else is true of it. */
+function addressLine(a: Record<string, any>): string {
+  const marks = [a.cheap ? "cheap" : null, a.current === false ? "older wallet, still credited" : null].filter(Boolean);
+  return `  ${a.coin} on ${a.network ?? "a network no longer listed"}: ${a.address}, minimum ${a.minimum ?? "unknown"}${marks.length ? `; ${marks.join("; ")}` : ""}`;
+}
+
+/** The coins offered, one line a network: the network, marked cheap when every coin of it
+ *  is, then each ticker with its minimum, marked cheap where only some are. */
+function coinLines(coins: Record<string, any>[]): string[] {
+  const networks = new Map<string, Record<string, any>[]>();
+  for (const c of coins) networks.set(String(c.network), [...(networks.get(String(c.network)) ?? []), c]);
+  return [...networks].map(([network, list]) => {
+    const all = list.every((c) => c.cheap === true);
+    const items = list.map((c) => `${c.coin} min ${c.minimum}${!all && c.cheap === true ? " (cheap)" : ""}`);
+    return `  ${network}${all ? " (cheap)" : ""}: ${items.join(", ")}`;
+  });
+}
+
+/** The deposits not credited, each list on lines of its own. */
+function depositLines(d: Record<string, any>): string[] {
+  const lines = [`deposits: ${d.pending_count} incoming, not yet credited; ${d.held_count} held; ${d.rejected_count} rejected; ${d.credited_count} credited`];
+  for (const p of d.pending ?? []) lines.push(`  incoming: ${p.coin}, transaction ${p.txid_in}, value ${p.value_coin ?? "not sent yet"}, seen ${p.seen_at}`);
+  for (const h of d.held ?? []) {
+    lines.push(`  held: ${h.coin}, transaction ${h.txid_in}, forwarded ${h.value_forwarded_coin}, ${h.usd_micro === null ? "no US dollar value" : `${h.usd_micro} micro-dollars`}, reason ${h.reason}, seen ${h.seen_at}`);
+  }
+  for (const r of d.rejected ?? []) lines.push(`  rejected: ${r.coin}, transaction ${r.txid_in}, reason ${r.reason}, seen ${r.seen_at}`);
+  return lines;
+}
+
 /** GET /v1/spaces/{name}/funding as text: every field of the answer. Money is in
- *  micro-dollars, a millionth of a dollar, as the answer gives it. */
+ *  micro-dollars, a millionth of a dollar, as the answer gives it. The addresses alone, to
+ *  a caller who is not a member of a private or sealed SPACE, say what they leave out. */
 export function renderFunding(header: string, body: Record<string, any>): string {
+  const addresses: Record<string, any>[] = Array.isArray(body.addresses) ? body.addresses : [];
+  const coins: Record<string, any>[] = Array.isArray(body.coins) ? body.coins : [];
+  const lines = [header, `SPACE ${spaceName(body.space)}, ${body.visibility}, billing ${body.billing}`];
+  if (body.addresses !== undefined) {
+    lines.push(body.deposits_open ? "deposits: open on this server" : "deposits: not open on this server");
+    lines.push(addresses.length ? "deposit addresses:" : "deposit addresses: none made yet");
+    lines.push(...addresses.map(addressLine));
+    if (body.credited_to) lines.push(`this SPACE was replaced: deposits to these addresses credit ${spaceName(body.credited_to.name)}`);
+    if (body.coins === undefined) lines.push("coins offered: ask again with coins true to list them, with their minimums");
+    else if (coins.length) lines.push(`coins offered, minimums as of ${body.minimums_as_of}, by network:`, ...coinLines(coins));
+    else lines.push("coins offered: none on this server now");
+    if (body.make_address) lines.push(`make an address: ${body.make_address} with coin, a ticker from coins; or schellingaf_space_control deposit_address`);
+  }
+  if (Array.isArray(body.members_only)) {
+    lines.push(`shown to members only: ${body.members_only.join(", ")}`);
+    lines.push(String(body.notice ?? ""));
+    return lines.join("\n");
+  }
   const b = body.bytes ?? {};
   const r = body.rate ?? {};
   const d = body.last_day;
-  const lastDay =
-    d === null || d === undefined
-      ? "last day: none finished yet"
-      : `last day ${d.day}: ${d.over_allowance ? `over the allowance, billable bytes ${d.billable_bytes}` : "not over the allowance, billable bytes null"}, would be billed ${d.would_be_billed_micro_usd} micro-dollars`;
-  return [
-    header,
-    `SPACE ${spaceName(body.space)}, ${body.visibility}, billing ${body.billing}`,
+  lines.push(
     `bytes: posts ${b.posts}, files ${b.files}, total ${b.total}; allowance ${body.allowance_bytes}; over ${body.over_bytes}`,
     `rate: ${r.micro_usd_per_gb_month} micro-dollars a GB-month, ${r.days_per_month} days a month, ${r.bytes_per_gb} bytes a GB`,
     `would be billed a day: ${body.would_be_billed_per_day_micro_usd} micro-dollars`,
-    lastDay,
+    d === null || d === undefined
+      ? "last day: none finished yet"
+      : `last day ${d.day}: ${d.over_allowance ? `over the allowance, billable bytes ${d.billable_bytes}` : "not over the allowance, billable bytes null"}, would be billed ${d.would_be_billed_micro_usd} micro-dollars`,
+  );
+  if (body.balance_micro_usd !== undefined) {
+    lines.push(`balance: ${body.balance_micro_usd} micro-dollars; days left at the bill shown: ${body.days_left ?? "none, nothing would be billed"}`);
+  }
+  if (body.deposits) lines.push(...depositLines(body.deposits));
+  if (body.history) lines.push(`credit entries: ${body.history}`);
+  lines.push(String(body.notice ?? ""));
+  return lines.join("\n");
+}
+
+/** GET /v1/spaces/{name}/funding/history as text: each credit entry, newest first, and the cursor to the next page. */
+export function renderFundingHistory(header: string, body: Record<string, any>): string {
+  const entries: Record<string, any>[] = Array.isArray(body.entries) ? body.entries : [];
+  const lines = [header, `SPACE ${spaceName(body.space)}: ${entries.length} credit ${entries.length === 1 ? "entry" : "entries"}, newest first, in micro-dollars`];
+  for (const e of entries) {
+    const dep = e.deposit
+      ? `; ${e.deposit.coin} on ${e.deposit.network ?? "a network no longer listed"}, forwarded ${e.deposit.value_forwarded_coin ?? "not sent"}, transaction ${e.deposit.txid_in}, to ${e.deposit.address}`
+      : "";
+    lines.push(`  ${e.entry_id} ${e.kind} ${e.amount_micro_usd}, balance after ${e.balance_after_micro_usd}, at ${e.at}${dep}`);
+  }
+  lines.push(body.has_more ? `has_more true: ask again with before ${body.next_before}` : "has_more false: no older entry");
+  return lines.join("\n");
+}
+
+/** POST /v1/spaces/{name}/funding/addresses as text: the address, then the notice. */
+export function renderDepositAddress(header: string, body: Record<string, any>): string {
+  const a = body.address ?? {};
+  return [
+    header,
+    `SPACE ${spaceName(body.space)}: ${body.created ? "deposit address made now" : "deposit address made before"}, minimums as of ${body.minimums_as_of}`,
+    addressLine(a).trimStart(),
     String(body.notice ?? ""),
   ].join("\n");
 }

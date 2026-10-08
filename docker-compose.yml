@@ -128,6 +128,15 @@ services:
       # How long the service waits at start for the database and its schema: see .env.example.
       DB_WAIT_SECONDS: ${DB_WAIT_SECONDS:-300}
       CHALLENGE_KEY_FILE: /run/secrets/challenge_key
+      # Deposits: see .env.example. scripts/first-run.sh writes the secret.
+      FUNDING_CALLBACK_SECRET_FILE: /run/secrets/funding_callback_secret
+      FUNDING_CALLBACK_BASE: ${FUNDING_CALLBACK_BASE:-}
+      FUNDING_WALLET_EVM: ${FUNDING_WALLET_EVM:-}
+      FUNDING_WALLET_BTC: ${FUNDING_WALLET_BTC:-}
+      FUNDING_WALLET_SOLANA: ${FUNDING_WALLET_SOLANA:-}
+      FUNDING_WALLET_TRON: ${FUNDING_WALLET_TRON:-}
+      CRYPTAPI_BASE: ${CRYPTAPI_BASE:-https://api.cryptapi.io}
+      CRYPTAPI_PUBKEY_FILE: ${CRYPTAPI_PUBKEY_FILE:-}
       API_HOST: ${API_HOST:?set API_HOST}
       PUBLIC_ORIGIN: https://${API_HOST}
       # Set by the restore runbook, never by hand: every write answers 503 with
@@ -180,6 +189,8 @@ services:
       PROPOSALS_FIRST_DAY: ${PROPOSALS_FIRST_DAY:-5}
       FILE_BYTES_PER_DAY: ${FILE_BYTES_PER_DAY:-8388608}
       FILE_BYTES_FIRST_DAY: ${FILE_BYTES_FIRST_DAY:-2097152}
+      FUNDING_ADDRESSES_PER_KEY_DAY: ${FUNDING_ADDRESSES_PER_KEY_DAY:-20}
+      FUNDING_ADDRESSES_PER_DAY: ${FUNDING_ADDRESSES_PER_DAY:-2000}
       OPEN_POSTS_PER_DAY: ${OPEN_POSTS_PER_DAY:-60}
       OPEN_POSTS_FIRST_DAY: ${OPEN_POSTS_FIRST_DAY:-10}
       SEEKS_PER_CALLER: ${SEEKS_PER_CALLER:-1}
@@ -228,7 +239,7 @@ services:
       CHECKPOINT_EVERY_SECONDS: ${CHECKPOINT_EVERY_SECONDS:-60}
       # How often the service empties the search index's pending list: see .env.example.
       SEARCH_INDEX_UPKEEP_SECONDS: ${SEARCH_INDEX_UPKEEP_SECONDS:-1}
-    secrets: [api_db_password, challenge_key, service_signing_key, service_certificate]
+    secrets: [api_db_password, challenge_key, funding_callback_secret, service_signing_key, service_certificate]
     volumes:
       # One JSON line per request that carries evidence, including every stream
       # head a write advanced. On the slow disk, pruned at REQUEST_LOG_DAYS by the
@@ -354,6 +365,8 @@ secrets:
   migrate_db_password: { file: ./secrets/migrate_db_password }
   api_db_password: { file: ./secrets/api_db_password }
   challenge_key: { file: ./secrets/challenge_key }
+  # The deposit callback URL's mac is made with it: 48 bytes from scripts/first-run.sh.
+  funding_callback_secret: { file: ./secrets/funding_callback_secret }
   # The online signing key and its certificate, from scripts/service-key.ts online,
   # run on a machine that is not this server, with the root key that never comes here.
   service_signing_key: { file: ./secrets/service_signing_key.pem }

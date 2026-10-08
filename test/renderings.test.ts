@@ -13,6 +13,8 @@ import {
   renderFinding,
   renderFindings,
   renderFunding,
+  renderFundingHistory,
+  renderDepositAddress,
   renderMailbox,
   renderMembers,
   renderPeer,
@@ -58,6 +60,117 @@ describe("the connector's text says what its JSON says", () => {
     assert.ok(under.includes("last day 2026-10-07: not over the allowance, billable bytes null, would be billed 0 micro-dollars"), under);
     const before = renderFunding("reading as anonymous", { ...body, last_day: null });
     assert.ok(before.includes("last day: none finished yet"), before);
+  });
+
+  const ADDRESS = {
+    coin: "base/usdc", symbol: "USDC", network: "Base", family: "evm", address: `0x${"ab".repeat(20)}`, minimum: "3",
+    cheap: true, stable: true, current: true, created_at: "2026-10-08T10:00:00.000Z",
+  };
+  const OFFER = {
+    deposits_open: true,
+    addresses: [ADDRESS, { ...ADDRESS, coin: "btc", symbol: "BTC", network: "Bitcoin", family: "btc", address: "bc1q" + "y".repeat(38), minimum: "0.0001", cheap: false, current: false }],
+    coins: [
+      { coin: "base/usdc", symbol: "USDC", name: "USDC", network: "Base", family: "evm", minimum: "3", cheap: true, stable: true },
+      { coin: "base/eth", symbol: "ETH", name: "Ethereum", network: "Base", family: "evm", minimum: "0.0003", cheap: false, stable: false },
+      { coin: "sol/sol", symbol: "SOL", name: "Solana", network: "Solana", family: "solana", minimum: "0.01", cheap: true, stable: false },
+    ],
+    minimums_as_of: "2026-10-08",
+    make_address: "POST /v1/spaces/fund-me/funding/addresses",
+  };
+
+  test("a SPACE's funding says its addresses, the coins a network a line, its balance and every deposit list", () => {
+    const text = renderFunding("reading as anonymous", {
+      space: "fund-me", visibility: "public", billing: "not_started", ...OFFER,
+      bytes: { posts: 100, files: 0, total: 100 }, allowance_bytes: 25000000, over_bytes: 0,
+      rate: { micro_usd_per_gb_month: 5000000, days_per_month: 30, bytes_per_gb: 1000000000 },
+      would_be_billed_per_day_micro_usd: 4, last_day: null, balance_micro_usd: 9900000, days_left: 2475000,
+      deposits: {
+        pending: [{ coin: "base/usdc", txid_in: "0xpending", value_coin: null, seen_at: "2026-10-08T11:00:00.000Z" }],
+        held: [{ coin: "base_xyz", txid_in: "0xheld", value_forwarded_coin: "7", usd_micro: null, reason: "unknown_coin", seen_at: "2026-10-08T12:00:00.000Z" }],
+        rejected: [{ coin: "base/usdc", txid_in: "0xrejected", reason: "address_out_mismatch", seen_at: "2026-10-08T13:00:00.000Z" }],
+        pending_count: 1, held_count: 1, rejected_count: 1, credited_count: 3,
+      },
+      history: "GET /v1/spaces/fund-me/funding/history",
+      notice: "Billing has not started: nothing is taken from the balance.",
+    });
+    for (const part of [
+      "deposits: open on this server", `base/usdc on Base: ${ADDRESS.address}, minimum 3; cheap`,
+      `btc on Bitcoin: bc1q${"y".repeat(38)}, minimum 0.0001; older wallet, still credited`,
+      "coins offered, minimums as of 2026-10-08, by network:", "  Base: base/usdc min 3 (cheap), base/eth min 0.0003", "  Solana (cheap): sol/sol min 0.01",
+      "make an address: POST /v1/spaces/fund-me/funding/addresses with coin, a ticker from coins",
+      "balance: 9900000 micro-dollars; days left at the bill shown: 2475000",
+      "deposits: 1 incoming, not yet credited; 1 held; 1 rejected; 3 credited",
+      "incoming: base/usdc, transaction 0xpending, value not sent yet, seen 2026-10-08T11:00:00.000Z",
+      "held: base_xyz, transaction 0xheld, forwarded 7, no US dollar value, reason unknown_coin",
+      "rejected: base/usdc, transaction 0xrejected, reason address_out_mismatch",
+      "credit entries: GET /v1/spaces/fund-me/funding/history", "Billing has not started: nothing is taken from the balance.",
+    ]) assert.ok(text.includes(part), `${part} is missing from:\n${text}`);
+  });
+
+  test("the addresses alone say what is shown to members only, and no figure", () => {
+    const text = renderFunding("reading as anonymous", {
+      space: "fund-me", visibility: "private", billing: "not_started", ...OFFER, addresses: [], coins: [], deposits_open: false,
+      members_only: ["bytes", "balance", "deposits", "history"], notice: "the notice",
+    });
+    for (const part of ["deposits: not open on this server", "deposit addresses: none made yet", "coins offered: none on this server now", "shown to members only: bytes, balance, deposits, history", "the notice"]) {
+      assert.ok(text.includes(part), `${part} is missing from:\n${text}`);
+    }
+    assert.doesNotMatch(text, /bytes:|balance:|would be billed/);
+  });
+
+  test("a replaced SPACE says where its deposits are credited; without coins it says how to ask for them", () => {
+    const { coins: _coins, minimums_as_of: _asOf, ...noCoins } = OFFER;
+    const text = renderFunding("reading as anonymous", {
+      space: "fund-me", visibility: "private", billing: "not_started", ...noCoins,
+      credited_to: { space_id: "01a11b74-2d39-7a92-ad58-973f62fdbb52", name: "fund-me-2" },
+      members_only: ["bytes", "balance", "deposits", "history"], notice: "the notice",
+    });
+    for (const part of [
+      "this SPACE was replaced: deposits to these addresses credit \"fund-me-2\"",
+      "coins offered: ask again with coins true to list them, with their minimums",
+    ]) assert.ok(text.includes(part), `${part} is missing from:\n${text}`);
+    assert.doesNotMatch(text, /min 3|coins offered, minimums as of/);
+    const plain = renderFunding("reading as anonymous", { space: "fund-me", visibility: "private", billing: "not_started", ...OFFER, credited_to: null, members_only: [], notice: "n" });
+    assert.doesNotMatch(plain, /was replaced/);
+  });
+
+  test("a credit entry made by hand, with no forwarded value, says so", () => {
+    const text = renderFundingHistory("h", {
+      space: "fund-me", has_more: false, next_before: null,
+      entries: [{ entry_id: 3, kind: "deposit", amount_micro_usd: 1000000, balance_after_micro_usd: 1000000, at: "2026-10-08T10:00:00.000Z",
+        deposit: { coin: "base/usdc", network: "Base", txid_in: "0xbyhand", value_forwarded_coin: null, address: ADDRESS.address } }],
+    });
+    assert.ok(text.includes("forwarded not sent, transaction 0xbyhand"), text);
+  });
+
+  test("a SPACE's credit entries say each entry, its deposit, and the cursor", () => {
+    const body = {
+      space: "fund-me",
+      entries: [
+        { entry_id: 12, kind: "deposit", amount_micro_usd: 9900000, balance_after_micro_usd: 9900000, at: "2026-10-08T10:00:00.000Z",
+          deposit: { coin: "base/usdc", network: "Base", txid_in: "0xpaid", value_forwarded_coin: "9.9", address: ADDRESS.address } },
+        { entry_id: 7, kind: "adjustment", amount_micro_usd: 0, balance_after_micro_usd: 0, at: "2026-10-07T10:00:00.000Z", deposit: null },
+      ],
+      has_more: true, next_before: 7,
+    };
+    const text = renderFundingHistory("reading as anonymous", body);
+    for (const part of [
+      "2 credit entries, newest first, in micro-dollars",
+      `12 deposit 9900000, balance after 9900000, at 2026-10-08T10:00:00.000Z; base/usdc on Base, forwarded 9.9, transaction 0xpaid, to ${ADDRESS.address}`,
+      "7 adjustment 0, balance after 0, at 2026-10-07T10:00:00.000Z",
+      "has_more true: ask again with before 7",
+    ]) assert.ok(text.includes(part), `${part} is missing from:\n${text}`);
+    assert.ok(renderFundingHistory("h", { ...body, has_more: false, next_before: null }).includes("has_more false: no older entry"));
+  });
+
+  test("a deposit address says the address, then the notice", () => {
+    const text = renderDepositAddress("reading as you", { space: "fund-me", created: false, address: ADDRESS, minimums_as_of: "2026-10-08", notice: "Send only this coin on this network." });
+    assert.deepEqual(text.split("\n"), [
+      "reading as you",
+      'SPACE "fund-me": deposit address made before, minimums as of 2026-10-08',
+      `base/usdc on Base: ${ADDRESS.address}, minimum 3; cheap`,
+      "Send only this coin on this network.",
+    ]);
   });
 
   test("an oracle space in a list says only that it is one, never a zero it was not given", () => {

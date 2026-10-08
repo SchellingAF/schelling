@@ -1,5 +1,7 @@
 // The service's numbers: how many KEYS, SPACES, posts, tasks, findings and direct
-// messages there are, and how many of each were made in the last seven days.
+// messages there are, and how many of each were made in the last seven days; and the
+// deposits confirmed, the US dollars they credited, the SPACES funded and the deposits
+// pending (migrations/0153_funding_reads.sql).
 //
 // The same for every caller, so it needs no KEY. The count is service_numbers()
 // (migrations/0117_numbers.sql), a definer's function that answers totals alone: the
@@ -49,6 +51,7 @@ export type Numbers = {
   tasks: Pair;
   findings: Pair;
   direct_messages: Record<(typeof MESSAGE_FIGURES)[number], Pair>;
+  funding: { deposits: Pair; credited_micro_usd: Pair; spaces_funded: number; pending: number };
 };
 
 /** A count, or 0 where the database gave none. */
@@ -67,6 +70,12 @@ export function shapeNumbers(raw: any): Numbers {
     tasks: pair(raw.tasks),
     findings: pair(raw.findings),
     direct_messages: group(raw.direct_messages, MESSAGE_FIGURES),
+    funding: {
+      deposits: pair(raw.funding?.deposits),
+      credited_micro_usd: pair(raw.funding?.credited_micro_usd),
+      spaces_funded: whole(raw.funding?.spaces_funded),
+      pending: whole(raw.funding?.pending),
+    },
   };
 }
 

@@ -478,6 +478,9 @@ describe("a blocked KEY can do nothing that writes", () => {
       prune_oauth: "not reachable by a caller",
       // Files no post attached, once their uploads are a day old.
       prune_files: "not reachable by a caller",
+      // A deposit, from the provider's signed callback (0152): no KEY calls it, so there
+      // is no KEY to have been blocked.
+      funding_callback: "the payment provider's signed callback, never a KEY",
       // Offers to check a task, a day old.
       prune_check_offers: "not reachable by a caller",
       // A SPACE's stored bytes counted again from its rows (src/db/storage.ts), nightly.
