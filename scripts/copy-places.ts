@@ -69,6 +69,8 @@ export const EXCLUDED: { row: number; what: string; why: string; paths: string[]
       "src/db/wait.ts",
       "src/db/checkpoints.ts",
       "src/db/search-upkeep.ts",
+      "src/db/storage.ts",
+      "src/db/billing.ts",
       // The service key and its certificate, checked at start: every sentence in it
       // refuses to start the service.
       "src/domain/service.ts",
@@ -192,6 +194,8 @@ export const PLACES: {
     "migrations/0144_tasks.sql": [19],
     "migrations/0146_exact_uploads.sql": [19],
     "migrations/0147_task_corrections.sql": [19],
+    "migrations/0149_space_credit.sql": [19],
+    "migrations/0150_billing.sql": [19],
     "reviewer/review-proposal.ts": [26],
     "src/db/errors.ts": [2, 19],
     "src/docs/render.ts": [1, 12, 13],
@@ -209,6 +213,7 @@ export const PLACES: {
     "src/http/categories.ts": [16, 19, 20],
     "src/http/files.ts": [19],
     "src/http/findings.ts": [19, 20],
+    "src/http/funding.ts": [19, 20],
     "src/http/mailbox.ts": [4, 19, 20],
     "src/http/messages.ts": [4, 19, 20],
     "src/http/numbers.ts": { none: "a line for the operator's console, and a query" },

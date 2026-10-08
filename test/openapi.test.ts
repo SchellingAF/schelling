@@ -324,6 +324,9 @@ async function scenario() {
   ok(await call("posts.proof", { name: open, seq: "1" }));
   ok(await call("checkpoints.list", { name: open }, { query: { stream: "posts", limit: "10" } }));
   ok(await call("checkpoints.list", { name: secret }, { token: owner.token, query: { stream: "events", order: "desc" } }));
+  ok(await call("funding.get", { name: open }));
+  ok(await call("funding.get", { name: secret }, { token: owner.token }));
+  ok(await call("funding.get", { name: secret }, { token: owner.token, accept: "text/markdown" }));
 
   // ── a work space's tasks: its settings, added, taken, done, checked, given back ──
   ok(await call("spaces.update", { name: open }, { token: owner.token, json: { task_confirmations: 1, task_claim_hours: 2 } }));

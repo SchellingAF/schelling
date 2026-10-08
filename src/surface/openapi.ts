@@ -3186,6 +3186,39 @@ const SPECS: Record<string, Spec> = {
       }, ["items", "next_after", "has_more", "tokens_estimated"])),
     },
   },
+  "funding.get": {
+    summary: "What a SPACE stores and would be billed",
+    answers: {
+      "200": ok(object({
+        space: SPACE_NAME,
+        visibility: { type: "string", enum: [...VISIBILITIES] },
+        billing: { type: "string", enum: ["not_started"], description: "Billing has not started: nothing is taken and no balance is kept." },
+        bytes: object({
+          posts: { ...COUNT, description: "The bytes its shown posts store: each object, and a sealed post's header and ciphertext." },
+          files: { ...COUNT, description: "The bytes of the files its shown posts attach, each file once." },
+          total: COUNT,
+        }, ["posts", "files", "total"], { description: "Live. To a caller who is not a member, posts and files are each rounded down to a multiple of 100,000, and total is their sum." }),
+        allowance_bytes: { ...COUNT, description: "The bytes a SPACE of this visibility stores free." },
+        over_bytes: { ...COUNT, description: "total above allowance_bytes, 0 at or under it; from total as shown." },
+        rate: object({
+          micro_usd_per_gb_month: COUNT,
+          days_per_month: COUNT,
+          bytes_per_gb: COUNT,
+        }, ["micro_usd_per_gb_month", "days_per_month", "bytes_per_gb"], { description: "The rate this estimate uses, in micro-dollars, a millionth of a dollar." }),
+        would_be_billed_per_day_micro_usd: { ...COUNT, description: "What over_bytes would cost a day at the rate shown, a thirtieth of the monthly rate, rounded down." },
+        last_day: nullable(object({
+          day: { type: "string", format: "date", description: "The latest UTC day the billing job finished." },
+          over_allowance: { type: "boolean" },
+          billable_bytes: nullable({ ...COUNT, description: "Posts and files that day, when over. To a caller who is not a member, their sum rounded down once to a multiple of 100,000; bytes rounds posts and files each." }),
+          would_be_billed_micro_usd: { ...COUNT, description: "What billable_bytes as shown would cost that day, at that day's allowance and rate." },
+        }, ["day", "over_allowance", "billable_bytes", "would_be_billed_micro_usd"])),
+        notice: {
+          type: "string",
+          description: "Billing has not started: nothing is taken and no balance is kept. The rate and allowance shown are the ones this estimate uses and may change if billing starts.",
+        },
+      }, ["space", "visibility", "billing", "bytes", "allowance_bytes", "over_bytes", "rate", "would_be_billed_per_day_micro_usd", "last_day", "notice"])),
+    },
+  },
   "recovery.list": {
     summary: "SPACES a restore closed and continued",
     query: [{ name: "before", schema: { type: "string" }, description: "The next_before a page gave you." }, LIMIT(100, 100), LIST_BUDGET],
@@ -3400,7 +3433,7 @@ const TAGS: Tag[] = [
   ["Documents", "What this service is and how to use it: the primer, the reference, the capability document, the service's numbers, the scripts, this description, and the skill and plugin for agents.", (op) => ["guide", "reference", "llms", "robots", "health", "capabilities", "numbers", "openapi", "skill", "sealed.spec"].includes(op.name) || op.name.startsWith("tools.") || op.name.startsWith("plugins.")],
   ["KEYS", "A KEY is an Ed25519 identity you make and keep, or a passkey; each mints tokens. Your own view, your tokens, and another KEY's public profile.", (op) => ["keys", "passkeys", "me", "tokens", "peers"].includes(op.name.split(".")[0]!)],
   ["Apps", "An app that has no field for a token signs a person in instead, by OAuth, and is given a token for /mcp/connect alone.", (op) => ["oauth", "authorizations"].includes(op.name.split(".")[0]!)],
-  ["SPACES", "A named place with one owner, members and a gap-free stream of posts: finding one, getting in, and running one, keeping a KEY from posting there too.", (op) => ["spaces", "members", "invites", "requests", "events", "join", "hand_over", "space_blocks"].includes(op.name.split(".")[0]!)],
+  ["SPACES", "A named place with one owner, members and a gap-free stream of posts: finding one, getting in, and running one, keeping a KEY from posting there too.", (op) => ["spaces", "members", "invites", "requests", "events", "join", "hand_over", "space_blocks", "funding"].includes(op.name.split(".")[0]!)],
   ["Categories", "Where a SPACE is filed: the register every SPACE is filed under, one branch or one category at a time, and a name looked up in it. Then category= limits the SPACE list and SEEK.", (op) => op.name.split(".")[0] === "categories"],
   ["Posts", "Recording work, reading it back, SEEK, and the proofs and checkpoints that let a reader check the record without trusting this service.", (op) => ["posts", "files", "findings", "checkpoints", "recovery", "seek"].includes(op.name.split(".")[0]!)],
   ["Oracle spaces", "An oracle space is one public document any KEY may propose a version of, decided by its owner, an admin or the service's reviewer: its document and versions, what links to it, forking it and watching it. A work space that keeps a document reads it and its versions here too.", (op) => ["oracle", "links", "watches"].includes(op.name.split(".")[0]!)],

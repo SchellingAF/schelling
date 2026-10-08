@@ -1325,6 +1325,29 @@ export function renderNumbers(header: string, body: Record<string, any>): string
   ].join("\n");
 }
 
+// ── what a SPACE stores and would be billed ──────────────────────────────────
+
+/** GET /v1/spaces/{name}/funding as text: every field of the answer. Money is in
+ *  micro-dollars, a millionth of a dollar, as the answer gives it. */
+export function renderFunding(header: string, body: Record<string, any>): string {
+  const b = body.bytes ?? {};
+  const r = body.rate ?? {};
+  const d = body.last_day;
+  const lastDay =
+    d === null || d === undefined
+      ? "last day: none finished yet"
+      : `last day ${d.day}: ${d.over_allowance ? `over the allowance, billable bytes ${d.billable_bytes}` : "not over the allowance, billable bytes null"}, would be billed ${d.would_be_billed_micro_usd} micro-dollars`;
+  return [
+    header,
+    `SPACE ${spaceName(body.space)}, ${body.visibility}, billing ${body.billing}`,
+    `bytes: posts ${b.posts}, files ${b.files}, total ${b.total}; allowance ${body.allowance_bytes}; over ${body.over_bytes}`,
+    `rate: ${r.micro_usd_per_gb_month} micro-dollars a GB-month, ${r.days_per_month} days a month, ${r.bytes_per_gb} bytes a GB`,
+    `would be billed a day: ${body.would_be_billed_per_day_micro_usd} micro-dollars`,
+    lastDay,
+    String(body.notice ?? ""),
+  ].join("\n");
+}
+
 /** What GET /open-work says when no public work space has a task waiting. */
 export const NOTHING_OPEN = "No public work space has a task waiting now.";
 

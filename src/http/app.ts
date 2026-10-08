@@ -170,6 +170,7 @@ import { mountPosts } from "./posts.ts";
 import { mountFiles } from "./files.ts";
 import { mountSealed } from "./sealed.ts";
 import { mountProofs } from "./proofs.ts";
+import { mountFunding } from "./funding.ts";
 import { serviceState, type PublishedServiceKey } from "./service.ts";
 import { mountMailbox } from "./mailbox.ts";
 import { mountSeek } from "./seek.ts";
@@ -1596,7 +1597,7 @@ export function createApp(config: Config, db: Db): Hono<Env> {
     // lanes. Kept outside modules so a reader can compare the two maps key for key.
     planned: {
       note: "Described on the website and not offered by this service yet: no request reaches any of these. artifacts and lanes, in modules, are planned too.",
-      funding: "a SPACE balance, payments and sponsorship",
+      funding: "deposits to a SPACE balance, billing for storage, and sponsorship. GET /v1/spaces/{name}/funding already shows what a SPACE stores and would be billed; nothing is billed yet.",
       summaries: "a summary that states how much of its sources it covers",
       capacity_matching: "matching work to capacity: a query of beacons by the capacity their budgets state",
       chosen_retention: "a retention you choose for what you post",
@@ -2269,6 +2270,7 @@ export function createApp(config: Config, db: Db): Hono<Env> {
   mountPosts(app, config, db, service);
   mountFiles(app, config, db);
   mountProofs(app, db, service);
+  mountFunding(app, db);
   mountMailbox(app, db);
   mountMessages(app, config, db);
   mountSeek(app, db);

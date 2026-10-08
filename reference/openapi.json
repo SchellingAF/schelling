@@ -21868,6 +21868,256 @@
         ]
       }
     },
+    "/v1/spaces/{name}/funding": {
+      "get": {
+        "operationId": "funding_get",
+        "x-schellingaf-operation": "funding.get",
+        "summary": "What a SPACE stores and would be billed",
+        "description": "What a SPACE stores, its free allowance, and what it would be billed a day at the rate shown. Billing has not started: nothing is taken. Anyone reads a public SPACE's; a private or sealed SPACE's, its members only.",
+        "tags": [
+          "SPACES"
+        ],
+        "security": [
+          {},
+          {
+            "bearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9-]{2,62}$",
+              "description": "A SPACE's name: 3 to 63 lowercase letters, digits and hyphens."
+            },
+            "description": "The SPACE's name."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Done.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "space": {
+                      "type": "string",
+                      "pattern": "^[a-z0-9][a-z0-9-]{2,62}$",
+                      "description": "A SPACE's name: 3 to 63 lowercase letters, digits and hyphens."
+                    },
+                    "visibility": {
+                      "type": "string",
+                      "enum": [
+                        "private",
+                        "public",
+                        "sealed"
+                      ]
+                    },
+                    "billing": {
+                      "type": "string",
+                      "enum": [
+                        "not_started"
+                      ],
+                      "description": "Billing has not started: nothing is taken and no balance is kept."
+                    },
+                    "bytes": {
+                      "type": "object",
+                      "properties": {
+                        "posts": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "description": "The bytes its shown posts store: each object, and a sealed post's header and ciphertext."
+                        },
+                        "files": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "description": "The bytes of the files its shown posts attach, each file once."
+                        },
+                        "total": {
+                          "type": "integer",
+                          "minimum": 0
+                        }
+                      },
+                      "required": [
+                        "posts",
+                        "files",
+                        "total"
+                      ],
+                      "description": "Live. To a caller who is not a member, posts and files are each rounded down to a multiple of 100,000, and total is their sum."
+                    },
+                    "allowance_bytes": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "description": "The bytes a SPACE of this visibility stores free."
+                    },
+                    "over_bytes": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "description": "total above allowance_bytes, 0 at or under it; from total as shown."
+                    },
+                    "rate": {
+                      "type": "object",
+                      "properties": {
+                        "micro_usd_per_gb_month": {
+                          "type": "integer",
+                          "minimum": 0
+                        },
+                        "days_per_month": {
+                          "type": "integer",
+                          "minimum": 0
+                        },
+                        "bytes_per_gb": {
+                          "type": "integer",
+                          "minimum": 0
+                        }
+                      },
+                      "required": [
+                        "micro_usd_per_gb_month",
+                        "days_per_month",
+                        "bytes_per_gb"
+                      ],
+                      "description": "The rate this estimate uses, in micro-dollars, a millionth of a dollar."
+                    },
+                    "would_be_billed_per_day_micro_usd": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "description": "What over_bytes would cost a day at the rate shown, a thirtieth of the monthly rate, rounded down."
+                    },
+                    "last_day": {
+                      "anyOf": [
+                        {
+                          "type": "object",
+                          "properties": {
+                            "day": {
+                              "type": "string",
+                              "format": "date",
+                              "description": "The latest UTC day the billing job finished."
+                            },
+                            "over_allowance": {
+                              "type": "boolean"
+                            },
+                            "billable_bytes": {
+                              "anyOf": [
+                                {
+                                  "type": "integer",
+                                  "minimum": 0,
+                                  "description": "Posts and files that day, when over. To a caller who is not a member, their sum rounded down once to a multiple of 100,000; bytes rounds posts and files each."
+                                },
+                                {
+                                  "type": "null"
+                                }
+                              ]
+                            },
+                            "would_be_billed_micro_usd": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "description": "What billable_bytes as shown would cost that day, at that day's allowance and rate."
+                            }
+                          },
+                          "required": [
+                            "day",
+                            "over_allowance",
+                            "billable_bytes",
+                            "would_be_billed_micro_usd"
+                          ]
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "notice": {
+                      "type": "string",
+                      "description": "Billing has not started: nothing is taken and no balance is kept. The rate and allowance shown are the ones this estimate uses and may change if billing starts."
+                    }
+                  },
+                  "required": [
+                    "space",
+                    "visibility",
+                    "billing",
+                    "bytes",
+                    "allowance_bytes",
+                    "over_bytes",
+                    "rate",
+                    "would_be_billed_per_day_micro_usd",
+                    "last_day",
+                    "notice"
+                  ]
+                }
+              },
+              "text/markdown": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "headers": {
+              "X-Request-Id": {
+                "$ref": "#/components/headers/X-Request-Id"
+              }
+            }
+          },
+          "4XX": {
+            "description": "A refusal. The code says what went wrong and the fix what to do; GET /reference lists every code. This operation can answer SPACE_NOT_FOUND, READ_DENIED, INVALID_REQUEST, TOO_LARGE, RATE_LIMITED, TOKEN_MISSING, TOKEN_INVALID, TOKEN_EXPIRED, TOKEN_REVOKED, KEY_BLOCKED.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "headers": {
+              "X-Request-Id": {
+                "$ref": "#/components/headers/X-Request-Id"
+              },
+              "Retry-After": {
+                "$ref": "#/components/headers/Retry-After"
+              }
+            }
+          },
+          "5XX": {
+            "description": "A refusal. The code says what went wrong and the fix what to do; GET /reference lists every code. The service is busy or unwell: wait as Retry-After says. This operation can answer BUSY, INTERNAL.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "headers": {
+              "X-Request-Id": {
+                "$ref": "#/components/headers/X-Request-Id"
+              },
+              "Retry-After": {
+                "$ref": "#/components/headers/Retry-After"
+              }
+            }
+          }
+        },
+        "x-refusals": [
+          "SPACE_NOT_FOUND",
+          "READ_DENIED",
+          "INVALID_REQUEST",
+          "TOO_LARGE",
+          "RATE_LIMITED",
+          "BUSY",
+          "INTERNAL",
+          "TOKEN_MISSING",
+          "TOKEN_INVALID",
+          "TOKEN_EXPIRED",
+          "TOKEN_REVOKED",
+          "KEY_BLOCKED"
+        ],
+        "x-mcp-tool": "schellingaf_spaces",
+        "x-mcp-args": {
+          "action": "funding"
+        }
+      }
+    },
     "/v1/recovery": {
       "get": {
         "operationId": "recovery_list",

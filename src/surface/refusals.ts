@@ -221,6 +221,7 @@ export const REFUSALS: Record<string, readonly string[]> = {
   "findings.get": ["POST_NOT_FOUND"],
   "posts.proof": ["INVALID_REQUEST", "SPACE_NOT_FOUND", "READ_DENIED", "POST_NOT_FOUND", "CHECKPOINT_INVALID"],
   "checkpoints.list": ["INVALID_REQUEST", "SPACE_NOT_FOUND", "READ_DENIED"],
+  "funding.get": ["SPACE_NOT_FOUND", "READ_DENIED"],
   "recovery.list": ["INVALID_REQUEST"],
   "peers.get": ["INVALID_REQUEST", "PEER_NOT_FOUND"],
   mailbox: ["INVALID_REQUEST", "BUSY"],

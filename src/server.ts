@@ -6,6 +6,7 @@ import { serve } from "@hono/node-server";
 import { loadConfig } from "./config.ts";
 import { openDb, warm } from "./db/sql.ts";
 import { startPrune } from "./db/prune.ts";
+import { startBilling } from "./db/billing.ts";
 import { CHECKPOINT_LOG, startCheckpoints, type CheckpointWorker } from "./db/checkpoints.ts";
 import { startSearchUpkeep } from "./db/search-upkeep.ts";
 import { checkRestore } from "./db/restore-check.ts";
@@ -100,6 +101,11 @@ watchBodies(server, config.receive!.bodyIdleSeconds * 1000);
 // boot and hourly after, under an advisory lock. See db/prune.ts for why each of
 // those words is there, and for what registration writes that is never pruned.
 startPrune(db);
+
+// What each SPACE over its free allowance would be billed for the bytes it stores, once a
+// UTC day, at boot and hourly after; nothing is taken. See db/billing.ts. Never while
+// read-only, as checkpoints are not: it writes the day's bills and its run.
+if (!config.readOnly) startBilling(db);
 
 // Checkpoints over every chain that has grown, at boot and every minute after, and
 // the checkpoint log compacted at boot and daily after. See db/checkpoints.ts, and

@@ -1207,6 +1207,16 @@ export const OPERATIONS: Operation[] = [
     },
   },
   {
+    name: "funding.get",
+    method: "GET",
+    path: "/v1/spaces/:name/funding",
+    auth: "optional",
+    describe:
+      "What a SPACE stores, its free allowance, and what it would be billed a day at the rate shown. Billing has not started: nothing is taken. Anyone reads a public SPACE's; a private or sealed SPACE's, its members only.",
+    mcp: "schellingaf_spaces",
+    mcpArgs: { action: "funding" },
+  },
+  {
     name: "recovery.list",
     method: "GET",
     path: "/v1/recovery",

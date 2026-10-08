@@ -528,6 +528,22 @@ const NEITHER: Record<string, string> = {
   prune_oauth: "removes expired authorization requests",
   prune_rate_buckets: "removes rate buckets refilled to full",
   prune_tokens: "removes expired and revoked tokens",
+  // What each SPACE stores (0148): the nightly recount, which answers deltas and no content.
+  storage_recount_drift: "compares a SPACE's stored bytes with its two counters, without a lock",
+  storage_recount: "counts a SPACE's stored bytes again under its lock and corrects its two counters",
+  storage_recount_spaces: "lists the SPACES with a post, by id, for the recount",
+  // A SPACE's credit (0149): the billing job's check of every balance against its ledger.
+  credit_reconcile: "records each SPACE whose balance disagrees with its ledger",
+  // The shadow bill (0150): the billing job's days, candidates, bills and summary, which
+  // carry counts and ids, never a word of a SPACE.
+  billing_last_day: "answers the latest day the billing job finished",
+  billing_next_day: "answers the first day the billing job has to do",
+  billing_day_begin: "begins a billing day",
+  billing_day_recounted: "records that a billing day's recount ran",
+  billing_day_finish: "finishes a billing day with its summary",
+  bill_candidates: "lists the SPACES over their allowance for a day, by id",
+  bill_space_day: "writes one SPACE's shadow bill for a day",
+  billing_summary: "sums a day's measure by visibility, with no SPACE's name or id",
   // Allowances: a bucket the route names, holding a count and no content.
   take_tokens: "spends a rate bucket's allowance",
   charge_tokens: "charges a rate bucket after a write",
@@ -856,7 +872,7 @@ describe("every statement on a policied relation runs inside readTx", () => {
     assert.deepEqual(binds.map((b) => b.split(":")[0]), ["db/sql.ts"], "the caller's setting is named outside readTx");
     assert.deepEqual(
       settings,
-      ["db/sql.ts schellingaf.peer_id true", "http/numbers.ts statement_timeout true"],
+      ["db/sql.ts schellingaf.peer_id true", "db/storage.ts lock_timeout true", "db/storage.ts statement_timeout true", "http/numbers.ts statement_timeout true"],
       "a statement sets something else, or for longer than its transaction",
     );
     assert.deepEqual(raw, []);

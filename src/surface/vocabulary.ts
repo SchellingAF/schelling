@@ -301,6 +301,38 @@ export const ATTACHMENT_LIMITS = {
   grantMinutes: 15,
 } as const;
 
+/** Storage billing. Decimal units: a MB is 10^6 bytes, a GB 10^9. Passed to SQL as parameters,
+ *  never written there, so each number is written once (.claude/rules/limits.md). Each bill
+ *  row stores the rate and allowance it used. Billing has not started: the job records what
+ *  would be due and takes nothing (src/db/billing.ts). */
+export const FUNDING = {
+  /** $5 per GB-month, in micro-dollars. */
+  microUsdPerGbMonth: 5_000_000,
+  /** A day's bill is a thirtieth of the monthly rate. */
+  daysPerMonth: 30,
+  bytesPerGb: 1_000_000_000,
+  /** The bytes a SPACE stores free, by visibility. */
+  allowanceBytes: { public: 25_000_000, private: 10_000_000, sealed: 1_000_000 },
+  /** The sizes the billing day's line counts SPACES above, by visibility: its spaces_over. */
+  spacesOverBytes: [1_000_000, 5_000_000, 10_000_000, 25_000_000, 100_000_000],
+} as const;
+
+/** The shape of FUNDING, which a test passes with other numbers. */
+export type Funding = {
+  microUsdPerGbMonth: number;
+  daysPerMonth: number;
+  bytesPerGb: number;
+  allowanceBytes: { public: number; private: number; sealed: number };
+  spacesOverBytes: readonly number[];
+};
+
+/** A day's bill in micro-dollars, rounded down: the bytes over the allowance at a
+ *  thirtieth of the monthly rate. The same sum bill_space_day() makes (0150). */
+export function dailyMicroUsd(bytes: number, allowance: number, funding: Funding = FUNDING): number {
+  const over = BigInt(Math.max(0, bytes - allowance));
+  return Number((over * BigInt(funding.microUsdPerGbMonth)) / (BigInt(funding.daysPerMonth) * BigInt(funding.bytesPerGb)));
+}
+
 /**
  * A finding's status, as its author sets it and every read shows it: proposed, supported
  * or disputed when it is posted or superseded, and withdrawn once it is retracted, which

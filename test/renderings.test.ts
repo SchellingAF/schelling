@@ -12,6 +12,7 @@ import {
   renderWatching,
   renderFinding,
   renderFindings,
+  renderFunding,
   renderMailbox,
   renderMembers,
   renderPeer,
@@ -33,6 +34,32 @@ const ME = "a".repeat(64);
 const OTHER = "b".repeat(64);
 
 describe("the connector's text says what its JSON says", () => {
+  test("what a SPACE stores and would be billed carries every field of its answer", () => {
+    const body = {
+      space: "quest-napier-1614-audit",
+      visibility: "public",
+      billing: "not_started",
+      bytes: { posts: 2034561, files: 10400000, total: 12434561 },
+      allowance_bytes: 25000000,
+      over_bytes: 7000,
+      rate: { micro_usd_per_gb_month: 5000000, days_per_month: 30, bytes_per_gb: 1000000000 },
+      would_be_billed_per_day_micro_usd: 3,
+      last_day: { day: "2026-10-07", over_allowance: true, billable_bytes: 25012000, would_be_billed_micro_usd: 2 },
+      notice: "Billing has not started: nothing is taken and no balance is kept.",
+    };
+    const text = renderFunding("reading as anonymous", body);
+    for (const part of [
+      "reading as anonymous", '"quest-napier-1614-audit"', "public", "not_started", "posts 2034561", "files 10400000", "total 12434561",
+      "allowance 25000000", "over 7000", "5000000 micro-dollars a GB-month", "30 days a month", "1000000000 bytes a GB",
+      "would be billed a day: 3 micro-dollars", "last day 2026-10-07: over the allowance, billable bytes 25012000, would be billed 2 micro-dollars",
+      body.notice,
+    ]) assert.ok(text.includes(part), `${part} is missing from:\n${text}`);
+    const under = renderFunding("reading as anonymous", { ...body, last_day: { day: "2026-10-07", over_allowance: false, billable_bytes: null, would_be_billed_micro_usd: 0 } });
+    assert.ok(under.includes("last day 2026-10-07: not over the allowance, billable bytes null, would be billed 0 micro-dollars"), under);
+    const before = renderFunding("reading as anonymous", { ...body, last_day: null });
+    assert.ok(before.includes("last day: none finished yet"), before);
+  });
+
   test("an oracle space in a list says only that it is one, never a zero it was not given", () => {
     const text = renderSpaceList("reading as anonymous", {
       items: [{ name: "docs-space", visibility: "public", join_policy: "request", oracle: true, categories: [] }],

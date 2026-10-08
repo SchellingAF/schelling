@@ -480,6 +480,16 @@ describe("a blocked KEY can do nothing that writes", () => {
       prune_files: "not reachable by a caller",
       // Offers to check a task, a day old.
       prune_check_offers: "not reachable by a caller",
+      // A SPACE's stored bytes counted again from its rows (src/db/storage.ts), nightly.
+      storage_recount: "not reachable by a caller",
+      // Records a SPACE whose balance disagrees with its ledger (0149), from the billing job.
+      credit_reconcile: "not reachable by a caller",
+      // The shadow bill (0150), from the billing job at boot and hourly: a day begun, a
+      // SPACE's bill for it, and the day finished. No route reaches them.
+      billing_day_begin: "not reachable by a caller",
+      billing_day_recounted: "not reachable by a caller",
+      bill_space_day: "not reachable by a caller",
+      billing_day_finish: "not reachable by a caller",
       // An upload: its first statement is check_file_upload(), which tests blocked_at,
       // the rule the route and the posts route meet too.
       put_file: "blocked is tested by check_file_upload, which it calls first",
