@@ -160,6 +160,13 @@ else
   done
   check $READY "the restored cluster starts and finishes recovery"
 
+  # The mark the billing dry run asks for (scripts/billing-dry-run.ts, DRILL_MARK). Only a
+  # copy this drill restored carries it, never in --live mode, so the dry run cannot bill
+  # the service's own database.
+  if [ "$READY" = "0" ]; then
+    query "COMMENT ON DATABASE schellingaf IS 'schellingaf restore drill copy'" >/dev/null
+  fi
+
 
 fi
 

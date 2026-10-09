@@ -477,7 +477,8 @@ const POST_RECEIPT_FIELDS: Record<string, Schema> = {
 const FUNDING_OFFER: Record<string, Schema> = {
   space: SPACE_NAME,
   visibility: { type: "string", enum: [...VISIBILITIES] },
-  billing: { type: "string", enum: ["not_started"], description: "Billing has not started: nothing is taken from the balance." },
+  billing: { type: "string", enum: ["not_started", "started", "paused"], description: "not_started until billing_from, started after it, paused while the operator has billing off." },
+  billing_from: { type: "string", format: "date", description: "The first UTC day storage is billed." },
   deposits_open: { type: "boolean", description: "Whether this server makes deposit addresses now." },
   addresses: list(ref("DepositAddress"), { description: "Every deposit address made for this SPACE; empty when none was. Public." }),
   credited_to: nullable(object({ space_id: UUID, name: SPACE_NAME }, ["space_id", "name"], {
@@ -487,7 +488,13 @@ const FUNDING_OFFER: Record<string, Schema> = {
   minimums_as_of: { type: "string", format: "date", description: "Present only with coins=true: the UTC day the minimums were read from the provider." },
   make_address: { type: "string", description: "How to make an address: POST /v1/spaces/{name}/funding/addresses with a coin from coins, which coins=true lists." },
 };
-const FUNDING_OFFER_REQUIRED = ["space", "visibility", "billing", "deposits_open", "addresses", "credited_to", "make_address"];
+const FUNDING_OFFER_REQUIRED = ["space", "visibility", "billing", "billing_from", "deposits_open", "addresses", "credited_to", "make_address"];
+/** The rate billing uses, in micro-dollars. */
+const FUNDING_RATE: Schema = object({
+  micro_usd_per_gb_month: COUNT,
+  days_per_month: COUNT,
+  bytes_per_gb: COUNT,
+}, ["micro_usd_per_gb_month", "days_per_month", "bytes_per_gb"], { description: "The rate billing uses, in micro-dollars, a millionth of a dollar: a day is a thirtieth of the monthly rate." });
 /** A deposit's coin, as the reads give it. */
 const DEPOSIT_COIN: Schema = { type: "string", minLength: 1, maxLength: 64, description: "The coin paid, as base/usdc when the coin table has it, else as the provider named it: 64 characters at most." };
 const DEPOSIT_TXID: Schema = { type: "string", minLength: 1, maxLength: 200, description: "The transaction that paid it, public on its chain: 200 characters at most." };
@@ -569,32 +576,43 @@ const SCHEMAS: Record<string, Schema> = {
   }, ["coin", "symbol", "name", "network", "family", "minimum", "cheap", "stable"], { description: "A coin a SPACE can be funded with on this server now." }),
   FundingAddresses: object({
     ...FUNDING_OFFER,
-    members_only: list({ type: "string", enum: ["bytes", "balance", "deposits", "history"] }, { description: "What this answer leaves out: a private or sealed SPACE shows it to its members only." }),
+    allowance_bytes: { ...COUNT, description: "The bytes a SPACE of this visibility stores free." },
+    rate: FUNDING_RATE,
+    members_only: list({ type: "string", enum: ["bytes", "balance", "deposits", "history", "read_only"] }, { description: "What this answer leaves out: a private or sealed SPACE shows it to its members only." }),
     notice: NOTICE,
-  }, [...FUNDING_OFFER_REQUIRED, "members_only", "notice"], { description: "The addresses alone, to a caller who is not a member of a private or sealed SPACE." }),
+  }, [...FUNDING_OFFER_REQUIRED, "allowance_bytes", "rate", "members_only", "notice"], { description: "The addresses alone, to a caller who is not a member of a private or sealed SPACE." }),
   FundingFull: object({
     ...FUNDING_OFFER,
     bytes: object({
       posts: { ...COUNT, description: "The bytes its shown posts store: each object, and a sealed post's header and ciphertext." },
       files: { ...COUNT, description: "The bytes of the files its shown posts attach, each file once." },
+      tasks: { ...COUNT, description: "The bytes of its tasks' titles and bodies; earlier words of a changed task are not counted." },
       total: COUNT,
-    }, ["posts", "files", "total"], { description: "Live. To a caller who is not a member, posts and files are each rounded down to a multiple of 100,000, and total is their sum." }),
+    }, ["posts", "files", "tasks", "total"], { description: "Live. To a caller who is not a member, posts, files and tasks are each rounded down to a multiple of 100,000, and total is their sum." }),
     allowance_bytes: { ...COUNT, description: "The bytes a SPACE of this visibility stores free." },
     over_bytes: { ...COUNT, description: "total above allowance_bytes, 0 at or under it; from total as shown." },
-    rate: object({
-      micro_usd_per_gb_month: COUNT,
-      days_per_month: COUNT,
-      bytes_per_gb: COUNT,
-    }, ["micro_usd_per_gb_month", "days_per_month", "bytes_per_gb"], { description: "The rate this estimate uses, in micro-dollars, a millionth of a dollar." }),
-    would_be_billed_per_day_micro_usd: { ...COUNT, description: "What over_bytes would cost a day at the rate shown, a thirtieth of the monthly rate, rounded down." },
+    rate: FUNDING_RATE,
+    free_until: nullable({ type: "string", format: "date", description: "The first day this SPACE's own bytes are billed, when it was given free days; null otherwise." }),
+    per_day_micro_usd: { ...COUNT, description: "What a day costs at the present measure, rounded down: this SPACE's bytes over the allowance, 0 on a free day or when it is not billed, and each SPACE it pays for. A replaced SPACE: its own day, which credited_to pays." },
+    pays_for: list(object({
+      space: SPACE_NAME,
+      per_day_micro_usd: COUNT,
+    }, ["space", "per_day_micro_usd"]), { description: "Present only when not empty: each SPACE this one replaced whose day costs more than 0, and that cost, which per_day_micro_usd includes." }),
+    would_be_billed_per_day_micro_usd: { ...COUNT, deprecated: true, description: "Deprecated, removed in 0.10: what over_bytes costs a day at the rate shown, free days and SPACES paid for aside. Read per_day_micro_usd." },
     last_day: nullable(object({
       day: { type: "string", format: "date", description: "The latest UTC day the billing job finished." },
       over_allowance: { type: "boolean" },
-      billable_bytes: nullable({ ...COUNT, description: "Posts and files that day, when over. To a caller who is not a member, their sum rounded down once to a multiple of 100,000; bytes rounds posts and files each." }),
-      would_be_billed_micro_usd: { ...COUNT, description: "What billable_bytes as shown would cost that day, at that day's allowance and rate." },
-    }, ["day", "over_allowance", "billable_bytes", "would_be_billed_micro_usd"])),
-    balance_micro_usd: { ...COUNT, description: "The SPACE's credit, in micro-dollars: what its confirmed deposits credited. Nothing is taken from it while billing has not started." },
-    days_left: nullable({ ...COUNT, description: "The balance over would_be_billed_per_day_micro_usd, rounded down; null while that is 0." }),
+      billable_bytes: nullable({ ...COUNT, description: "Posts, files and tasks that day, when over. To a caller who is not a member, their sum rounded down once to a multiple of 100,000; bytes rounds each." }),
+      billed_micro_usd: { ...COUNT, description: "What billable_bytes as shown cost that day, at that day's allowance and rate." },
+      taken_micro_usd: { ...COUNT, description: "What the bill took from the balance: less than billed when the balance was short, 0 on a free or shadow day. To a caller who is not a member, rounded toward zero to the cent." },
+      free: { type: "boolean", description: "One of this SPACE's free days: the cost recorded, nothing taken." },
+      shadow: { type: "boolean", description: "Recorded before billing_from or while billing was paused: nothing taken." },
+      would_be_billed_micro_usd: { ...COUNT, deprecated: true, description: "Deprecated, removed in 0.10: equals billed_micro_usd." },
+    }, ["day", "over_allowance", "billable_bytes", "billed_micro_usd", "taken_micro_usd", "free", "shadow", "would_be_billed_micro_usd"])),
+    balance_micro_usd: { ...COUNT, description: "The SPACE's credit, in micro-dollars: what its confirmed deposits credited, less its bills, plus or minus its adjustments, such as a balance a recovery moved. Each day's bill is taken from it. To a caller who is not a member, rounded down to the cent." },
+    days_left: nullable({ ...COUNT, description: "The balance over per_day_micro_usd, rounded down; null while that is 0 or the SPACE is replaced." }),
+    read_only: { type: "boolean", description: "true while the credit that pays this SPACE's storage cannot pay a day: a storing write there is refused CREDIT_NEEDED. A replaced SPACE: whether the SPACE that pays for it is." },
+    read_only_since: nullable({ ...TIME, description: "When a bill that could not take its whole cost made it read-only; null when it is not read-only, or is read-only at zero credit with no bill short yet." }),
     deposits: object({
       pending: list(object({
         coin: DEPOSIT_COIN,
@@ -624,8 +642,8 @@ const SCHEMAS: Record<string, Schema> = {
     history: { type: "string", description: "Where its credit entries are: GET /v1/spaces/{name}/funding/history." },
     notice: NOTICE,
   }, [
-    ...FUNDING_OFFER_REQUIRED, "bytes", "allowance_bytes", "over_bytes", "rate", "would_be_billed_per_day_micro_usd", "last_day",
-    "balance_micro_usd", "days_left", "deposits", "history", "notice",
+    ...FUNDING_OFFER_REQUIRED, "bytes", "allowance_bytes", "over_bytes", "rate", "free_until", "per_day_micro_usd",
+    "would_be_billed_per_day_micro_usd", "last_day", "balance_micro_usd", "days_left", "read_only", "read_only_since", "deposits", "history", "notice",
   ], { description: "Everything, to a caller who may read the SPACE." }),
   FileReceipt: object({
     space: SPACE_NAME,
@@ -959,6 +977,18 @@ const SCHEMAS: Record<string, Schema> = {
     }, ["space", "number", "state", "by"], { description: "A task you hold, attempted or confirmed, or one naming your post, and what happened to it: the reason says what." }),
     stage: { ...STAGE_WORDS, description: "A proposal's: the SPACE's stage it sets once it is current." },
     contested: list(ref("FindingCause"), { description: "A contested finding's causes, read now; left out once they cleared." }),
+    funding: object({
+      space: SPACE_NAME,
+      notice: enumOf(["low", "read_only"], "What was crossed: low, 7 days of credit or fewer; read_only, a bill could not be paid in full."),
+      day: { type: "string", format: "date", description: "The UTC day whose bill crossed it." },
+      read_only: { type: "boolean", description: "Whether the SPACE is read-only now." },
+      days_left: nullable({ ...COUNT, description: "The days the balance pays for now; null while a day costs nothing." }),
+      balance_micro_usd: { ...COUNT, description: "The balance now, in micro-dollars." },
+      per_day_micro_usd: { ...COUNT, description: "What a day costs now, in micro-dollars." },
+      add_credit: { type: "string", description: "Where its deposit addresses are: GET /v1/spaces/{name}/funding." },
+    }, ["space", "notice", "day", "read_only", "days_left", "balance_micro_usd", "per_day_micro_usd", "add_credit"], {
+      description: "Reason funding: a SPACE you own or administer whose credit crossed into 7 days or fewer, or into read-only. The figures are as they stand now.",
+    }),
     unavailable: { const: true, description: "The subject is out of this KEY's reach now; the position still counts." },
   }, ["mailbox_seq", "reason"]),
   Message: object(message, ["message_id", "conversation_id", "seq", "author", "sent_at"]),
@@ -2148,6 +2178,14 @@ const SPECS: Record<string, Spec> = {
           spaces_funded: { ...COUNT, description: "SPACES credited at least once." },
           pending: { ...COUNT, description: "Deposits seen and not yet confirmed." },
         }),
+        billing: object({
+          state: enumOf(["not_started", "started", "paused"], "not_started until from, started after it, paused while the operator has billing off."),
+          from: { type: "string", format: "date", description: "The first UTC day storage is billed." },
+          taken_micro_usd: { ...PAIR, description: "What bills took from balances, in micro-dollars; the last seven days by the day each bill is for." },
+          spaces_billed: { ...PAIR, description: "SPACES a bill took anything from, each once." },
+          spaces_read_only: { ...COUNT, description: "SPACES a bill could not pay in full, still read-only." },
+          spaces_with_free_days: { ...COUNT, description: "SPACES whose free days still run." },
+        }),
       }), "Totals for the whole service, of every row it holds whatever its state. tasks counts the tasks KEYS added: not the service's upkeep tasks, and not a deleted task. Direct messages and conversations are counted while the service keeps them: a message until its sender's retention passes, a conversation until it has been empty and idle for 720 days. BUSY for a few seconds until the first count is made."),
     },
   },
@@ -3331,10 +3369,14 @@ const SPECS: Record<string, Spec> = {
             value_forwarded_coin: nullable({ type: "string", description: "What was forwarded, in the coin's units, as a decimal; null when the provider sent none." }),
             address: { type: "string", description: "The deposit address it paid." },
           }, ["coin", "network", "txid_in", "value_forwarded_coin", "address"])), description: "The deposit an entry of kind deposit credited; null for any other entry." },
-        }, ["entry_id", "kind", "amount_micro_usd", "balance_after_micro_usd", "at", "deposit"])),
+          bill: { ...nullable(object({
+            day: { type: "string", format: "date", description: "The UTC day the bill is for." },
+            space: { ...SPACE_NAME, description: "The SPACE measured: this one, or one it replaced." },
+          }, ["day", "space"])), description: "A bill's day and SPACE; null for any other entry." },
+        }, ["entry_id", "kind", "amount_micro_usd", "balance_after_micro_usd", "at", "deposit", "bill"])),
         has_more: { type: "boolean" },
         next_before: nullable({ type: "integer", description: "Send it as before for the next page." }),
-      }, ["space", "entries", "has_more", "next_before"]), "Newest first. Anyone reads a public SPACE's; a private or sealed SPACE's, its members only."),
+      }, ["space", "entries", "has_more", "next_before"]), "Newest first. Anyone reads a public SPACE's; a private or sealed SPACE's, its members only. To a caller who is not a member, every amount but a deposit's is rounded toward zero to the cent, and every balance down to the cent."),
     },
   },
   "funding.address": {

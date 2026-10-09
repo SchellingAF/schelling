@@ -30,7 +30,10 @@ const CONTRACT: [string, unknown][] = [
   ["findings", PAIR],
   ["direct_messages", [["conversations", PAIR], ["messages", PAIR], ["sealed_messages", PAIR]]],
   ["funding", [["deposits", PAIR], ["credited_micro_usd", PAIR], ["spaces_funded", null], ["pending", null]]],
+  ["billing", [["state", null], ["from", null], ["taken_micro_usd", PAIR], ["spaces_billed", PAIR], ["spaces_read_only", null], ["spaces_with_free_days", null]]],
 ];
+/** The figures that are words: where billing stands, and from which day. */
+const WORDS = new Set(["counted_at", "billing.state", "billing.from"]);
 
 /** Every field of an answer, as paths in the order the answer gives them. */
 function paths(value: unknown, at = ""): string[] {
@@ -56,6 +59,8 @@ async function counted(headers: Record<string, string> = {}): Promise<{ status: 
 /** Each figure of `after` less the same figure of `before`, leaving counted_at out. */
 function minus(after: any, before: any): any {
   if (typeof after === "number") return after - before;
+  // A word, billing's state or first day: 0 while it stays the same.
+  if (typeof after === "string") return after === before ? 0 : after;
   return Object.fromEntries(Object.entries(after).filter(([k]) => k !== "counted_at").map(([k, v]) => [k, minus(v, before[k])]));
 }
 /** A difference with every figure zero but those named, which are given. */
@@ -93,6 +98,16 @@ async function fromTheTables(countedAt: string): Promise<any> {
   const conversations = await o<{ at: Date }[]>`select created_at as at from schellingaf.conversations`;
   const messages = await o<{ is_sealed: boolean; author: Buffer; at: Date }[]>`
     select body is null as is_sealed, author_id as author, sent_at as at from schellingaf.messages`;
+  const [epoch] = await o<{ mode: string; from: string; today: string }[]>`
+    select mode, real_from::text as from, (now() at time zone 'UTC')::date::text as today from schellingaf.billing_epoch`;
+  const bills = await o<{ space: string; day: string; taken: string }[]>`
+    select space_id::text as space, day::text, taken_micro::text as taken from schellingaf.space_bills where not shadow`;
+  const credit = await o<{ frozen: boolean; free_until: string | null }[]>`select frozen, free_until::text from schellingaf.space_credit`;
+  const weekAgo = new Date(Date.parse(`${epoch!.today}T00:00:00Z`) - 7 * 86_400_000).toISOString().slice(0, 10);
+  const recent = bills.filter((b) => b.day >= weekAgo);
+  type Bill = { space: string; day: string; taken: string };
+  const taken = (rows: Bill[]) => rows.reduce((sum, b) => sum + Number(b.taken), 0);
+  const billed = (rows: Bill[]) => new Set(rows.filter((b) => Number(b.taken) > 0).map((b) => b.space)).size;
   const deposits = await o<{ state: string; usd: string | null; space: string | null; at: Date | null }[]>`
     select state, usd_micro::text as usd, credited_space::text as space, confirmed_at as at from schellingaf.funding_deposits`;
   const confirmed = deposits.filter((d) => d.state === "confirmed");
@@ -134,6 +149,14 @@ async function fromTheTables(countedAt: string): Promise<any> {
       spaces_funded: new Set(confirmed.map((d) => d.space)).size,
       pending: deposits.filter((d) => d.state === "pending").length,
     },
+    billing: {
+      state: epoch!.mode === "shadow" ? "paused" : epoch!.today < epoch!.from ? "not_started" : "started",
+      from: epoch!.from,
+      taken_micro_usd: { total: taken(bills), last_7_days: taken(recent) },
+      spaces_billed: { total: billed(bills), last_7_days: billed(recent) },
+      spaces_read_only: credit.filter((c) => c.frozen).length,
+      spaces_with_free_days: credit.filter((c) => c.free_until !== null && c.free_until > epoch!.today).length,
+    },
   };
 }
 
@@ -173,11 +196,13 @@ describe("the service's numbers", () => {
     const r = await counted();
     assert.equal(r.status, 200, r.text);
     assert.deepEqual(paths(r.body), contractPaths(CONTRACT));
-    for (const path of paths(r.body).filter((p) => p !== "counted_at")) {
+    for (const path of paths(r.body).filter((p) => !WORDS.has(p))) {
       const value = path.split(".").reduce((o: any, k) => o[k], r.body);
       assert.ok(Number.isSafeInteger(value) && value >= 0, `${path} is ${value}`);
     }
     assert.match(r.body.counted_at, /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/);
+    assert.ok(["not_started", "started", "paused"].includes(r.body.billing.state), r.body.billing.state);
+    assert.match(r.body.billing.from, /^\d{4}-\d\d-\d\d$/);
     assert.ok(Math.abs(Date.parse(r.body.counted_at) - Date.now()) < 60_000);
   });
 
@@ -304,8 +329,8 @@ describe("the service's numbers", () => {
     });
     const aged = (await counted()).body;
 
-    const totals = (x: any): any => (typeof x === "number" ? x : "total" in x ? x.total : Object.fromEntries(Object.entries(x).filter(([k]) => k !== "counted_at" && k !== "active_last_7_days").map(([k, v]) => [k, totals(v)])));
-    const recent = (x: any): any => (typeof x === "number" ? x : "last_7_days" in x ? x.last_7_days : Object.fromEntries(Object.entries(x).filter(([k]) => k !== "counted_at").map(([k, v]) => [k, recent(v)])));
+    const totals = (x: any): any => (typeof x !== "object" ? x : "total" in x ? x.total : Object.fromEntries(Object.entries(x).filter(([k]) => k !== "counted_at" && k !== "active_last_7_days").map(([k, v]) => [k, totals(v)])));
+    const recent = (x: any): any => (typeof x !== "object" ? x : "last_7_days" in x ? x.last_7_days : Object.fromEntries(Object.entries(x).filter(([k]) => k !== "counted_at").map(([k, v]) => [k, recent(v)])));
     assert.deepEqual(totals(aged), totals(fresh), "an old row still counts in its total");
     assert.deepEqual(recent(aged), recent(before), "and not in the last seven days");
     assert.notDeepEqual(recent(fresh), recent(before));

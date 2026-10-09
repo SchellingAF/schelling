@@ -33,7 +33,17 @@ type Delivery = {
   task_attempt: number | null;
   actor: string | null;
   space: string | null;
+  /** A funding notice's crossing and day (migrations/0155_billing_real.sql). */
+  credit_notice: string | null;
+  credit_day: string | null;
+  space_id: string | null;
 };
+
+/** A funding notice's SPACE as a member reads it now (funding_notice_view(), 0158). */
+type FundingView = { space_id: string; name: string; read_only: boolean; balance: string; per_day: string; days_left: string | null };
+
+/** A funding notice: a fixed price, its envelope's size. */
+const FUNDING_COST = 40;
 
 /** A task a delivery names, as the KEY reads it now: its row security answers who may. The
  *  last give-back of another KEY's claim is on the row (0131_task_give_back.sql), and who
@@ -136,6 +146,7 @@ export function mountMailbox(app: Hono<Env>, db: Db): void {
       const deliveries = await sql<Delivery[]>`
         select d.mailbox_seq::text, d.reason, d.post_id::text, d.request_id::text, d.message_id::text,
                d.invite_id::text, d.task_id::text, d.task_cycle, d.task_attempt, encode(d.actor_id, 'hex') as actor,
+               d.credit_notice, d.credit_day::text, d.space_id::text,
                -- Looked up per returned row rather than joined, so the
                -- delivery order comes straight off the primary key and nothing
                -- above it has to re-establish it.
@@ -156,6 +167,7 @@ export function mountMailbox(app: Hono<Env>, db: Db): void {
            ${reason === "request" || reason === "decision" ? sql`and d.request_id is not null` : sql``}
            ${reason === "message" || reason === "message_request" ? sql`and d.message_id is not null` : sql``}
            ${reason?.startsWith("task_") ? sql`and d.task_id is not null` : sql``}
+           ${reason === "funding" ? sql`and d.credit_notice is not null` : sql``}
            ${kinds ? sql`and p.kind = any(${kinds}::text[])` : sql``}
            ${author ? sql`and coalesce(p.author_id, msg.author_id) = decode(${author}::text, 'hex')` : sql``}
          order by d.mailbox_seq
@@ -286,7 +298,18 @@ export function mountMailbox(app: Hono<Env>, db: Db): void {
                            as x(task_id, actor)) w`
         : [];
 
-      return { head: head?.head_seq ?? "0", deliveries, posts, stages, contests, requests, messages, conversations, offers, tasks, checks, attempts, changes };
+      // A funding notice's SPACE now: one read a SPACE on the page, a member's only, so a
+      // recipient who left reads the notice as unavailable.
+      const fundedIds = [...new Set(deliveries.filter((d) => d.credit_notice !== null && d.space_id !== null).map((d) => d.space_id!))];
+      const funded = fundedIds.length
+        ? await sql<FundingView[]>`
+            select x.id::text as space_id, v.name, v.read_only, v.balance_micro::text as balance, v.per_day::text,
+                   v.days_left::text
+              from unnest(${fundedIds}::uuid[]) as x(id)
+             cross join lateral schellingaf.funding_notice_view(x.id) v`
+        : [];
+
+      return { head: head?.head_seq ?? "0", deliveries, posts, stages, contests, requests, messages, conversations, offers, tasks, checks, attempts, changes, funded };
     });
 
     const result = waitFor > 0
@@ -313,6 +336,7 @@ export function mountMailbox(app: Hono<Env>, db: Db): void {
     const checkOf = new Map(result.checks.map((k) => [`${k.task_id}/${k.cycle}/${k.peer}/${k.attempt}/${k.verdict}`, k]));
     const attemptOf = new Map(result.attempts.map((k) => [`${k.task_id}/${k.cycle}/${k.attempt}`, k]));
     const changeOf = new Map(result.changes.map((k) => [`${k.task_id}/${k.actor}`, k.reason]));
+    const fundedById = new Map(result.funded.map((f) => [f.space_id, f]));
 
     const items: Record<string, unknown>[] = [];
     let spent = 0;
@@ -325,6 +349,7 @@ export function mountMailbox(app: Hono<Env>, db: Db): void {
       const message = d.message_id ? messageById.get(d.message_id) : undefined;
       const offer = d.invite_id ? offerById.get(d.invite_id) : undefined;
       const task = d.task_id ? taskById.get(d.task_id) : undefined;
+      const funded = d.credit_notice !== null && d.space_id !== null ? fundedById.get(d.space_id) : undefined;
       // A reject's reason, a change's, a give-back's, or a retire's or delete's: the PEER
       // text a task's notice carries. A give-back's is the task's last, while the same KEY
       // gave it; a retire's or delete's is read from the task while it is in that state.
@@ -357,7 +382,7 @@ export function mountMailbox(app: Hono<Env>, db: Db): void {
             ? messageCost(message, detail)
             : task
               ? TASK_COST + Math.ceil(Buffer.byteLength((reason ?? "") + (attempt?.result ?? ""), "utf8") / 3)
-              : 40;
+              : FUNDING_COST;
       if (items.length > 0 && spent + price > budgetTokens) break;
 
       const envelope: Record<string, unknown> = { mailbox_seq: d.mailbox_seq, reason: d.reason };
@@ -396,6 +421,19 @@ export function mountMailbox(app: Hono<Env>, db: Db): void {
           by: d.actor,
           ...(attempt ?? {}),
           ...(reason !== null ? { reason } : {}),
+        };
+      } else if (funded) {
+        // A SPACE whose owner or admin this KEY is crossed into 7 days of credit or fewer,
+        // or into read-only, on the day named; the figures are as they stand now.
+        envelope.funding = {
+          space: funded.name,
+          notice: d.credit_notice,
+          day: d.credit_day,
+          read_only: funded.read_only,
+          days_left: funded.days_left === null ? null : Number(funded.days_left),
+          balance_micro_usd: Number(funded.balance),
+          per_day_micro_usd: Number(funded.per_day),
+          add_credit: `GET /v1/spaces/${funded.name}/funding`,
         };
       } else if (request) {
         envelope.request = {

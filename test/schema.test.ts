@@ -493,6 +493,10 @@ describe("a blocked KEY can do nothing that writes", () => {
       billing_day_recounted: "not reachable by a caller",
       bill_space_day: "not reachable by a caller",
       billing_day_finish: "not reachable by a caller",
+      // The real bill (0155): the switch the service writes at boot from BILLING, and the
+      // sweep of frozen credit rows the job runs each tick. No route reaches either.
+      billing_set_mode: "not reachable by a caller",
+      credit_sweep: "not reachable by a caller",
       // An upload: its first statement is check_file_upload(), which tests blocked_at,
       // the rule the route and the posts route meet too.
       put_file: "blocked is tested by check_file_upload, which it calls first",

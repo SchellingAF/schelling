@@ -36,30 +36,62 @@ const ME = "a".repeat(64);
 const OTHER = "b".repeat(64);
 
 describe("the connector's text says what its JSON says", () => {
-  test("what a SPACE stores and would be billed carries every field of its answer", () => {
+  test("what a SPACE stores and what a day costs carries every field of its answer", () => {
     const body = {
       space: "quest-napier-1614-audit",
       visibility: "public",
-      billing: "not_started",
-      bytes: { posts: 2034561, files: 10400000, total: 12434561 },
+      billing: "started",
+      billing_from: "2026-10-10",
+      bytes: { posts: 2034561, files: 10400000, tasks: 4321, total: 12438882 },
       allowance_bytes: 25000000,
       over_bytes: 7000,
       rate: { micro_usd_per_gb_month: 5000000, days_per_month: 30, bytes_per_gb: 1000000000 },
+      free_until: "2027-01-08",
+      per_day_micro_usd: 5,
+      pays_for: [{ space: "quest-napier-old", per_day_micro_usd: 2 }],
       would_be_billed_per_day_micro_usd: 3,
-      last_day: { day: "2026-10-07", over_allowance: true, billable_bytes: 25012000, would_be_billed_micro_usd: 2 },
-      notice: "Billing has not started: nothing is taken and no balance is kept.",
+      last_day: { day: "2026-10-12", over_allowance: true, billable_bytes: 25012000, billed_micro_usd: 2, taken_micro_usd: 1, free: false, shadow: false, would_be_billed_micro_usd: 2 },
+      balance_micro_usd: 1,
+      days_left: 0,
+      read_only: true,
+      read_only_since: "2026-10-13T00:10:00.000Z",
+      notice: "Storage over the allowance is billed each UTC day from the balance, at the rate shown.",
     };
     const text = renderFunding("reading as anonymous", body);
     for (const part of [
-      "reading as anonymous", '"quest-napier-1614-audit"', "public", "not_started", "posts 2034561", "files 10400000", "total 12434561",
-      "allowance 25000000", "over 7000", "5000000 micro-dollars a GB-month", "30 days a month", "1000000000 bytes a GB",
-      "would be billed a day: 3 micro-dollars", "last day 2026-10-07: over the allowance, billable bytes 25012000, would be billed 2 micro-dollars",
-      body.notice,
+      "reading as anonymous", '"quest-napier-1614-audit"', "public", "billing started from 2026-10-10", "posts 2034561", "files 10400000", "tasks 4321",
+      "total 12438882", "allowance 25000000", "over 7000", "5000000 micro-dollars a GB-month", "30 days a month", "1000000000 bytes a GB",
+      "a day costs: 5 micro-dollars; free until 2027-01-08", 'pays for: "quest-napier-old" 2 a day',
+      "last day 2026-10-12: over the allowance, billable bytes 25012000, billed 2, taken 1 micro-dollars",
+      "balance: 1 micro-dollars; days left: 0", "read-only since 2026-10-13T00:10:00.000Z",
+      "refused CREDIT_NEEDED until credit pays a day or the SPACE is back within its allowance", body.notice,
     ]) assert.ok(text.includes(part), `${part} is missing from:\n${text}`);
-    const under = renderFunding("reading as anonymous", { ...body, last_day: { day: "2026-10-07", over_allowance: false, billable_bytes: null, would_be_billed_micro_usd: 0 } });
-    assert.ok(under.includes("last day 2026-10-07: not over the allowance, billable bytes null, would be billed 0 micro-dollars"), under);
-    const before = renderFunding("reading as anonymous", { ...body, last_day: null });
+    const free = renderFunding("h", { ...body, last_day: { ...body.last_day, free: true, taken_micro_usd: 0 } });
+    assert.ok(free.includes("billable bytes 25012000, free"), free);
+    const under = renderFunding("reading as anonymous", { ...body, last_day: { day: "2026-10-07", over_allowance: false, billable_bytes: null, billed_micro_usd: 0, taken_micro_usd: 0, free: false, shadow: false, would_be_billed_micro_usd: 0 } });
+    assert.ok(under.includes("last day 2026-10-07: not over the allowance, billable bytes null, billed 0, taken 0 micro-dollars"), under);
+    const before = renderFunding("reading as anonymous", { ...body, last_day: null, days_left: null, balance_micro_usd: 0 });
     assert.ok(before.includes("last day: none finished yet"), before);
+    assert.ok(before.includes("days left: none, nothing is billed now"), before);
+    // A replaced SPACE whose own day costs more than 0: its payer pays, so no days of its own.
+    const replaced = renderFunding("h", { ...body, days_left: null, credited_to: { space_id: "01a11b74-2d39-7a92-ad58-973f62fdbb52", name: "fund-me-2" } });
+    assert.ok(replaced.includes('days left: none here: "fund-me-2" pays for its storage'), replaced);
+    assert.doesNotMatch(replaced, /nothing is billed now/);
+    // An answer of 0.8, read by the bridge from an older service: the day's figure still shows.
+    const older = renderFunding("h", { ...body, per_day_micro_usd: undefined, last_day: { day: "2026-10-07", over_allowance: true, billable_bytes: 25012000, would_be_billed_micro_usd: 2 } });
+    assert.ok(older.includes("a day costs: 3 micro-dollars"), older);
+  });
+
+  test("a bill in the credit entries says the day it is for, and the SPACE when it is another", () => {
+    const text = renderFundingHistory("h", {
+      space: "fund-me", has_more: false, next_before: null,
+      entries: [
+        { entry_id: 9, kind: "bill", amount_micro_usd: -1000, balance_after_micro_usd: 0, at: "2026-10-11T00:05:00.000Z", deposit: null, bill: { day: "2026-10-10", space: "fund-me" } },
+        { entry_id: 8, kind: "bill", amount_micro_usd: -500, balance_after_micro_usd: 1000, at: "2026-10-11T00:05:00.000Z", deposit: null, bill: { day: "2026-10-10", space: "fund-me-old" } },
+      ],
+    });
+    assert.ok(text.includes("9 bill -1000, balance after 0, at 2026-10-11T00:05:00.000Z; bill for 2026-10-10\n"), text);
+    assert.ok(text.includes('8 bill -500, balance after 1000, at 2026-10-11T00:05:00.000Z; bill for 2026-10-10, "fund-me-old"'), text);
   });
 
   const ADDRESS = {
@@ -98,7 +130,7 @@ describe("the connector's text says what its JSON says", () => {
       `btc on Bitcoin: bc1q${"y".repeat(38)}, minimum 0.0001; older wallet, still credited`,
       "coins offered, minimums as of 2026-10-08, by network:", "  Base: base/usdc min 3 (cheap), base/eth min 0.0003", "  Solana (cheap): sol/sol min 0.01",
       "make an address: POST /v1/spaces/fund-me/funding/addresses with coin, a ticker from coins",
-      "balance: 9900000 micro-dollars; days left at the bill shown: 2475000",
+      "balance: 9900000 micro-dollars; days left: 2475000",
       "deposits: 1 incoming, not yet credited; 1 held; 1 rejected; 3 credited",
       "incoming: base/usdc, transaction 0xpending, value not sent yet, seen 2026-10-08T11:00:00.000Z",
       "held: base_xyz, transaction 0xheld, forwarded 7, no US dollar value, reason unknown_coin",
@@ -115,7 +147,7 @@ describe("the connector's text says what its JSON says", () => {
     for (const part of ["deposits: not open on this server", "deposit addresses: none made yet", "coins offered: none on this server now", "shown to members only: bytes, balance, deposits, history", "the notice"]) {
       assert.ok(text.includes(part), `${part} is missing from:\n${text}`);
     }
-    assert.doesNotMatch(text, /bytes:|balance:|would be billed/);
+    assert.doesNotMatch(text, /bytes:|balance:|a day costs/);
   });
 
   test("a replaced SPACE says where its deposits are credited; without coins it says how to ask for them", () => {

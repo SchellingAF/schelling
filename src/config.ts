@@ -9,7 +9,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 /** The version of this API, which GET /, the capability document and the OpenAPI document name. */
-export const API_VERSION = "0.8";
+export const API_VERSION = "0.9";
 
 /**
  * What each API version removed or reshaped, newest first, as the capability document
@@ -17,6 +17,12 @@ export const API_VERSION = "0.8";
  * ask for the answer it had. A field that is only added is not listed.
  */
 export const API_CHANGES = [
+  {
+    api_version: "0.9",
+    date: "2026-10-09",
+    what: "Storage is billed from a SPACE's balance from the day billing_from names. A write that stores words or bytes in a SPACE whose credit cannot pay a day of its storage is refused CREDIT_NEEDED, status 402. GET /v1/spaces/{name}/funding: billing reads started, not_started or paused; per_day_micro_usd, and last_day.billed_micro_usd and taken_micro_usd, are the bill; would_be_billed_per_day_micro_usd and last_day.would_be_billed_micro_usd are kept, deprecated, and go in 0.10. bytes counts task text. A caller who is not a member reads the balance and bills rounded to the cent. The mailbox adds reason funding.",
+    reference: "GET /reference?operation=funding.get",
+  },
   {
     api_version: "0.8",
     date: "2026-10-08",
@@ -510,6 +516,25 @@ function absentLogToken(): string | null {
   );
 }
 
+/** BILLING: how storage is billed, written to the database at each start (src/server.ts). */
+export type BillingMode = "real" | "shadow";
+
+/**
+ * BILLING: real bills from the day the database names; shadow is the off switch: every
+ * later day is recorded and nothing is taken, and enforcement stops. Unset leaves the
+ * database's mode, which the migration made real: null. Anything else refuses the start,
+ * so no misspelling of shadow bills for real.
+ */
+function billing(): BillingMode | null {
+  const raw = process.env.BILLING?.trim();
+  if (raw === undefined || raw === "") return null;
+  if (raw === "real" || raw === "shadow") return raw;
+  throw new Error(
+    `BILLING is "${process.env.BILLING}". It is real, which bills storage from each SPACE's balance, or shadow,\n` +
+      "which records each day's bill and takes nothing. Unset leaves the mode the database holds.",
+  );
+}
+
 export type Config = {
   /** The hostname an agent binds into its signature. Wrong value here means
    * every token mint fails with SIGNATURE_INVALID, which is the point. */
@@ -564,6 +589,9 @@ export type Config = {
   /** Deposits: src/funding/config.ts. Optional in the type: absent, deposits are off and
    * no coin is offered, as in a test that does not build one. */
   funding?: FundingConfig;
+  /** See billing. null or absent leaves the database's mode, as in a test's service,
+   * which never writes it. */
+  billing?: BillingMode | null;
   db: {
     host: string;
     port: number;
@@ -598,6 +626,7 @@ export function loadConfig(): Config {
     dbWaitSeconds: envNumber("DB_WAIT_SECONDS", 300, { min: 0 }),
     receive: receiveLimits(),
     funding: fundingConfig(process.env, publicOrigin),
+    billing: billing(),
     db: {
       host: process.env.DB_HOST ?? "127.0.0.1",
       port: Number(process.env.DB_PORT ?? 5439),

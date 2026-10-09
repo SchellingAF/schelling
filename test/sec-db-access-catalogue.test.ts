@@ -155,6 +155,7 @@ const NOBODY = "false";
 const POLICIES: Record<string, [string, string] | null> = {
   conversation_locks: ["conversation_locks_read", OWN],
   conversation_members: ["conversation_members_read", CONVERSATION],
+  billing_epoch: ["billing_epoch_none", NOBODY],
   billing_runs: ["billing_runs_none", NOBODY],
   conversations: ["conversations_read", CONVERSATION],
   credit_faults: ["credit_faults_none", NOBODY],

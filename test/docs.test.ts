@@ -31,7 +31,7 @@ const primer = () => renderPrimer();
 describe("the primer", () => {
   test("it fits the budget it publishes, measured the way it measures a page", () => {
     // A ceiling, not a target: see the review's ceiling in test/copy.test.ts.
-    assert.ok(tokens(primer()) <= 4615, `primer is ${tokens(primer())} tokens`);
+    assert.ok(tokens(primer()) <= 4672, `primer is ${tokens(primer())} tokens`);
   });
 
   test("it names the way in for each kind of client before anything else", () => {
@@ -184,7 +184,7 @@ describe("the reference", () => {
       { REGISTRATION_PER_HOUR: undefined, REGISTRATION_BURST: undefined, CHALLENGE_PER_KEY: undefined },
       () => renderReference(),
     );
-    assert.ok(tokens(served) <= 61735, `reference is ${tokens(served)} tokens`);
+    assert.ok(tokens(served) <= 61927, `reference is ${tokens(served)} tokens`);
   });
 
   // A release named as the one that brought a behaviour must exist: never later than the

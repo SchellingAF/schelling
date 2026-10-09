@@ -8,7 +8,7 @@ import { depositsOpen, fundingConfigLine } from "./funding/config.ts";
 import { pubkeyCheckLine } from "./funding/cryptapi.ts";
 import { openDb, warm } from "./db/sql.ts";
 import { startPrune } from "./db/prune.ts";
-import { startBilling } from "./db/billing.ts";
+import { setBillingMode, startBilling } from "./db/billing.ts";
 import { CHECKPOINT_LOG, startCheckpoints, type CheckpointWorker } from "./db/checkpoints.ts";
 import { startSearchUpkeep } from "./db/search-upkeep.ts";
 import { checkRestore } from "./db/restore-check.ts";
@@ -106,10 +106,27 @@ watchBodies(server, config.receive!.bodyIdleSeconds * 1000);
 // those words is there, and for what registration writes that is never pruned.
 startPrune(db);
 
-// What each SPACE over its free allowance would be billed for the bytes it stores, once a
-// UTC day, at boot and hourly after; nothing is taken. See db/billing.ts. Never while
-// read-only, as checkpoints are not: it writes the day's bills and its run.
-if (!config.readOnly) startBilling(db);
+// Each SPACE over its free allowance is billed for the bytes it stores, once a UTC day, at
+// boot and hourly after, from the day the database names; BILLING=shadow takes nothing. See
+// db/billing.ts. A set BILLING is written to the database first, where the bill and
+// enforcement read it; unset, the database's mode stands. The billing.config line says the
+// mode and that day. Never while read-only, as checkpoints are not: it writes the mode, the
+// day's bills and its run. A set BILLING that cannot be written stops the service, exit
+// code 1: serving on the mode the operator switched away from is the one failure that must
+// not pass quietly. Unset, a mode that cannot be read starts no billing.
+if (!config.readOnly) {
+  try {
+    process.stdout.write(`${await setBillingMode(db, config.billing ?? null)}\n`);
+    startBilling(db, config.billing ?? null);
+  } catch (error) {
+    const why = error instanceof Error ? error.message : String(error);
+    if (config.billing != null) {
+      process.stderr.write(`BILLING=${config.billing} could not be written to the database, so the service stops: ${why}\n`);
+      process.exit(1);
+    }
+    process.stderr.write(`billing not started: ${why}\n`);
+  }
+}
 
 // The key CryptAPI answers at /pubkey/ now, against the key callbacks are checked with, as
 // one funding.pubkey line; never awaited, so a slow provider cannot hold the start. Only

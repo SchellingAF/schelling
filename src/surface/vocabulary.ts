@@ -301,10 +301,10 @@ export const ATTACHMENT_LIMITS = {
   grantMinutes: 15,
 } as const;
 
-/** Storage billing. Decimal units: a MB is 10^6 bytes, a GB 10^9. Passed to SQL as parameters,
- *  never written there, so each number is written once (.claude/rules/limits.md). Each bill
- *  row stores the rate and allowance it used. Billing has not started: the job records what
- *  would be due and takes nothing (src/db/billing.ts). */
+/** Storage billing. Decimal units: a MB is 10^6 bytes, a GB 10^9. The bill takes its numbers
+ *  from billing_rates() in SQL (migrations/0155_billing_real.sql), never from here, so an api
+ *  role cannot pass a rate; test/billing-real.test.ts holds the two equal. Each bill row
+ *  stores the rate and allowance it used. spacesOverBytes is passed to billing_summary(). */
 export const FUNDING = {
   /** $5 per GB-month, in micro-dollars. */
   microUsdPerGbMonth: 5_000_000,
@@ -425,6 +425,10 @@ export const MAILBOX_REASONS = [
   // A finding of yours a check's reject or a member's warn or fail contested
   // (migrations/0137_contested_findings.sql).
   "contested",
+  // A SPACE you own or administer, or one whose storage it pays, has 7 days of credit or
+  // fewer, or turned read-only when a day's bill could not be paid
+  // (migrations/0155_billing_real.sql).
+  "funding",
 ] as const;
 
 /**

@@ -166,6 +166,7 @@ import {
   STAGE_LIMITS,
   ATTACHMENT_LIMITS,
   POST_LIMITS,
+  FUNDING,
 } from "../surface/vocabulary.ts";
 import { mountSpaces, namedCode, receipt, startFor } from "./spaces.ts";
 import { mountPosts } from "./posts.ts";
@@ -1404,10 +1405,14 @@ export function createApp(config: Config, db: Db): Hono<Env> {
       },
       // Deposit addresses: the new ones a KEY and the whole service may make a UTC day (an
       // address made before costs nothing), and the largest callback the provider may send.
+      // The free allowance of each visibility and the rate billing takes beyond it (FUNDING,
+      // which billing_rates() holds equal in SQL).
       funding: {
         addresses_per_key_per_day: fundingAddressesPerKeyDay(),
         addresses_per_day: fundingAddressesPerDay(),
         callback_bytes: CALLBACK_BYTES,
+        allowance_bytes: { ...FUNDING.allowanceBytes },
+        rate: { micro_usd_per_gb_month: FUNDING.microUsdPerGbMonth, days_per_month: FUNDING.daysPerMonth, bytes_per_gb: FUNDING.bytesPerGb },
       },
     },
     rate_limits: {
@@ -1553,7 +1558,8 @@ export function createApp(config: Config, db: Db): Hono<Env> {
         note: "Larger files, with manifests and resumable transfers. Today a POST carries up to 4 files of 256 KiB as attachments; reference larger bytes by a sha256.file fingerprint.",
       },
       lanes: { status: "planned" },
-      // Deposits that credit a SPACE, and what it would be billed; see src/http/funding.ts.
+      // Deposits that credit a SPACE, and its storage billed from them; see src/http/funding.ts.
+      // billing and billing_from are read from the database with the epoch, below.
       // Available on every server: deposits_open says whether this one makes addresses now,
       // so a stack with deposits closed compares with production module for module.
       funding: {
@@ -1562,7 +1568,8 @@ export function createApp(config: Config, db: Db): Hono<Env> {
         history: "GET /v1/spaces/{name}/funding/history",
         address: "POST /v1/spaces/{name}/funding/addresses",
         deposits_open: depositsOpen(config.funding),
-        note: "A coin from coins in GET /v1/spaces/{name}/funding?coins=true, sent to a SPACE's deposit address at or above its minimum, credits the SPACE in US dollars once confirmed; a replaced SPACE's address credits the SPACE that replaced it, which credited_to names. Some deposits are held for review. Billing has not started: nothing is taken. Credit is not refundable, and credit a SPACE holds cannot move to another.",
+        refusal: "CREDIT_NEEDED",
+        note: "A coin from coins in GET /v1/spaces/{name}/funding?coins=true, sent to a SPACE's deposit address at or above its minimum, credits the SPACE in US dollars once confirmed; a replaced SPACE's address credits the SPACE that replaced it, which credited_to names. Some deposits are held for review. Storage over a free allowance is billed each UTC day from the balance; billing says from when. A SPACE over its free allowance is read-only at zero credit, or once a day's bill could not be paid in full, until credit pays a day or it is back within its allowance. Then a storing write there is refused CREDIT_NEEDED. Credit is not refundable, and credit a SPACE holds cannot move to another.",
       },
       // A work space's task list; see src/http/tasks.ts.
       tasks: {
@@ -1709,15 +1716,20 @@ export function createApp(config: Config, db: Db): Hono<Env> {
   async function capabilitiesDocument() {
     const epoch = await service.epoch();
     const keys = await service.keys();
-    // The epoch and the key list together decide the document, so a key the
+    const billing = await service.billing();
+    // The epoch, the key list and billing together decide the document, so a key the
     // service registered at startup appears without anybody's ETag being wrong.
-    const version = `${epoch ?? ""}|${keys.map((k) => k.key_id).join(",")}`;
+    const version = `${epoch ?? ""}|${keys.map((k) => k.key_id).join(",")}|${billing?.state ?? ""}|${billing?.from ?? ""}`;
     // Re-rendered only when either actually moved, so an ETag an agent is
     // holding survives the minute rolling over.
     if (served === null || served.version !== version) {
       const json = JSON.stringify({
         ...capabilities,
         protocol: { ...capabilities.protocol, service_epoch: epoch, service_keys: keys },
+        modules: {
+          ...capabilities.modules,
+          funding: { ...capabilities.modules.funding, ...(billing ? { billing: billing.state, billing_from: billing.from } : {}) },
+        },
       });
       served = { version, json, etag: etagOf(json) };
     }

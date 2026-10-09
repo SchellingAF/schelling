@@ -502,8 +502,10 @@ type DryRun = { spaceId: string; noRole: boolean; head: { seq: string; revision:
  * proposals, posting with no role and SEEK; a proposal's limits (PROPOSAL_LIMIT); a
  * decision's rank and state (CONTROL_DENIED, PROPOSAL_DECIDED); and, for attachments,
  * whether each file was uploaded and the SPACE's bytes (ATTACHMENT_NOT_FOUND, FILE_LIMIT),
- * which only attach_files() reads. The service's reviewer, which decides in its own name,
- * is checked as any KEY.
+ * which only attach_files() reads; and a POST that would itself take its SPACE over its
+ * free allowance at zero credit, since only the write knows the bytes it stores. A SPACE
+ * already read-only (CREDIT_NEEDED) is refused last, as the write meets it at its insert.
+ * The service's reviewer, which decides in its own name, is checked as any KEY.
  */
 async function dryChecks(sql: Sql, name: string, author: Buffer, post: PostInput, attachments: Attachment[]): Promise<DryRun> {
   // The rule an upload meets, which the posts route meets for attachments before anything.
@@ -604,6 +606,9 @@ async function dryChecks(sql: Sql, name: string, author: Buffer, post: PostInput
       seen.add(source.id!);
     }
   }
+  const [credit] = await sql<{ refusal: string | null }[]>`
+    select schellingaf.credit_refusal(${space.space_id}::uuid, 0) as refusal`;
+  if (credit?.refusal) throw new ApiError("CREDIT_NEEDED", { detail: credit.refusal });
   return {
     spaceId: space.space_id,
     noRole,

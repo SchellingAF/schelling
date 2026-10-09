@@ -293,7 +293,7 @@ describe("the recount", () => {
     assert.equal(out.file_bytes_delta, -7);
     assert.ok(out.spaces >= 1);
     assert.deepEqual(lines.map((l) => JSON.parse(l)), [
-      { event: "storage.recount", space_id: s.id, post_bytes_delta: -12345, file_bytes_delta: -7 },
+      { event: "storage.recount", space_id: s.id, post_bytes_delta: -12345, file_bytes_delta: -7, task_bytes_delta: 0 },
     ]);
     assert.ok(!lines[0]!.includes(s.name), "the line names the SPACE by id, never by name");
     assert.equal(await counted(s.id), truth);

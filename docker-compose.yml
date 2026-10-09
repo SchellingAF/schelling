@@ -137,6 +137,8 @@ services:
       FUNDING_WALLET_TRON: ${FUNDING_WALLET_TRON:-}
       CRYPTAPI_BASE: ${CRYPTAPI_BASE:-https://api.cryptapi.io}
       CRYPTAPI_PUBKEY_FILE: ${CRYPTAPI_PUBKEY_FILE:-}
+      # Storage billing, real or shadow (the off switch): see .env.example.
+      BILLING: ${BILLING:-}
       API_HOST: ${API_HOST:?set API_HOST}
       PUBLIC_ORIGIN: https://${API_HOST}
       # Set by the restore runbook, never by hand: every write answers 503 with

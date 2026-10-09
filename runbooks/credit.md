@@ -3,10 +3,13 @@
 A SPACE has one balance, in micro-dollars (a millionth of a dollar), and a ledger that
 every change to it writes (`migrations/0149_space_credit.sql`). Deposits reach it from
 CryptAPI's signed callbacks (`migrations/0152_funding_deposits.sql`, `src/http/funding.ts`).
-Nothing is billed: billing is measured in shadow (`src/db/billing.ts`). The rest is done by
-hand, as the migration role, through `psql`: an adjustment, clearing a fault, releasing a
-held deposit, recovering a deposit that matched no address, and acting on a changed
-provider key.
+Storage over a SPACE's free allowance is billed each UTC day from its balance, from the day
+`billing_epoch.real_from` names (`migrations/0155_billing_real.sql`, `src/db/billing.ts`);
+at zero credit, or once a bill could not be paid in full, the SPACE is read-only
+(`migrations/0157_credit_enforcement.sql`). The rest is done by hand, as the migration
+role, through `psql`: an adjustment, clearing a fault, releasing a held deposit,
+recovering a deposit that matched no address, acting on a changed provider key, switching
+billing off, putting a wrong bill right, clearing a frozen SPACE, and the dry run.
 
 Every amount is a whole number of micro-dollars: 1,000,000 is one dollar. An entry is never
 changed or deleted; a mistake is put right with another entry.
@@ -233,3 +236,72 @@ signed callback; a row made by hand fails by design.
 ```sh
 DB_NAME=schellingaf node scripts/funding-audit.ts
 ```
+
+## Switching billing off
+
+Set the api service's variable `BILLING=shadow` on the platform. The platform redeploys
+it, and at start the service writes the mode to the database (the `billing.config` line
+says it), then writes it again every hour before it bills. In `shadow`, every day billed
+after the switch is a shadow row that takes nothing, no SPACE is read-only, and no notice is
+sent. Bills already taken stay taken; a day billed in shadow is never charged later, even
+after the switch goes back to `real`.
+
+If the service cannot write the mode, it stops with exit code 1 and says why on stderr. It
+never serves, or bills, on a mode it was told to leave.
+
+`BILLING=real` bills the days after. Removing the variable leaves the mode the database
+holds: the switch stays where it was last set.
+
+Without a deploy, as the migration role from inside the private network:
+
+```sql
+update schellingaf.billing_epoch set mode = 'shadow', mode_at = now();
+```
+
+A set `BILLING` writes its value again within the hour, so set the variable to match, or
+remove it.
+
+## A wrong bill
+
+A bill is never changed. Give back what it took with an adjustment of the same amount, keyed
+by the SPACE and the day, with a note saying why. The key makes it safe to send twice.
+
+```sql
+select * from schellingaf.credit_post(
+  '<payer space_id>'::uuid, 'adjustment', <taken, in micro-dollars>,
+  'adjustment:refund:<measured space_id>:<day>', '<why, in a sentence>');
+```
+
+`taken` is `taken_micro` of the `space_bills` row for that SPACE and day; the payer is its
+`payer_id`. A deposit that pays a day clears the frozen flag in the same transaction.
+
+## A frozen SPACE by hand
+
+A SPACE is frozen when a bill could not take its whole cost. A deposit that pays one day
+clears it at once. Anything else that lowers what a day costs, hidden posts or free days,
+is cleared by the hourly sweep. To sweep now:
+
+```sql
+select schellingaf.credit_sweep();
+```
+
+It answers how many were unfrozen and how many notices were reset. It clears only a SPACE
+whose balance now pays a day; a SPACE still short stays frozen.
+
+## The dry run
+
+Before a release that changes billing, run the bill on a restored copy, never on the
+service's database. Restore the newest backup into a scratch container with
+`scripts/restore-drill.sh`, on a port of its own, then run the migrations against it and
+time each file. The drill marks the copy it restored (a comment on the database), and the
+dry run refuses a database without that mark. Then:
+
+```sh
+DB_HOST=127.0.0.1 DB_PORT=<port> DB_NAME=<the restored copy> node scripts/billing-dry-run.ts
+```
+
+DB_PORT and DB_NAME have no default, and port 5439, the service's own, is refused. It sets
+`real_from` to two days before the database's today, bills twice, checks that the second
+run wrote nothing and that every balance matches its ledger, and prints counts only. It
+refuses a host that is not this machine. The result goes to the coordinator, never to a
+post.

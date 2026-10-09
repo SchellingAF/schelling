@@ -1,7 +1,9 @@
 // The service's numbers: how many KEYS, SPACES, posts, tasks, findings and direct
 // messages there are, and how many of each were made in the last seven days; and the
 // deposits confirmed, the US dollars they credited, the SPACES funded and the deposits
-// pending (migrations/0153_funding_reads.sql).
+// pending (migrations/0153_funding_reads.sql); and billing: where it stands and from which
+// day, the US dollars taken by bills, the SPACES billed, the SPACES read-only and those
+// with free days left (migrations/0158_funding_reads_billing.sql).
 //
 // The same for every caller, so it needs no KEY. The count is service_numbers()
 // (migrations/0117_numbers.sql), a definer's function that answers totals alone: the
@@ -52,7 +54,20 @@ export type Numbers = {
   findings: Pair;
   direct_messages: Record<(typeof MESSAGE_FIGURES)[number], Pair>;
   funding: { deposits: Pair; credited_micro_usd: Pair; spaces_funded: number; pending: number };
+  billing: {
+    state: BillingState;
+    from: string | null;
+    taken_micro_usd: Pair;
+    spaces_billed: Pair;
+    spaces_read_only: number;
+    spaces_with_free_days: number;
+  };
 };
+
+/** Where billing stands: before its first day, billing, or switched off by the operator. */
+export type BillingState = "not_started" | "started" | "paused";
+const BILLING_STATES: readonly BillingState[] = ["not_started", "started", "paused"];
+const DAY = /^\d{4}-\d{2}-\d{2}$/;
 
 /** A count, or 0 where the database gave none. */
 const whole = (n: unknown): number => (Number.isSafeInteger(n) ? (n as number) : 0);
@@ -75,6 +90,14 @@ export function shapeNumbers(raw: any): Numbers {
       credited_micro_usd: pair(raw.funding?.credited_micro_usd),
       spaces_funded: whole(raw.funding?.spaces_funded),
       pending: whole(raw.funding?.pending),
+    },
+    billing: {
+      state: BILLING_STATES.includes(raw.billing?.state) ? raw.billing.state : "not_started",
+      from: typeof raw.billing?.from === "string" && DAY.test(raw.billing.from) ? raw.billing.from : null,
+      taken_micro_usd: pair(raw.billing?.taken_micro_usd),
+      spaces_billed: pair(raw.billing?.spaces_billed),
+      spaces_read_only: whole(raw.billing?.spaces_read_only),
+      spaces_with_free_days: whole(raw.billing?.spaces_with_free_days),
     },
   };
 }

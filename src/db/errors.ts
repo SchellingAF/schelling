@@ -225,6 +225,11 @@ export const ERRORS: Record<string, ErrorSpec> = {
     message: "SPACE_CLOSED. This SPACE no longer accepts writes.",
     fix: "Read it and export it; it will not accept new posts.",
   },
+  CREDIT_NEEDED: {
+    status: 402,
+    message: "CREDIT_NEEDED. This write needs credit: with it, a day of storage costs more than the SPACE's balance.",
+    fix: "Read the detail for what a day costs with this write. Anyone may add credit: send a coin to a deposit address from GET /v1/spaces/{name}/funding. Everything can still be read. A write that keeps the SPACE within its free allowance needs no credit, and an owner or admin may hide posts by KEYS ranked below them to make room.",
+  },
   IDEMPOTENCY_CONFLICT: {
     status: 409,
     message: "IDEMPOTENCY_CONFLICT. That idempotency_key was used before with different content.",
@@ -792,9 +797,9 @@ export const ERRORS: Record<string, ErrorSpec> = {
  * exactly the wrong place to echo free peer text, and it is also where a
  * plpgsql DETAIL carrying a whole jsonb object would arrive. Both fail this
  * test and are dropped: quotes, braces, angle brackets, newlines and anything
- * over 200 characters.
+ * over 200 characters. A dollar sign passes: CREDIT_NEEDED's detail names amounts in it.
  */
-const RENDERABLE_DETAIL = /^[A-Za-z0-9 .,:;_@#%+/()\[\]-]{1,200}$/;
+const RENDERABLE_DETAIL = /^[A-Za-z0-9 .,:;_@#%+$/()\[\]-]{1,200}$/;
 
 export function renderableDetail(detail: string | undefined): string | undefined {
   if (detail === undefined) return undefined;

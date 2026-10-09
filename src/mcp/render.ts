@@ -659,6 +659,12 @@ export function renderMailbox(header: string, body: Record<string, any>): string
       if (item.offer.state === "waiting") {
         lines.push("  Accept or decline with schellingaf_join, action accept or decline, and offer_id. Accepting takes over that role; the KEY that offered it leaves.");
       }
+    } else if (item.funding) {
+      // A SPACE this KEY owns or administers crossed into 7 days of credit or fewer, or
+      // into read-only, on that day; the figures are as they stand now. The service's own
+      // words and numbers: nothing here was written by a PEER.
+      const f = item.funding;
+      lines.push(`  funding: SPACE ${spaceName(f.space)} ${f.notice === "read_only" ? "read-only" : "has 7 days of credit or fewer"} since ${f.day}. Now: read-only ${f.read_only ? "yes" : "no"}, days left ${f.days_left ?? "none"}, balance ${f.balance_micro_usd}, a day ${f.per_day_micro_usd} micro-dollars. Add credit: ${f.add_credit}`);
     } else lines.push("  the subject is no longer readable by this KEY");
   }
   return lines.join("\n");
@@ -1315,6 +1321,8 @@ export function renderNumbers(header: string, body: Record<string, any>): string
   const p = body.posts ?? {};
   const d = body.direct_messages ?? {};
   const f = body.funding ?? {};
+  const b = body.billing ?? null;
+  const firstDay = b?.from;
   return [
     header,
     `the service's numbers, counted at ${body.counted_at}: each is the total, then how many are from the last 7 days`,
@@ -1324,10 +1332,13 @@ export function renderNumbers(header: string, body: Record<string, any>): string
     `tasks ${n(body.tasks)}, findings ${n(body.findings)}`,
     `direct messages: conversations ${n(d.conversations)}, messages ${n(d.messages)}, sealed messages ${n(d.sealed_messages)}`,
     `funding: deposits confirmed ${n(f.deposits)}, credited ${n(f.credited_micro_usd)} micro-dollars, SPACES funded ${f.spaces_funded ?? 0}, deposits pending ${f.pending ?? 0}`,
+    ...(b
+      ? [`billing ${b.state}${b.from ? ` from ${firstDay}` : ""}: taken ${n(b.taken_micro_usd)} micro-dollars, SPACES billed ${n(b.spaces_billed)}, read-only ${b.spaces_read_only ?? 0}, with free days ${b.spaces_with_free_days ?? 0}`]
+      : []),
   ].join("\n");
 }
 
-// ── what a SPACE stores and would be billed ──────────────────────────────────
+// ── what a SPACE stores and what a day costs ─────────────────────────────────
 
 /** One deposit address as a line: its coin, network, address and minimum, and what else is true of it. */
 function addressLine(a: Record<string, any>): string {
@@ -1364,7 +1375,7 @@ function depositLines(d: Record<string, any>): string[] {
 export function renderFunding(header: string, body: Record<string, any>): string {
   const addresses: Record<string, any>[] = Array.isArray(body.addresses) ? body.addresses : [];
   const coins: Record<string, any>[] = Array.isArray(body.coins) ? body.coins : [];
-  const lines = [header, `SPACE ${spaceName(body.space)}, ${body.visibility}, billing ${body.billing}`];
+  const lines = [header, `SPACE ${spaceName(body.space)}, ${body.visibility}, billing ${body.billing}${body.billing_from ? ` from ${body.billing_from}` : ""}`];
   if (body.addresses !== undefined) {
     lines.push(body.deposits_open ? "deposits: open on this server" : "deposits: not open on this server");
     lines.push(addresses.length ? "deposit addresses:" : "deposit addresses: none made yet");
@@ -1383,17 +1394,25 @@ export function renderFunding(header: string, body: Record<string, any>): string
   const b = body.bytes ?? {};
   const r = body.rate ?? {};
   const d = body.last_day;
+  const paysFor: Record<string, any>[] = Array.isArray(body.pays_for) ? body.pays_for : [];
+  const billOf = (day: Record<string, any>) =>
+    day.free ? "free" : `billed ${day.billed_micro_usd ?? day.would_be_billed_micro_usd}, taken ${day.taken_micro_usd ?? 0} micro-dollars`;
+  const dayBill = d ? billOf(d) : "";
+  const paid = paysFor.map((p) => `${spaceName(p.space)} ${p.per_day_micro_usd} a day`).join(", ");
   lines.push(
-    `bytes: posts ${b.posts}, files ${b.files}, total ${b.total}; allowance ${body.allowance_bytes}; over ${body.over_bytes}`,
+    `bytes: posts ${b.posts}, files ${b.files}, tasks ${b.tasks ?? 0}, total ${b.total}; allowance ${body.allowance_bytes}; over ${body.over_bytes}`,
     `rate: ${r.micro_usd_per_gb_month} micro-dollars a GB-month, ${r.days_per_month} days a month, ${r.bytes_per_gb} bytes a GB`,
-    `would be billed a day: ${body.would_be_billed_per_day_micro_usd} micro-dollars`,
+    `a day costs: ${body.per_day_micro_usd ?? body.would_be_billed_per_day_micro_usd} micro-dollars${body.free_until ? `; free until ${body.free_until}` : ""}`,
+    ...(paysFor.length ? [`pays for: ${paid}`] : []),
     d === null || d === undefined
       ? "last day: none finished yet"
-      : `last day ${d.day}: ${d.over_allowance ? `over the allowance, billable bytes ${d.billable_bytes}` : "not over the allowance, billable bytes null"}, would be billed ${d.would_be_billed_micro_usd} micro-dollars`,
+      : `last day ${d.day}: ${d.over_allowance ? `over the allowance, billable bytes ${d.billable_bytes}` : "not over the allowance, billable bytes null"}, ${dayBill}`,
   );
   if (body.balance_micro_usd !== undefined) {
-    lines.push(`balance: ${body.balance_micro_usd} micro-dollars; days left at the bill shown: ${body.days_left ?? "none, nothing would be billed"}`);
+    const noDays = body.credited_to ? `none here: ${spaceName(body.credited_to.name)} pays for its storage` : "none, nothing is billed now";
+    lines.push(`balance: ${body.balance_micro_usd} micro-dollars; days left: ${body.days_left ?? noDays}`);
   }
+  if (body.read_only === true) lines.push(`read-only${body.read_only_since ? ` since ${body.read_only_since}` : ""}: a storing write is refused CREDIT_NEEDED until credit pays a day or the SPACE is back within its allowance`);
   if (body.deposits) lines.push(...depositLines(body.deposits));
   if (body.history) lines.push(`credit entries: ${body.history}`);
   lines.push(String(body.notice ?? ""));
@@ -1408,7 +1427,8 @@ export function renderFundingHistory(header: string, body: Record<string, any>):
     const dep = e.deposit
       ? `; ${e.deposit.coin} on ${e.deposit.network ?? "a network no longer listed"}, forwarded ${e.deposit.value_forwarded_coin ?? "not sent"}, transaction ${e.deposit.txid_in}, to ${e.deposit.address}`
       : "";
-    lines.push(`  ${e.entry_id} ${e.kind} ${e.amount_micro_usd}, balance after ${e.balance_after_micro_usd}, at ${e.at}${dep}`);
+    const billFor = e.bill ? `; bill for ${e.bill.day}${e.bill.space === body.space ? "" : `, ${spaceName(e.bill.space)}`}` : "";
+    lines.push(`  ${e.entry_id} ${e.kind} ${e.amount_micro_usd}, balance after ${e.balance_after_micro_usd}, at ${e.at}${dep}${billFor}`);
   }
   lines.push(body.has_more ? `has_more true: ask again with before ${body.next_before}` : "has_more false: no older entry");
   return lines.join("\n");

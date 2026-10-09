@@ -12,7 +12,7 @@ import { randomUUID } from "node:crypto";
 import { useService, fixture, db, call, connector, agent, type Agent } from "./lib/service.ts";
 import { billOnce } from "../src/db/billing.ts";
 import { FUNDING, dailyMicroUsd } from "../src/surface/vocabulary.ts";
-import { FUNDING_NOTICE, FUNDING_ROUNDING_BYTES, fundingAnswer, type FundingRow } from "../src/http/funding.ts";
+import { FUNDING_ROUNDING_BYTES, NOT_STARTED_NOTICE, fundingAnswer, type FundingRow } from "../src/http/funding.ts";
 import * as sealed from "../content/sealed.mjs";
 
 useService("funding");
@@ -63,36 +63,43 @@ describe("the read", () => {
     const anonymous = await call("GET", `/v1/spaces/${s.name}/funding`);
     assert.equal(anonymous.status, 200, JSON.stringify(anonymous.body));
     assert.deepEqual(Object.keys(anonymous.body), [
-      "space", "visibility", "billing", "deposits_open", "addresses", "credited_to", "make_address",
-      "bytes", "allowance_bytes", "over_bytes", "rate", "would_be_billed_per_day_micro_usd", "last_day",
-      "balance_micro_usd", "days_left", "deposits", "history", "notice",
+      "space", "visibility", "billing", "billing_from", "deposits_open", "addresses", "credited_to", "make_address",
+      "bytes", "allowance_bytes", "over_bytes", "rate", "free_until", "per_day_micro_usd", "would_be_billed_per_day_micro_usd", "last_day",
+      "balance_micro_usd", "days_left", "read_only", "read_only_since", "deposits", "history", "notice",
     ]);
+    // The template's billing begins the day after it was made: not started yet.
+    const [epoch] = await fixture.owner<{ from: string }[]>`select real_from::text as from from schellingaf.billing_epoch`;
     assert.deepEqual(anonymous.body, {
       space: s.name,
       visibility: "public",
       billing: "not_started",
+      billing_from: epoch!.from,
       // This service has no deposits configured.
       deposits_open: false,
       addresses: [],
       credited_to: null,
       make_address: `POST /v1/spaces/${s.name}/funding/addresses`,
-      bytes: { posts: down(posts), files: down(files), total: down(posts) + down(files) },
+      bytes: { posts: down(posts), files: down(files), tasks: 0, total: down(posts) + down(files) },
       allowance_bytes: FUNDING.allowanceBytes.public,
       over_bytes: 0,
       rate: RATE,
+      free_until: null,
+      per_day_micro_usd: 0,
       would_be_billed_per_day_micro_usd: 0,
       last_day: null,
       balance_micro_usd: 0,
       days_left: null,
+      read_only: false,
+      read_only_since: null,
       deposits: { pending: [], held: [], rejected: [], pending_count: 0, held_count: 0, rejected_count: 0, credited_count: 0 },
       history: `GET /v1/spaces/${s.name}/funding/history`,
-      notice: FUNDING_NOTICE,
+      notice: NOT_STARTED_NOTICE(epoch!.from),
     });
     assert.equal(anonymous.headers.get("cache-control")?.includes("public") ?? false, false, "never cached as a public read");
     const stranger = await call("GET", `/v1/spaces/${s.name}/funding`, (await agent()).token);
     assert.deepEqual(stranger.body.bytes, anonymous.body.bytes);
     const member = await call("GET", `/v1/spaces/${s.name}/funding`, owner.token);
-    assert.deepEqual(member.body.bytes, { posts, files, total: posts + files });
+    assert.deepEqual(member.body.bytes, { posts, files, tasks: 0, total: posts + files });
   });
 
   // Release 1 refused a stranger and nobody here with READ_DENIED. Deposit addresses are
@@ -104,13 +111,13 @@ describe("the read", () => {
     const { posts } = await counters(s.id);
     const mine = await call("GET", `/v1/spaces/${s.name}/funding`, owner.token);
     assert.equal(mine.status, 200, JSON.stringify(mine.body));
-    assert.deepEqual(mine.body.bytes, { posts, files: 0, total: posts });
+    assert.deepEqual(mine.body.bytes, { posts, files: 0, tasks: 0, total: posts });
     assert.equal(mine.body.allowance_bytes, FUNDING.allowanceBytes.private);
     for (const who of [null, await agent()]) {
       const out = await call("GET", `/v1/spaces/${s.name}/funding`, who?.token);
       assert.equal(out.status, 200, JSON.stringify(out.body));
-      assert.deepEqual(out.body.members_only, ["bytes", "balance", "deposits", "history"]);
-      for (const key of ["bytes", "allowance_bytes", "over_bytes", "would_be_billed_per_day_micro_usd", "last_day", "balance_micro_usd", "days_left", "deposits", "history"]) {
+      assert.deepEqual(out.body.members_only, ["bytes", "balance", "deposits", "history", "read_only"]);
+      for (const key of ["bytes", "over_bytes", "would_be_billed_per_day_micro_usd", "last_day", "balance_micro_usd", "days_left", "deposits", "history"]) {
         assert.equal(key in out.body, false, `${key} is in the addresses-only answer`);
       }
       assert.ok(!JSON.stringify(out.body).includes(String(posts)), "the answer carries a figure");
@@ -138,7 +145,7 @@ describe("the read", () => {
     for (const who of [null, await agent()]) {
       const out = await call("GET", `/v1/spaces/${name}/funding`, who?.token);
       assert.equal(out.status, 200, JSON.stringify(out.body));
-      assert.deepEqual(out.body.members_only, ["bytes", "balance", "deposits", "history"]);
+      assert.deepEqual(out.body.members_only, ["bytes", "balance", "deposits", "history", "read_only"]);
       assert.equal("bytes" in out.body, false);
     }
   });
@@ -160,33 +167,36 @@ describe("the read", () => {
     const s = await space(owner, "public");
     await post(owner, s.name, { body: "z".repeat(9000) });
     await fixture.owner`update schellingaf.spaces set created_at = '2026-01-01' where space_id = ${s.id}::uuid`;
-    const allowance = 100;
+    const allowance = FUNDING.allowanceBytes.public;
     await fixture.owner`delete from schellingaf.billing_runs`;
-    // Over 100,000 bytes, so the rounded figure is over too: the day is begun with its
-    // recount recorded, so the counter set here is the one billed.
+    // Over by more than 100,000 bytes, so the rounded figure is over too: the day is begun
+    // with its recount recorded, so the counter set here is the one billed.
     await fixture.owner`insert into schellingaf.billing_runs (day, recounted_at) values ('2026-09-09', now())`;
-    await fixture.owner`update schellingaf.space_storage set post_bytes = post_bytes + 234567 where space_id = ${s.id}::uuid`;
+    await fixture.owner`update schellingaf.space_storage set post_bytes = post_bytes + ${allowance + 234567} where space_id = ${s.id}::uuid`;
     const { posts } = await counters(s.id);
-    const ran = await billOnce(db, {
-      now: new Date("2026-09-10T12:00:00Z"), funding: { ...FUNDING, allowanceBytes: { public: allowance, private: allowance, sealed: allowance } }, log: () => {},
-    });
+    const ran = await billOnce(db, { now: new Date("2026-09-10T12:00:00Z"), log: () => {} });
     assert.deepEqual(ran, { state: "billed", days: ["2026-09-09"] });
     const [bill] = await fixture.owner<{ due: string }[]>`
       select due_micro::text as due from schellingaf.space_bills where space_id = ${s.id}::uuid and day = '2026-09-09'`;
     const member = await call("GET", `/v1/spaces/${s.name}/funding`, owner.token);
     // The read applies the service's own allowance; the last day keeps what that day used.
+    // A day before billing_from: a shadow row, nothing taken.
     assert.deepEqual(member.body.last_day, {
-      day: "2026-09-09", over_allowance: true, billable_bytes: posts, would_be_billed_micro_usd: Number(bill!.due),
+      day: "2026-09-09", over_allowance: true, billable_bytes: posts, billed_micro_usd: Number(bill!.due), taken_micro_usd: 0,
+      free: false, shadow: true, would_be_billed_micro_usd: Number(bill!.due),
     });
     assert.equal(member.body.would_be_billed_per_day_micro_usd, dailyMicroUsd(posts, FUNDING.allowanceBytes.public));
     const anonymous = await call("GET", `/v1/spaces/${s.name}/funding`);
     assert.deepEqual(anonymous.body.last_day, {
-      ...member.body.last_day, billable_bytes: down(posts), would_be_billed_micro_usd: dailyMicroUsd(down(posts), allowance),
+      ...member.body.last_day, billable_bytes: down(posts),
+      billed_micro_usd: dailyMicroUsd(down(posts), allowance), would_be_billed_micro_usd: dailyMicroUsd(down(posts), allowance),
     });
     // A SPACE that was not over that day.
     const other = await space(owner, "public");
     const under = await call("GET", `/v1/spaces/${other.name}/funding`);
-    assert.deepEqual(under.body.last_day, { day: "2026-09-09", over_allowance: false, billable_bytes: null, would_be_billed_micro_usd: 0 });
+    assert.deepEqual(under.body.last_day, {
+      day: "2026-09-09", over_allowance: false, billable_bytes: null, billed_micro_usd: 0, taken_micro_usd: 0, free: false, shadow: true, would_be_billed_micro_usd: 0,
+    });
   });
 
   test("the bytes above the allowance are what would be billed, from the exact figures", () => {
@@ -204,7 +214,11 @@ describe("the answer, worked out", () => {
   const row: FundingRow = {
     post_bytes: "25385670", file_bytes: "137890", last_day: "2026-09-09",
     bill_billable: "1206150", bill_due: "201", bill_allowance: "100", bill_rate: "5000000", bill_days: 30, bill_bytes_per_gb: "1000000000",
+    task_bytes: "0", bill_taken: "201", bill_free: false, bill_shadow: false, billing: "started", billing_from: "2026-09-01",
+    free_until: null, read_only: false, read_only_since: null, own_per_day: "87", per_day: "87", pays_for: [],
   };
+  /** The last day's figures besides the bill, as row gives them. */
+  const day = (billed: number, taken: number) => ({ billed_micro_usd: billed, taken_micro_usd: taken, free: false, shadow: false, would_be_billed_micro_usd: billed });
 
   test("the rounding is 100,000 bytes", () => {
     assert.equal(FUNDING_ROUNDING_BYTES, 100_000);
@@ -212,34 +226,40 @@ describe("the answer, worked out", () => {
 
   test("a member sees the exact figures and the day's own due", () => {
     const out = fundingAnswer("s", "public", row, true);
-    assert.deepEqual(out.bytes, { posts: 25_385_670, files: 137_890, total: 25_523_560 });
+    assert.deepEqual(out.bytes, { posts: 25_385_670, files: 137_890, tasks: 0, total: 25_523_560 });
     assert.equal(out.over_bytes, 523_560);
     assert.equal(out.would_be_billed_per_day_micro_usd, 87);
-    assert.deepEqual(out.last_day, { day: "2026-09-09", over_allowance: true, billable_bytes: 1_206_150, would_be_billed_micro_usd: 201 });
+    assert.equal(out.per_day_micro_usd, 87);
+    assert.deepEqual(out.last_day, { day: "2026-09-09", over_allowance: true, billable_bytes: 1_206_150, ...day(201, 201) });
   });
 
   test("anyone else sees every figure worked from the rounded post and file bytes", () => {
     const out = fundingAnswer("s", "public", row, false);
-    assert.deepEqual(out.bytes, { posts: 25_300_000, files: 100_000, total: 25_400_000 }, "not the exact total rounded, 25,500,000");
+    assert.deepEqual(out.bytes, { posts: 25_300_000, files: 100_000, tasks: 0, total: 25_400_000 }, "not the exact total rounded, 25,500,000");
     assert.equal(out.over_bytes, 400_000);
     assert.equal(out.would_be_billed_per_day_micro_usd, 66, "from the shown total, not the exact one");
-    // The day's sum rounded once: 1,200,000 shown is 1,199,900 over the day's 100.
-    assert.deepEqual(out.last_day, { day: "2026-09-09", over_allowance: true, billable_bytes: 1_200_000, would_be_billed_micro_usd: 199 });
+    assert.equal(out.per_day_micro_usd, 66, "from the shown total too");
+    // The day's sum rounded once: 1,200,000 shown is 1,199,900 over the day's 100; what it
+    // took, 201 micro-dollars, is under a cent, so 0.
+    assert.deepEqual(out.last_day, { day: "2026-09-09", over_allowance: true, billable_bytes: 1_200_000, ...day(199, 0) });
   });
 
   test("a day over by less than the rounding reads as not over to anyone else", () => {
     const close: FundingRow = { ...row, bill_billable: "25050000", bill_due: "8", bill_allowance: "25000000" };
-    assert.deepEqual(fundingAnswer("s", "public", close, false).last_day,
-      { day: "2026-09-09", over_allowance: false, billable_bytes: null, would_be_billed_micro_usd: 0 });
-    assert.deepEqual(fundingAnswer("s", "public", close, true).last_day,
-      { day: "2026-09-09", over_allowance: true, billable_bytes: 25_050_000, would_be_billed_micro_usd: 8 });
+    assert.deepEqual(fundingAnswer("s", "public", { ...close, bill_taken: "8" }, false).last_day,
+      { day: "2026-09-09", over_allowance: false, billable_bytes: null, ...day(0, 0) });
+    assert.deepEqual(fundingAnswer("s", "public", { ...close, bill_taken: "8" }, true).last_day,
+      { day: "2026-09-09", over_allowance: true, billable_bytes: 25_050_000, ...day(8, 8) });
   });
 
   test("a day with no bill row is not over, and no finished day is null", () => {
-    const none: FundingRow = { ...row, bill_billable: null, bill_due: null, bill_allowance: null, bill_rate: null, bill_days: null, bill_bytes_per_gb: null };
+    const none: FundingRow = {
+      ...row, bill_billable: null, bill_due: null, bill_allowance: null, bill_rate: null, bill_days: null, bill_bytes_per_gb: null,
+      bill_taken: null, bill_free: null, bill_shadow: false,
+    };
     for (const member of [true, false]) {
       assert.deepEqual(fundingAnswer("s", "public", none, member).last_day,
-        { day: "2026-09-09", over_allowance: false, billable_bytes: null, would_be_billed_micro_usd: 0 });
+        { day: "2026-09-09", over_allowance: false, billable_bytes: null, ...day(0, 0) });
       assert.equal(fundingAnswer("s", "public", { ...none, last_day: null }, member).last_day, null);
     }
   });
@@ -256,7 +276,7 @@ describe("the connector", () => {
     const text: string = message.result.content[0].text;
     for (const part of [
       `"${s.name}"`, "public", "not_started", `posts ${json.bytes.posts}`, `files ${json.bytes.files}`, `total ${json.bytes.total}`,
-      `allowance ${json.allowance_bytes}`, `over ${json.over_bytes}`, `would be billed a day: ${json.would_be_billed_per_day_micro_usd} micro-dollars`,
+      `allowance ${json.allowance_bytes}`, `over ${json.over_bytes}`, `a day costs: ${json.per_day_micro_usd} micro-dollars`, `from ${json.billing_from}`,
       json.notice,
     ]) assert.ok(text.includes(part), `${part} is missing from:\n${text}`);
   });

@@ -554,8 +554,20 @@ const NEITHER: Record<string, string> = {
   billing_day_recounted: "records that a billing day's recount ran",
   billing_day_finish: "finishes a billing day with its summary",
   bill_candidates: "lists the SPACES over their allowance for a day, by id",
-  bill_space_day: "writes one SPACE's shadow bill for a day",
+  bill_space_day: "writes one SPACE's bill for an ended day, at the rates SQL holds, from its payer's balance",
   billing_summary: "sums a day's measure by visibility, with no SPACE's name or id",
+  // The real bill (0155): a day's mode and whether billing is live, both read by the job;
+  // the switch the service writes at boot; and the sweep of frozen credit rows.
+  billing_day_mode: "answers whether a day is billed real or shadow",
+  billing_live: "answers whether billing is live now",
+  billing_set_mode: "sets billing real or shadow, which can take no more than the constants allow",
+  credit_sweep: "clears the frozen flag and notice of each credit row its balance now pays",
+  // Read-only at zero (0157): whether a write that stores bytes in a SPACE is refused, read
+  // by the posts dry run; its detail names only money and the SPACE's own funding route.
+  credit_refusal: "answers whether a SPACE's credit pays a day of its storage, and the refusal's detail",
+  // The funding reads (0158): where billing stands and from which day, for the capability
+  // document and a caller shown a SPACE's addresses alone; it names no SPACE.
+  billing_state: "answers whether billing has started, is paused or not started, and its first day",
   // Allowances: a bucket the route names, holding a count and no content.
   take_tokens: "spends a rate bucket's allowance",
   charge_tokens: "charges a rate bucket after a write",

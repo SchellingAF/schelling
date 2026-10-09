@@ -1222,6 +1222,16 @@ async function renderMore(): Promise<string> {
     const [code, file] = at.split("\n");
     if (hasWords(text) && !inFace(text)) put(`${code}: ${firstWords(text)}, ${file}`, "detail the database gives", text);
   }
+  // CREDIT_NEEDED's detail, which credit_refusal() builds from amounts and the SPACE's
+  // name: its literal parts in order, each amount as <dollars> and the name as <name>.
+  const creditFile = "migrations/0157_credit_enforcement.sql";
+  const built = /RETURN ('[^']*' \|\|[^;]*);/.exec(sourceOf(creditFile))?.[1];
+  if (built) {
+    const text = built.split("||").map((part) => part.trim())
+      .map((part) => (part.startsWith("'") ? part.slice(1, -1).replace(/''/g, "'") : part === "v_name" ? "<name>" : "<dollars>"))
+      .join("");
+    put(`CREDIT_NEEDED: ${firstWords(text)}, ${creditFile}`, "detail the database gives, built from amounts and the SPACE's name", text);
+  }
 
   // 20. Notices, guidance and health reasons inside answers.
   section(20);

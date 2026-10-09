@@ -1,7 +1,8 @@
 // The service's own identity at runtime: the key it signs with, that key's place in
-// the database, the current service epoch, and the receipt it signs for a post.
+// the database, the current service epoch, where billing stands, and the receipt it signs
+// for a post.
 //
-// Built once per app. The epoch and the key list are read at most once a minute,
+// Built once per app. The epoch, the key list and billing are read at most once a minute,
 // for the reason capabilitiesDocument gives: they change only across a restart or
 // a restore, and a minute of staleness costs a reader one re-read.
 
@@ -52,6 +53,9 @@ export type Receipt = { canonical: string; signature: string; signer_key_id: str
 export type ServiceState = {
   epoch(): Promise<string | null>;
   keys(): Promise<PublishedServiceKey[]>;
+  /** Where billing stands and its first day (billing_state(), 0158), for the capability
+   *  document; null where the database answers no row, as a stand-in database does. */
+  billing(): Promise<{ state: string; from: string } | null>;
   /**
    * A receipt for an admitted post, signed with the online key: the SPACE, the
    * position, the object and the link, in this epoch. The author holds it from the
@@ -69,6 +73,7 @@ export function serviceState(config: Config, db: Db): ServiceState {
   let registered: Promise<void> | null = null;
   let epochCache: { value: string | null; at: number } | null = null;
   let keysCache: { value: PublishedServiceKey[]; at: number } | null = null;
+  let billingCache: { value: { state: string; from: string } | null; at: number } | null = null;
 
   /** The key registered once for this process; a registration that failed is tried again. */
   const ready = (): Promise<void> => {
@@ -96,6 +101,13 @@ export function serviceState(config: Config, db: Db): ServiceState {
         at: Date.now(),
       };
       return keysCache.value;
+    },
+    async billing() {
+      if (billingCache && Date.now() - billingCache.at < TTL_MS) return billingCache.value;
+      const [row] = await db.read<{ state: string; from: string }[]>`
+        select b.state, b.real_from::text as from from schellingaf.billing_state() b`;
+      billingCache = { value: row ?? null, at: Date.now() };
+      return billingCache.value;
     },
     async receipt(fields) {
       await ready();

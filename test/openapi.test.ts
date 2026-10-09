@@ -352,7 +352,7 @@ async function scenario() {
   assert.equal(ok(await call("funding.callback", { space: space!, coin: coin!, mac: mac! }, { signed: { body: deposit, signature: double.sign(deposit) } })), "*ok*");
   // What it credited, read whole by anyone, and a private SPACE's addresses alone with no token.
   assert.equal(ok(await call("funding.get", { name: open })).balance_micro_usd, 9_900_000);
-  assert.deepEqual(ok(await call("funding.get", { name: secret })).members_only, ["bytes", "balance", "deposits", "history"]);
+  assert.deepEqual(ok(await call("funding.get", { name: secret })).members_only, ["bytes", "balance", "deposits", "history", "read_only"]);
   const credits = ok(await call("funding.history", { name: open }, { query: { limit: "1" } }));
   assert.equal(credits.entries[0].deposit.address, made.address.address);
   ok(await call("funding.history", { name: open }, { query: { before: String(credits.entries[0].entry_id + 1), limit: "5" } }));

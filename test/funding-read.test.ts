@@ -22,7 +22,7 @@ import { startCryptapiDouble, type CryptapiDouble } from "./support/cryptapi-dou
 import { COINS, COINS_AS_OF, coinByCallbackCoin } from "../src/funding/coins.ts";
 import { fundingConfig, type FundingConfig } from "../src/funding/config.ts";
 import { FUNDING, dailyMicroUsd } from "../src/surface/vocabulary.ts";
-import { FUNDING_DEPOSIT_NOTICE, FUNDING_NOTICE, addressesAnswer, fundingFigures, historyAnswer, offerOf, REPLACED_NOTICE, type FundingRow } from "../src/http/funding.ts";
+import { FUNDING_DEPOSIT_NOTICE, NOT_STARTED_NOTICE, addressesAnswer, fundingFigures, historyAnswer, offerOf, REPLACED_NOTICE, type FundingRow } from "../src/http/funding.ts";
 import { buildOpenApi, openApiPath } from "../src/surface/openapi.ts";
 import { OPERATIONS } from "../src/surface/operations.ts";
 import { REFUSALS, refusalsOf } from "../src/surface/refusals.ts";
@@ -148,7 +148,8 @@ const get = (name: string, who?: Agent | null, on: App = fund, query = "") => ca
 const COINS_TOO = "?coins=true";
 const history = (name: string, query = "", who?: Agent | null, on: App = fund) => call("GET", `/v1/spaces/${name}/funding/history${query}`, who?.token, undefined, on);
 
-const FULL_ONLY = ["bytes", "allowance_bytes", "over_bytes", "rate", "would_be_billed_per_day_micro_usd", "last_day", "balance_micro_usd", "days_left", "deposits", "history"];
+// allowance_bytes and rate are the service's own, so the addresses alone carry them (0.9).
+const FULL_ONLY = ["bytes", "over_bytes", "per_day_micro_usd", "would_be_billed_per_day_micro_usd", "last_day", "balance_micro_usd", "days_left", "read_only", "deposits", "history"];
 const OFFERED = COINS.map((c) => ({ coin: c.ticker, symbol: c.symbol, name: c.name, network: c.network, family: c.family, minimum: c.minimum, cheap: c.cheap, stable: c.stable }));
 
 describe("who reads what", () => {
@@ -173,7 +174,7 @@ describe("who reads what", () => {
         coin: "base/usdc", symbol: "USDC", network: "Base", family: "evm", address: a.address_in, minimum: "3",
         cheap: out.body.addresses[0].cheap, stable: true, current: true, created_at: out.body.addresses[0].created_at,
       }]);
-      assert.equal(out.body.notice, FUNDING_NOTICE);
+      assert.equal(out.body.notice, NOT_STARTED_NOTICE(out.body.billing_from));
     }
   });
 
@@ -187,13 +188,13 @@ describe("who reads what", () => {
       const out = await get(s.name, who);
       assert.equal(out.status, 200, JSON.stringify(out.body));
       assert.deepEqual(Object.keys(out.body), [
-        "space", "visibility", "billing", "deposits_open", "addresses", "credited_to", "make_address", "members_only", "notice",
+        "space", "visibility", "billing", "billing_from", "allowance_bytes", "rate", "deposits_open", "addresses", "credited_to", "make_address", "members_only", "notice",
       ]);
-      assert.deepEqual(out.body.members_only, ["bytes", "balance", "deposits", "history"]);
+      assert.deepEqual(out.body.members_only, ["bytes", "balance", "deposits", "history", "read_only"]);
       assert.deepEqual(out.body.addresses.map((x: any) => x.address), [a.address_in]);
       const all = await get(s.name, who, fund, COINS_TOO);
       assert.deepEqual(Object.keys(all.body), [
-        "space", "visibility", "billing", "deposits_open", "addresses", "credited_to", "coins", "minimums_as_of", "make_address", "members_only", "notice",
+        "space", "visibility", "billing", "billing_from", "allowance_bytes", "rate", "deposits_open", "addresses", "credited_to", "coins", "minimums_as_of", "make_address", "members_only", "notice",
       ]);
       assert.deepEqual(all.body.coins, OFFERED);
       for (const key of ["bytes", "balance_micro_usd", "deposits"]) assert.equal(key in out.body, false, key);
@@ -207,7 +208,7 @@ describe("who reads what", () => {
     assert.equal(out.status, 200, JSON.stringify(out.body));
     assert.equal(out.body.visibility, "sealed");
     assert.deepEqual(out.body.addresses.map((x: any) => [x.coin, x.address]), [["btc", a.address_in]]);
-    assert.deepEqual(out.body.members_only, ["bytes", "balance", "deposits", "history"]);
+    assert.deepEqual(out.body.members_only, ["bytes", "balance", "deposits", "history", "read_only"]);
     for (const key of ["bytes", "balance_micro_usd", "deposits"]) assert.equal(key in out.body, false, key);
     const mine = await get(s.name, s.owner);
     assert.equal(mine.body.balance_micro_usd, 0);
@@ -227,13 +228,14 @@ describe("who reads what", () => {
         assert.equal(out.status, 200, JSON.stringify(out.body));
         assert.deepEqual(out.body.credited_to, { space_id: end!.id, name: last });
         assert.equal(out.body.notice, REPLACED_NOTICE(last));
-        assert.ok(out.body.notice.includes(`Deposits to these addresses credit [${last}]`), out.body.notice);
+        assert.ok(out.body.notice.includes(`deposits to these addresses credit [${last}]`), out.body.notice);
+        assert.ok(out.body.notice.includes(`Its storage is billed to [${last}]`), out.body.notice);
         assert.ok(!/cannot move/.test(out.body.notice), out.body.notice);
       }
       // The SPACE at the end is not replaced: its own deposits are its own.
       const own = await get(last, s.owner);
       assert.equal(own.body.credited_to, null);
-      assert.equal(own.body.notice, FUNDING_NOTICE);
+      assert.equal(own.body.notice, NOT_STARTED_NOTICE(own.body.billing_from));
     }
   });
 
@@ -330,8 +332,11 @@ describe("the balance and the deposits", () => {
     const out = await get(s.name, null);
     assert.equal(out.status, 200, JSON.stringify(out.body));
     const [sum] = await fixture.owner<{ s: string }[]>`select coalesce(sum(amount_micro), 0)::text as s from schellingaf.credit_ledger where space_id = ${s.id}::uuid`;
-    assert.equal(out.body.balance_micro_usd, Number(sum!.s));
-    assert.equal(out.body.balance_micro_usd, 3_750_001);
+    // To a member exact; to anyone else down to the cent (0.9).
+    const member = await get(s.name, s.owner);
+    assert.equal(member.body.balance_micro_usd, Number(sum!.s));
+    assert.equal(member.body.balance_micro_usd, 3_750_001);
+    assert.equal(out.body.balance_micro_usd, 3_750_000);
     const d = out.body.deposits;
     assert.deepEqual([d.pending_count, d.held_count, d.rejected_count, d.credited_count], [22, 2, 1, 2]);
     assert.equal(d.pending.length, 20);
@@ -348,22 +353,25 @@ describe("the balance and the deposits", () => {
     const row: FundingRow = {
       post_bytes: "1000", file_bytes: "0", last_day: null,
       bill_billable: null, bill_due: null, bill_allowance: null, bill_rate: null, bill_days: null, bill_bytes_per_gb: null,
+      task_bytes: "0", bill_taken: null, bill_free: null, bill_shadow: null, billing: "started", billing_from: "2026-09-01",
+      free_until: null, read_only: false, read_only_since: null, own_per_day: "0", per_day: "0", pays_for: [],
     };
     const offer = offerOf("s", [], undefined);
     const state = { balance_micro: "1000", pending_count: 0, held_count: 0, rejected_count: 0, credited_count: 1 };
     const none = { pending: [], held: [], rejected: [] };
     assert.equal(fundingFigures("s", "public", row, true, offer, state, none).days_left, null);
     const tiny = { ...FUNDING, allowanceBytes: { public: 0, private: 0, sealed: 0 }, microUsdPerGbMonth: 30_000_000_000 };
-    const big: FundingRow = { ...row, post_bytes: "1000000" };
     const perDay = dailyMicroUsd(1_000_000, 0, tiny);
+    const big: FundingRow = { ...row, post_bytes: "1000000", own_per_day: String(perDay), per_day: String(perDay) };
     assert.ok(perDay > 0 && 1000 % perDay !== 0, `per day ${perDay}`);
     const out = fundingFigures("s", "public", big, true, offer, state, none, tiny);
     assert.equal(out.would_be_billed_per_day_micro_usd, perDay);
+    assert.equal(out.per_day_micro_usd, perDay);
     assert.equal(out.days_left, Math.floor(1000 / perDay));
   });
 
   test("the answer of the addresses alone carries no figure", () => {
-    const out = addressesAnswer("s", "private", offerOf("s", [], undefined));
+    const out = addressesAnswer("s", "private", offerOf("s", [], undefined), { state: "started", from: "2026-09-01" });
     for (const key of FULL_ONLY) assert.equal(key in out, false, key);
   });
 });
@@ -393,10 +401,10 @@ describe("the history", () => {
     assert.equal(seen.length, 6);
     const ids = seen.map((e) => e.entry_id);
     assert.deepEqual(ids, [...ids].sort((x, y) => y - x), "newest first");
-    assert.deepEqual({ ...seen[0], at: null }, { entry_id: ids[0], kind: "adjustment", amount_micro_usd: 0, balance_after_micro_usd: 15_000_000, at: null, deposit: null });
+    assert.deepEqual({ ...seen[0], at: null }, { entry_id: ids[0], kind: "adjustment", amount_micro_usd: 0, balance_after_micro_usd: 15_000_000, at: null, deposit: null, bill: null });
     assert.deepEqual({ ...seen[1], at: null }, {
       entry_id: ids[1], kind: "deposit", amount_micro_usd: 5_000_000, balance_after_micro_usd: 15_000_000, at: null,
-      deposit: { coin: "base/usdc", network: "Base", txid_in: "tx-5", value_forwarded_coin: "5", address: a.address_in },
+      deposit: { coin: "base/usdc", network: "Base", txid_in: "tx-5", value_forwarded_coin: "5", address: a.address_in }, bill: null,
     });
     assert.deepEqual(seen.slice(1).map((e) => e.deposit.txid_in), ["tx-5", "tx-4", "tx-3", "tx-2", "tx-1"]);
     const whole = await history(s.name);
@@ -431,11 +439,26 @@ describe("the history", () => {
   test("a page holds one past it to say has_more, and gives that one no place", () => {
     const row = (id: number) => ({
       entry_id: String(id), kind: "free_grant", amount_micro: "1", balance_after_micro: String(id), created_at: new Date(0),
-      coin: null, txid_in: null, value_forwarded_coin: null, address_in: null,
+      coin: null, txid_in: null, value_forwarded_coin: null, address_in: null, bill_day: null, bill_space: null,
     });
-    assert.deepEqual(historyAnswer("s", [row(9), row(8), row(7)], 2).entries.map((e) => e.entry_id), [9, 8]);
-    assert.equal(historyAnswer("s", [row(9), row(8), row(7)], 2).next_before, 8);
-    assert.equal(historyAnswer("s", [row(9), row(8)], 2).has_more, false);
+    assert.deepEqual(historyAnswer("s", [row(9), row(8), row(7)], 2, true).entries.map((e) => e.entry_id), [9, 8]);
+    assert.equal(historyAnswer("s", [row(9), row(8), row(7)], 2, true).next_before, 8);
+    assert.equal(historyAnswer("s", [row(9), row(8)], 2, true).has_more, false);
+  });
+
+  test("to a caller who is not a member every amount but a deposit's is in cents toward zero: a recovery's adjustments too", () => {
+    const row = (id: number, kind: string, amount: number) => ({
+      entry_id: String(id), kind, amount_micro: String(amount), balance_after_micro: "1234567", created_at: new Date(0),
+      coin: null, txid_in: null, value_forwarded_coin: null, address_in: null, bill_day: null, bill_space: null,
+    });
+    const rows = [row(4, "adjustment", 1_234_567), row(3, "adjustment", -1_234_567), row(2, "bill", -1_234_567), row(1, "deposit", 1_234_567)];
+    const amounts = (member: boolean) => historyAnswer("s", rows, 10, member).entries.map((e) => [e.kind, e.amount_micro_usd, e.balance_after_micro_usd]);
+    assert.deepEqual(amounts(false), [
+      ["adjustment", 1_230_000, 1_230_000], ["adjustment", -1_230_000, 1_230_000], ["bill", -1_230_000, 1_230_000], ["deposit", 1_234_567, 1_230_000],
+    ]);
+    assert.deepEqual(amounts(true), [
+      ["adjustment", 1_234_567, 1_234_567], ["adjustment", -1_234_567, 1_234_567], ["bill", -1_234_567, 1_234_567], ["deposit", 1_234_567, 1_234_567],
+    ]);
   });
 
   test("under a generic plan the page reads the SPACE's entries by credit_ledger_space_idx, before as an index condition", async () => {
@@ -519,7 +542,7 @@ describe("the connector", () => {
       "deposits: open on this server", "deposit addresses:", `base/usdc on Base: ${a.address_in}, minimum 3`,
       `coins offered, minimums as of ${COINS_AS_OF}, by network:`, "Solana (cheap): ", "base/usdc min 3",
       `make an address: POST /v1/spaces/${s.name}/funding/addresses`,
-      "balance: 3000000 micro-dollars; days left at the bill shown: none, nothing would be billed",
+      "balance: 3000000 micro-dollars; days left: none, nothing is billed now",
       "deposits: 1 incoming, not yet credited; 0 held; 0 rejected; 1 credited", "incoming: base/usdc, transaction conn-2",
       `credit entries: GET /v1/spaces/${s.name}/funding/history`, json.notice,
     ]) assert.ok(text.includes(part), `${part} is missing from:\n${text}`);
@@ -613,6 +636,9 @@ describe("the surface", () => {
     const get = doc.paths["/v1/spaces/{name}/funding"].get.responses["200"].content["application/json"].schema;
     assert.deepEqual(get.oneOf.map((s: any) => s.$ref.split("/").pop()), ["FundingFull", "FundingAddresses"]);
     assert.deepEqual(doc.paths["/v1/spaces/{name}/funding/history"].get.parameters.filter((p: any) => p.in === "query").map((p: any) => p.name), ["before", "limit"]);
+    // The balance moves by adjustments too, and a stranger sees them in cents.
+    assert.match(doc.components.schemas.FundingFull.properties.balance_micro_usd.description, /less its bills, plus or minus its adjustments/);
+    assert.match(JSON.stringify(doc.paths["/v1/spaces/{name}/funding/history"].get.responses["200"]), /every amount but a deposit's is rounded toward zero to the cent/);
   });
 
   test("capabilities has funding among the modules, its limits, and nothing of it planned", async () => {
@@ -621,7 +647,11 @@ describe("the surface", () => {
     assert.equal(caps.modules.funding.deposits_open, true);
     assert.equal(caps.modules.funding.history, "GET /v1/spaces/{name}/funding/history");
     assert.equal("funding" in caps.planned, false);
-    assert.deepEqual(Object.keys(caps.limits.funding), ["addresses_per_key_per_day", "addresses_per_day", "callback_bytes"]);
+    assert.deepEqual(Object.keys(caps.limits.funding), ["addresses_per_key_per_day", "addresses_per_day", "callback_bytes", "allowance_bytes", "rate"]);
+    assert.deepEqual(caps.limits.funding.allowance_bytes, FUNDING.allowanceBytes);
+    assert.equal(caps.modules.funding.refusal, "CREDIT_NEEDED");
+    assert.ok(["not_started", "started", "paused"].includes(caps.modules.funding.billing), caps.modules.funding.billing);
+    assert.match(caps.modules.funding.billing_from, /^\d{4}-\d{2}-\d{2}$/);
     const closed = await (await createApp(config, db).request("/v1/capabilities")).json() as any;
     assert.deepEqual({ ...closed.modules.funding, deposits_open: true }, caps.modules.funding, "the module is the same with deposits closed");
   });

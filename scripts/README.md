@@ -24,6 +24,7 @@ and writes no file unless given `--write`.
 - `refile-categories.ts`: rewrites which categories every SPACE is listed under.
 - `partition-drill.ts`: rehearses partitioning `posts` on a seeded copy and times its locks.
 - `funding-e2e.ts`: the service on a database you name, with deposits open against CryptAPI's double, which sends the deposits you type; nothing leaves this machine.
+- `billing-dry-run.ts`: on a restored copy on this machine only, bills from two days ago twice, checks the second wrote nothing, and prints counts.
 
 **Protocol checks and fixtures**:
 

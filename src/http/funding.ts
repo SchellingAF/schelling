@@ -1,6 +1,6 @@
 // A SPACE's funding: GET /v1/spaces/{name}/funding, its deposit addresses, the coins it
-// takes, its balance and deposits, and what it stores and would be billed; and its credit
-// entries, GET /v1/spaces/{name}/funding/history. A SPACE's deposit address for a coin:
+// takes, its balance and deposits, what it stores, what a day costs, the days left and
+// whether it is read-only; and its credit entries, GET /v1/spaces/{name}/funding/history. A SPACE's deposit address for a coin:
 // POST /v1/spaces/{name}/funding/addresses, below. And the provider's callback when a
 // deposit arrives: POST /funding/cryptapi/..., at the end.
 //
@@ -12,9 +12,12 @@
 // members for a private or sealed one. A caller who is not a member of a private or sealed
 // SPACE is answered the addresses alone, with members_only naming what it is not shown;
 // the history refuses it. A withheld SPACE is refused to everyone. The bytes are the live
-// counters (0148, 0121); the allowance and the rate are FUNDING's; the last day is the
-// latest the billing job finished, with this SPACE's bill row for it when it was over. The
-// balance and the deposits are 0153's reads. Billing has not started: nothing is taken.
+// counters (0148, 0121, 0154); the allowance and the rate are FUNDING's, which SQL's
+// billing_rates() holds equal; the last day is the latest the billing job finished, with
+// this SPACE's bill row for it when it was over. The balance and the deposits are 0153's
+// reads. Storage over the allowance is billed each UTC day from billing_from (0155), and
+// at zero a SPACE is read-only (0157); space_funding() (0158) says where billing stands,
+// what a day costs and whether the SPACE is read-only.
 //
 // A side channel, closed: a post in a public SPACE carries a part only its members read
 // (data, budget, run_id), stored and counted. Exact live bytes would let a stranger learn
@@ -22,10 +25,12 @@
 // the post bytes and the file bytes are each rounded down to a multiple of 100,000, and every
 // other figure is worked from those: the total is their sum, and over_bytes and the money
 // come from that total; the last day's money from its rounded billable bytes. A figure
-// worked from the exact bytes would tell what the rounding hides. Members see exact
-// figures. fundingAnswer() is the whole rule. The balance is exact for everyone who reads
-// it: with no bills taken it is the sum of the SPACE's deposits, which are public on their
-// chains. Never cached as a public read: the figures change with every post.
+// worked from the exact bytes would tell what the rounding hides. Once bills are taken, an
+// exact balance or bill tells the bytes to about 6 KB a day, so to a caller who is not a
+// member the balance is rounded down to the cent and each bill or adjustment taken toward
+// zero to the cent; a deposit stays exact, being public on its chain. Members see exact figures.
+// fundingAnswer() and fundingFigures() are the whole rule. Never cached as a public read:
+// the figures change with every post.
 
 import type { Hono } from "hono";
 import type { Db } from "../db/sql.ts";
@@ -48,21 +53,45 @@ import { decimalText, type Decimal } from "../funding/decimal.ts";
 /** The byte figures a caller who is not a member sees are multiples of this. */
 export const FUNDING_ROUNDING_BYTES = 100_000;
 
-export const FUNDING_NOTICE =
-  "Billing has not started: nothing is taken from the balance. " +
-  "Deposits are credited in US dollars once confirmed: USDT, USDC, USDC.e, USDT0, DAI and PYUSD one for one, other coins at the provider's price, after its fee and the network's. " +
-  "Credit is not refundable and cannot move to another SPACE. The rate and allowance shown may change if billing starts.";
+/** The money a caller who is not a member sees, but for deposits, is in whole cents. */
+export const FUNDING_ROUNDING_MICRO = 10_000;
 
-/** The notice of a replaced SPACE: its deposits credit `credited`, the end of its replaced_by chain. */
+/** Where billing stands: before billing_from, billing, or switched off by the operator. */
+export type BillingState = "not_started" | "started" | "paused";
+
+/** The second sentence of the notice while billing is or will be on: the read-only rule. */
+const READ_ONLY_NOTICE =
+  "A SPACE over its free allowance is read-only at zero credit, or once a day's bill could not be paid in full, until credit pays a day or it is back within its allowance. Read-only means everything can be read, nothing is deleted, and nothing new is stored. ";
+
+/** What every notice says of deposits. */
+const DEPOSIT_TERMS_NOTICE =
+  "Deposits are credited in US dollars once confirmed: USDT, USDC, USDC.e, USDT0, DAI and PYUSD one for one, other coins at the provider's price, after its fee and the network's. " +
+  "Credit is not refundable and cannot move to another SPACE.";
+
+/** The notice of a SPACE billed now. */
+export const FUNDING_NOTICE = "Storage over the allowance is billed each UTC day from the balance, at the rate shown. " + READ_ONLY_NOTICE + DEPOSIT_TERMS_NOTICE;
+
+/** The notice before billing_from. */
+export const NOT_STARTED_NOTICE = (billingFrom: string): string => `Billing starts on ${billingFrom}: nothing is taken before then. ${READ_ONLY_NOTICE}${DEPOSIT_TERMS_NOTICE}`;
+
+/** The notice while the operator has billing off. */
+export const PAUSED_NOTICE = "Billing is paused: nothing is taken from the balance, and no SPACE is read-only. " + DEPOSIT_TERMS_NOTICE;
+
+/** The notice of a replaced SPACE: its storage is billed to `credited`, the end of its replaced_by chain, and its deposits credit it. */
 export const REPLACED_NOTICE = (credited: string): string =>
-  `Billing has not started: nothing is taken from the balance. This SPACE was replaced. Deposits to these addresses credit [${credited}], in US dollars once confirmed: USDT, USDC, USDC.e, USDT0, DAI and PYUSD one for one, other coins at the provider's price, after its fee and the network's. Credit is not refundable. The rate and allowance shown may change if billing starts.`;
+  `This SPACE was replaced. Its storage is billed to [${credited}], and deposits to these addresses credit [${credited}], in US dollars once confirmed: USDT, USDC, USDC.e, USDT0, DAI and PYUSD one for one, other coins at the provider's price, after its fee and the network's. Credit is not refundable.`;
 
 /** Where a SPACE's deposits are credited: null while it is not replaced. */
 export type CreditedTo = { space_id: string; name: string } | null;
 
+/** Where billing stands and from which day, as billing_state() answers it. */
+export type Billing = { state: BillingState; from: string };
+
 /** The notice every funding.get answer ends with. */
-export function fundingNotice(creditedTo: CreditedTo): string {
-  return creditedTo === null ? FUNDING_NOTICE : REPLACED_NOTICE(creditedTo.name);
+export function fundingNotice(creditedTo: CreditedTo, billing: Billing): string {
+  if (creditedTo !== null) return REPLACED_NOTICE(creditedTo.name);
+  if (billing.state === "paused") return PAUSED_NOTICE;
+  return billing.state === "not_started" ? NOT_STARTED_NOTICE(billing.from) : FUNDING_NOTICE;
 }
 
 /** What space_funding() answers, as the driver gives it. */
@@ -76,21 +105,43 @@ export type FundingRow = {
   bill_rate: string | null;
   bill_days: number | null;
   bill_bytes_per_gb: string | null;
+  task_bytes: string;
+  bill_taken: string | null;
+  bill_free: boolean | null;
+  bill_shadow: boolean | null;
+  billing: BillingState;
+  billing_from: string;
+  free_until: string | null;
+  read_only: boolean;
+  read_only_since: Date | string | null;
+  own_per_day: string;
+  per_day: string;
+  pays_for: { space: string; per_day_micro_usd: number }[];
 };
 
 type Visibility = "public" | "private" | "sealed";
 
+/** Money a caller who is not a member sees: down to the cent, or toward zero for a bill. */
+const cents = (micro: number) => Math.trunc(micro / FUNDING_ROUNDING_MICRO) * FUNDING_ROUNDING_MICRO + 0;
+
 /**
- * The answer, for a member exact, and for anyone else worked from two rounded numbers, the
- * post bytes and the file bytes: total, over_bytes and would_be_billed from their sum, and
- * the last day's figures from its billable bytes rounded the same way.
+ * The answer, for a member exact, and for anyone else worked from three rounded numbers,
+ * the post, file and task bytes: total, over_bytes and what a day of its own storage costs
+ * from their sum (0 while the SPACE's own day costs nothing: free days, not billed), plus
+ * the SPACES it pays for, whose figures are exact (they are closed); the last day's bill
+ * from its billable bytes rounded the same way, and what it took to the cent.
  */
 export function fundingAnswer(space: string, visibility: Visibility, row: FundingRow, member: boolean, funding: Funding = FUNDING) {
   const shown = (bytes: number) => (member ? bytes : Math.floor(bytes / FUNDING_ROUNDING_BYTES) * FUNDING_ROUNDING_BYTES);
   const posts = shown(Number(row.post_bytes));
   const files = shown(Number(row.file_bytes));
-  const total = posts + files;
+  const tasks = shown(Number(row.task_bytes ?? 0));
+  const total = posts + files + tasks;
   const allowance = funding.allowanceBytes[visibility];
+  const ownExact = Number(row.own_per_day ?? 0);
+  // The payer's day less its own: what the SPACES it pays for cost; 0 for a replaced SPACE.
+  const others = Number(row.per_day ?? 0) - ownExact;
+  const own = member || ownExact === 0 ? ownExact : dailyMicroUsd(total, allowance, funding);
   let lastDay = null;
   if (row.last_day !== null) {
     const billable = row.bill_billable === null ? null : shown(Number(row.bill_billable));
@@ -104,24 +155,37 @@ export function fundingAnswer(space: string, visibility: Visibility, row: Fundin
       allowanceBytes: { public: dayAllowance, private: dayAllowance, sealed: dayAllowance },
       spacesOverBytes: [],
     };
+    const billed = !over ? 0 : member ? Number(row.bill_due) : dailyMicroUsd(billable ?? 0, dayAllowance, dayRate);
+    const taken = !over ? 0 : member ? Number(row.bill_taken ?? 0) : cents(Number(row.bill_taken ?? 0));
     lastDay = {
       day: row.last_day,
       over_allowance: over,
       billable_bytes: over ? billable : null,
-      would_be_billed_micro_usd: !over ? 0 : member ? Number(row.bill_due) : dailyMicroUsd(billable ?? 0, dayAllowance, dayRate),
+      billed_micro_usd: billed,
+      taken_micro_usd: taken,
+      free: row.bill_free === true,
+      shadow: row.bill_shadow === true,
+      // Deprecated: 0.8's name for billed_micro_usd.
+      would_be_billed_micro_usd: billed,
     };
   }
   return {
     space,
     visibility,
-    billing: "not_started" as const,
-    bytes: { posts, files, total },
+    billing: row.billing,
+    billing_from: row.billing_from,
+    bytes: { posts, files, tasks, total },
     allowance_bytes: allowance,
     over_bytes: Math.max(0, total - allowance),
     rate: { micro_usd_per_gb_month: funding.microUsdPerGbMonth, days_per_month: funding.daysPerMonth, bytes_per_gb: funding.bytesPerGb },
+    free_until: row.free_until,
+    per_day_micro_usd: own + others,
+    ...(row.pays_for?.length ? { pays_for: row.pays_for } : {}),
+    // Deprecated: 0.8's figure, what a day of these bytes over the allowance costs at the
+    // rate, free days and SPACES paid for aside.
     would_be_billed_per_day_micro_usd: dailyMicroUsd(total, allowance, funding),
     last_day: lastDay,
-    notice: FUNDING_NOTICE,
+    notice: fundingNotice(null, { state: row.billing, from: row.billing_from }),
   };
 }
 
@@ -204,20 +268,24 @@ export function offerOf(name: string, addresses: AddressRow[], funding: FundingC
 }
 
 /** What an answer of the addresses alone leaves out. */
-export const MEMBERS_ONLY = ["bytes", "balance", "deposits", "history"] as const;
+export const MEMBERS_ONLY = ["bytes", "balance", "deposits", "history", "read_only"] as const;
 
 /**
  * The answer to a caller who is not a member of a private or sealed SPACE: the addresses
- * and the coins, and members_only naming what it is not shown. No figure of the SPACE.
+ * and the coins, where billing stands, and the allowance and rate, which are the service's
+ * own; members_only names what it is not shown. No figure of the SPACE.
  */
-export function addressesAnswer(space: string, visibility: Visibility, offer: Offer) {
+export function addressesAnswer(space: string, visibility: Visibility, offer: Offer, billing: Billing, funding: Funding = FUNDING) {
   return {
     space,
     visibility,
-    billing: "not_started" as const,
+    billing: billing.state,
+    billing_from: billing.from,
+    allowance_bytes: funding.allowanceBytes[visibility],
+    rate: { micro_usd_per_gb_month: funding.microUsdPerGbMonth, days_per_month: funding.daysPerMonth, bytes_per_gb: funding.bytesPerGb },
     ...offer,
     members_only: [...MEMBERS_ONLY],
-    notice: fundingNotice(offer.credited_to),
+    notice: fundingNotice(offer.credited_to, billing),
   };
 }
 
@@ -250,10 +318,11 @@ const at = (t: Date | string) => new Date(t).toISOString();
 const micro = (v: string | null) => (v === null ? null : Number(v));
 
 /**
- * The whole answer, for whoever may read the SPACE: fundingAnswer()'s byte figures, then
- * the balance, the days it would last at the bill shown, and the deposits not credited.
- * days_left is worked from the figures this caller sees, and is null while nothing would
- * be billed.
+ * The whole answer, for whoever may read the SPACE: fundingAnswer()'s figures, then the
+ * balance, the days it pays for at what a day costs now, whether the SPACE is read-only,
+ * and the deposits not credited. days_left is worked from the figures this caller sees,
+ * and is null while a day costs nothing and for a replaced SPACE, whose payer
+ * credited_to names.
  */
 export function fundingFigures(
   space: string,
@@ -265,22 +334,21 @@ export function fundingFigures(
   deposits: { pending: DepositRow[]; held: DepositRow[]; rejected: DepositRow[] },
   funding: Funding = FUNDING,
 ) {
-  const { notice, ...figures } = fundingAnswer(space, visibility, row, member, funding);
-  const balance = Number(state.balance_micro);
-  const perDay = figures.would_be_billed_per_day_micro_usd;
+  const { notice, space: _s, visibility: _v, billing, billing_from, ...figures } = fundingAnswer(space, visibility, row, member, funding);
+  const exact = Number(state.balance_micro);
+  const balance = member ? exact : Math.floor(exact / FUNDING_ROUNDING_MICRO) * FUNDING_ROUNDING_MICRO;
+  const perDay = figures.per_day_micro_usd;
   return {
     space,
     visibility,
-    billing: figures.billing,
+    billing,
+    billing_from,
     ...offer,
-    bytes: figures.bytes,
-    allowance_bytes: figures.allowance_bytes,
-    over_bytes: figures.over_bytes,
-    rate: figures.rate,
-    would_be_billed_per_day_micro_usd: perDay,
-    last_day: figures.last_day,
+    ...figures,
     balance_micro_usd: balance,
-    days_left: perDay > 0 ? Math.floor(balance / perDay) : null,
+    days_left: perDay > 0 && offer.credited_to === null ? Math.floor(balance / perDay) : null,
+    read_only: row.read_only === true,
+    read_only_since: row.read_only_since === null ? null : at(row.read_only_since),
     deposits: {
       pending: deposits.pending.map((d) => ({ coin: depositCoin(d.coin), txid_in: d.txid_in, value_coin: d.value_coin, seen_at: at(d.seen_at) })),
       held: deposits.held.map((d) => ({
@@ -293,7 +361,7 @@ export function fundingFigures(
       credited_count: state.credited_count,
     },
     history: `GET /v1/spaces/${space}/funding/history`,
-    notice: offer.credited_to === null ? notice : fundingNotice(offer.credited_to),
+    notice: offer.credited_to === null ? notice : fundingNotice(offer.credited_to, { state: billing, from: billing_from }),
   };
 }
 
@@ -308,20 +376,31 @@ export type HistoryRow = {
   txid_in: string | null;
   value_forwarded_coin: string | null;
   address_in: string | null;
+  bill_day: string | null;
+  bill_space: string | null;
 };
 
-/** A page of credit entries: `rows` holds one past the page when there is more. Never a ledger entry's note. */
-export function historyAnswer(space: string, rows: HistoryRow[], limit: number) {
+/**
+ * A page of credit entries: `rows` holds one past the page when there is more. Never a
+ * ledger entry's note. A bill names the day it is for and the SPACE it measured. To a
+ * caller who is not a member, every amount but a deposit's (a bill, an adjustment) is taken
+ * toward zero to the cent and every balance down to the cent; a deposit's amount is exact,
+ * as its chain shows it.
+ */
+export function historyAnswer(space: string, rows: HistoryRow[], limit: number, member: boolean) {
   const page = rows.slice(0, limit);
   const hasMore = rows.length > limit;
+  const amount = (r: HistoryRow) => (member || r.kind === "deposit" ? Number(r.amount_micro) : cents(Number(r.amount_micro)));
+  const after = (micro: number) => (member ? micro : Math.floor(micro / FUNDING_ROUNDING_MICRO) * FUNDING_ROUNDING_MICRO);
   return {
     space,
     entries: page.map((r) => ({
       entry_id: Number(r.entry_id),
       kind: r.kind,
-      amount_micro_usd: Number(r.amount_micro),
-      balance_after_micro_usd: Number(r.balance_after_micro),
+      amount_micro_usd: amount(r),
+      balance_after_micro_usd: after(Number(r.balance_after_micro)),
       at: at(r.created_at),
+      bill: r.bill_day !== null && r.bill_space !== null ? { day: r.bill_day, space: r.bill_space } : null,
       deposit:
         r.coin === null || r.txid_in === null || r.address_in === null
           ? null
@@ -399,10 +478,16 @@ export function mountFunding(app: Hono<Env>, config: Config, db: Db) {
       const creditedTo = space.credited_id === null || space.credited_name === null ? null : { space_id: space.credited_id, name: space.credited_name };
       const offer = offerOf(name, addresses, funding, creditedTo, withCoins);
       // Not a member of a private or sealed SPACE: the addresses alone.
-      if (!space.readable) return addressesAnswer(name, space.visibility, offer);
+      if (!space.readable) {
+        const [billing] = await sql<{ state: BillingState; from: string }[]>`
+          select b.state, b.real_from::text as from from schellingaf.billing_state() b`;
+        return addressesAnswer(name, space.visibility, offer, billing!);
+      }
       const [row] = await sql<FundingRow[]>`
         select post_bytes::text, file_bytes::text, last_day::text, bill_billable::text, bill_due::text,
-               bill_allowance::text, bill_rate::text, bill_days, bill_bytes_per_gb::text
+               bill_allowance::text, bill_rate::text, bill_days, bill_bytes_per_gb::text,
+               task_bytes::text, bill_taken::text, bill_free, bill_shadow, billing, billing_from::text,
+               free_until::text, read_only, read_only_since, own_per_day::text, per_day::text, pays_for
           from schellingaf.space_funding(${space.space_id}::uuid)`;
       const [state] = await sql<StateRow[]>`
         select balance_micro::text, pending_count, held_count, rejected_count, credited_count
@@ -428,18 +513,20 @@ export function mountFunding(app: Hono<Env>, config: Config, db: Db) {
     const before = rawBefore === undefined || rawBefore === "" ? null : cursor(rawBefore, "before");
     const limit = historyLimit(c.req.query("limit"));
     const rows = await db.readTx(me, async (sql) => {
-      const [space] = await sql<{ space_id: string; readable: boolean; owner: Buffer }[]>`
-        select s.space_id::text, schellingaf.can_read_space(s.space_id) as readable, s.owner_id as owner
+      const [space] = await sql<{ space_id: string; readable: boolean; member: boolean; owner: Buffer }[]>`
+        select s.space_id::text, schellingaf.can_read_space(s.space_id) as readable,
+               schellingaf.caller_in_space(s.space_id) as member, s.owner_id as owner
           from schellingaf.spaces s where s.name = ${name}`;
       if (!space) return null;
       if (!space.readable) throw await readDenied(sql, space.space_id, space.owner, me);
-      return sql<HistoryRow[]>`
+      const entries = await sql<HistoryRow[]>`
         select h.entry_id::text, h.kind, h.amount_micro::text, h.balance_after_micro::text, h.created_at,
-               h.coin, h.txid_in, h.value_forwarded_coin::text, h.address_in
+               h.coin, h.txid_in, h.value_forwarded_coin::text, h.address_in, h.bill_day::text, h.bill_space
           from schellingaf.funding_history(${space.space_id}::uuid, ${before === null ? null : before.toString()}::bigint, ${limit + 1}) h`;
+      return { entries, member: !!space.member };
     });
     if (rows === null) throw new ApiError("SPACE_NOT_FOUND");
-    return c.json(historyAnswer(name, rows, limit));
+    return c.json(historyAnswer(name, rows.entries, limit, rows.member));
   });
 
   // The deposit address for a coin: made by the provider on the first request for this
