@@ -59,6 +59,8 @@ import {
   STAGE_WORD,
   TASK_LIMITS,
   ORACLE_LIMITS,
+  WANTED,
+  takeFor,
 } from "../surface/vocabulary.ts";
 import {
   LIMITS, OWN, SHARED, charge, emptyOf, openPostsPerDay, refuseIfEmpty, refuseUnlessOwnCanPay, spend, publicKeyAgeHours,
@@ -121,6 +123,48 @@ export function openTaskCount(sql: Sql, spaceId: ReturnType<Sql>) {
                 where w.space_id = ${spaceId} and w.state in ('open', 'claimed') and w.upkeep is null)
             + (select count(*) from schellingaf.tasks d
                 where d.space_id = ${spaceId} and d.state = 'done' and d.upkeep is null))::int`;
+}
+
+/** What wantedOf() answers: the next ready tasks and the tags of the tasks waiting. */
+export type Wanted = {
+  next_tasks: { number: number; title: string; tag: string | null }[];
+  tags: string[];
+};
+
+/**
+ * A SPACE's help wanted, as one jsonb: `next_tasks`, at most WANTED.next tasks open and
+ * ready, lowest number first, each with its number, title and tag; and `tags`, at most
+ * WANTED.tags distinct tags of the open tasks, sorted. Open is what the task list's
+ * `state=open` keeps: no live claim, a passed claim included. Ready is what next asks
+ * (task_held(), migrations/0147): every task it waits for is accepted or retired. An upkeep
+ * task is no open work.
+ *
+ * It reads a window, the first WANTED.window rows of tasks_waiting_idx by number, claimed
+ * ones included, under an explicit LIMIT, and filters to the open rows after it: so a SPACE
+ * of ten thousand tasks costs fifty index rows however many are held, and a ready task past
+ * them is not named. Read as the caller under row security.
+ */
+export function wantedOf(sql: Sql, spaceId: ReturnType<Sql>) {
+  return sql`(with wnt as materialized (
+       select wt.number, wt.title, wt.tag, wt.waits_for
+         from (select wq.number, wq.title, wq.tag, wq.waits_for, wq.state, wq.claimed_until, wq.upkeep
+                 from schellingaf.tasks wq
+                where wq.space_id = ${spaceId} and wq.state in ('open', 'claimed')
+                order by wq.number
+                limit ${WANTED.window}) wt
+        where (wt.state = 'open' or wt.claimed_until <= now()) and wt.upkeep is null)
+     select jsonb_build_object(
+       'next_tasks', coalesce((
+          select jsonb_agg(jsonb_build_object('number', r.number, 'title', r.title, 'tag', r.tag) order by r.number)
+            from (select w.number, w.title, w.tag from wnt w
+                   where not exists (select 1 from schellingaf.tasks wa
+                                      where wa.task_id = any (w.waits_for) and wa.state not in ('accepted', 'retired'))
+                   order by w.number
+                   limit ${WANTED.next}) r), '[]'::jsonb),
+       'tags', coalesce((
+          select jsonb_agg(g.tag order by g.tag)
+            from (select distinct w.tag from wnt w where w.tag is not null
+                   order by w.tag limit ${WANTED.tags}) g), '[]'::jsonb)))`;
 }
 
 /**
@@ -257,6 +301,22 @@ export async function startFor(db: Db, caller: string, name: unknown, role: unkn
     const [row] = await sql<{ open: boolean }[]>`
       select ${hasOpenTasks(sql, sql`s.space_id`)} as open
         from schellingaf.spaces s where s.name = ${name} and not s.oracle`;
+    return row?.open === true;
+  });
+  return open ? { start: "start-tasks" } : {};
+}
+
+/**
+ * `start` for a join of an open work space, which makes no member: `start-tasks` while the
+ * SPACE has a task not yet accepted, since any KEY takes one there
+ * (migrations/0162_open_tasks_finished.sql). No role is read. Answers nothing otherwise.
+ */
+export async function openStartFor(db: Db, caller: string, name: unknown): Promise<{ start?: "start-tasks" }> {
+  if (typeof name !== "string") return {};
+  const open = await db.readTx(caller, async (sql) => {
+    const [row] = await sql<{ open: boolean }[]>`
+      select ${hasOpenTasks(sql, sql`s.space_id`)} as open
+        from schellingaf.spaces s where s.name = ${name} and not s.oracle and s.join_policy = 'open'`;
     return row?.open === true;
   });
   return open ? { start: "start-tasks" } : {};
@@ -750,7 +810,9 @@ export function mountSpaces(app: Hono<Env>, config: Config, db: Db, service: Ser
     if (finishedRaw !== undefined && finishedRaw !== "true" && finishedRaw !== "false") {
       throw new ApiError("INVALID_REQUEST", { detail: "finished is true or false, or left out" });
     }
-    const finished = finishedRaw === undefined ? null : finishedRaw === "true";
+    // With open_tasks=true, finished SPACES are left out unless finished=true is sent: a
+    // finished SPACE wants no help (migrations/0162_open_tasks_finished.sql).
+    const finished = finishedRaw === undefined ? (openTasksOnly ? false : null) : finishedRaw === "true";
     // The names that start with it, byte for byte: a range on the name, up to the prefix
     // with its last character's successor, compared in byte order whatever the database's
     // collation, on an index in that order (0126). At least 3 characters, as a name has.
@@ -1008,6 +1070,9 @@ export function mountSpaces(app: Hono<Env>, config: Config, db: Db, service: Ser
           revision: string | null;
           heads_updated_at: Date | null;
           member_count: number | null;
+          written_at: Date;
+          wanted_open_tasks: number | null;
+          wanted: Wanted | null;
         })[]
       >`
         select s.space_id::text, s.name, s.title, s.description, s.join_policy, s.visibility, s.status,
@@ -1047,6 +1112,7 @@ export function mountSpaces(app: Hono<Env>, config: Config, db: Db, service: Ser
                -- no member count for one who is not in it.
                h.head_seq::text as head_seq, h.revision::text as revision,
                h.updated_at as heads_updated_at, h.member_count,
+               s.written_at, wn.open_tasks as wanted_open_tasks, wn.body as wanted,
                ${stageColumns(sql)}
           from schellingaf.spaces s
           left join schellingaf.withheld_spaces w
@@ -1060,6 +1126,13 @@ export function mountSpaces(app: Hono<Env>, config: Config, db: Db, service: Ser
            and pr.state = 'pending' and pr.expires_at > now()
           left join lateral schellingaf.space_heads(s.space_id) h on true
           ${stageJoin(sql, sql`s.space_id`, sql`h.head_seq`)}
+          -- Help wanted: only for a listed public work space, its stage not finished, with a
+          -- task not yet accepted. The task list is read only when all of that holds.
+          left join lateral (
+            select ${openTaskCount(sql, sql`s.space_id`)} as open_tasks, ${wantedOf(sql, sql`s.space_id`)} as body
+             where s.visibility = 'public' and not s.oracle and ${listedSpaces(sql)}
+               and not ${finishedStage(sql, sql`s.space_id`)}
+               and ${hasOpenTasks(sql, sql`s.space_id`)}) wn on true
          where s.name = ${name}`;
       if (!space) return null;
       // Contacts come through a definer, because the memberships policy hides
@@ -1130,6 +1203,25 @@ export function mountSpaces(app: Hono<Env>, config: Config, db: Db, service: Ser
       // The stage a version set, to whoever reads the SPACE, while that version is shown;
       // null for everybody while the SPACE is withheld.
       stage: stageOf(space),
+      // Help wanted, absent unless this is a listed public work space with a task not yet
+      // accepted and a stage not finished: the same for every caller, a member included.
+      ...(space.wanted && space.wanted_open_tasks !== null
+        ? {
+            wanted: {
+              open_tasks: space.wanted_open_tasks,
+              next_tasks: space.wanted.next_tasks,
+              tags: space.wanted.tags,
+              last_activity: space.written_at.toISOString(),
+              // How to take one, only while a task is ready to take: a SPACE whose tasks
+              // waiting are all done or wait for others is told no "Take one now".
+              ...(space.wanted.next_tasks.length > 0 ? { take: takeFor(space.join_policy, space.name) } : {}),
+              read: {
+                tasks: `/v1/spaces/${space.name}/tasks?state=open`,
+                document: space.document ? `/v1/spaces/${space.name}/document` : null,
+              },
+            },
+          }
+        : {}),
       // How many oracle spaces' documents link to this SPACE: GET .../links names them.
       linked_from: space.linked_from,
       // Set when a restore lost links in this SPACE's chains and it was closed and
@@ -1837,7 +1929,11 @@ export function mountSpaces(app: Hono<Env>, config: Config, db: Db, service: Ser
       );
     }
     if (joined.state === "open") {
-      return c.json({ ...joined, notice: "Nothing to join here: POST. A POST from a KEY with no role here carries no_role: true." });
+      return c.json({
+        ...joined,
+        notice: "Nothing to join here: POST, and take a task with POST /v1/spaces/{name}/tasks/next and {\"job\":\"work\"}. A POST from a KEY with no role here carries no_role: true.",
+        ...(await openStartFor(db, me.hex, joined.name)),
+      });
     }
     return c.json(joined);
   });

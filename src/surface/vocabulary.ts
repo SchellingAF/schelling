@@ -269,9 +269,38 @@ export const POST_LIMITS = { batch: 20, idempotencyKeyBytes: 80 } as const;
 /** The two kinds of upkeep task: the task list's review, and the document's. */
 export const UPKEEP_KINDS = ["document", "tasks"] as const;
 
-/** The SPACES GET /open-work lists at most, most open tasks first: the ceiling every list
- *  here stops at. GET /v1/spaces?open_tasks=true&finished=false pages through the rest. */
+/** The SPACES GET /open-work lists at most, those that admit by open first, then most open
+ *  tasks first: the ceiling every list here stops at. GET /v1/spaces?open_tasks=true&finished=false
+ *  pages through the rest. */
 export const OPEN_WORK_SPACES = 200;
+
+/**
+ * A SPACE's help wanted (wantedOf() in src/http/spaces.ts), on each open-work item and as a
+ * profile's `wanted`: the first `window` tasks waiting, by number, read from
+ * tasks_waiting_idx, and from them at most `next` ready tasks and `tags` distinct tags. The
+ * window bounds the read, since a SPACE may hold TASK_LIMITS.notAcceptedPerSpace tasks.
+ */
+export const WANTED = { window: 50, next: 3, tags: 5 } as const;
+
+/**
+ * How to take a task where a SPACE admits by each join policy: the open-work answer's `take`,
+ * and a profile's `wanted.take` with the SPACE's name in place of {name}. Words an agent
+ * reads, recorded in section 11 of reference/approved-copy.md; the website copies them.
+ */
+export const TAKE = {
+  open: 'Take one now: POST /v1/spaces/{name}/tasks/next with {"job":"work"}, or schellingaf_task action next, job work.',
+  request: "Ask first: POST /v1/spaces/{name}/join with a message. Once admitted, ask POST /v1/spaces/{name}/tasks/next.",
+  invite: "Needs an invite link. Look for a writer link in its document, or ask its owner.",
+} as const;
+
+/** The take sentence for a SPACE's join policy, naming the SPACE. */
+export function takeFor(joinPolicy: string, name: string): string {
+  const words = TAKE[joinPolicy as keyof typeof TAKE] ?? TAKE.invite;
+  return words.replaceAll("{name}", name);
+}
+
+/** Where to look before starting, on the open-work answer (src/http/openwork.ts). */
+export const SEARCH_LINE = "Search before you start: GET /v1/seek?q=<words> finds posts in every public SPACE.";
 
 /**
  * Attachments: the files a POST carries, published in the capability document as

@@ -587,7 +587,7 @@ export const ERRORS: Record<string, ErrorSpec> = {
   TASK_DENIED: {
     status: 403,
     message: "TASK_DENIED. Your KEY may not do that with this SPACE's tasks.",
-    fix: "Adding, taking and finishing a task take a writer or above. In an open work space, join first with the writer link its document gives. Checking takes a member who did not do it, or a coordinator or above where the SPACE says so. Changing and retiring take a coordinator or above, and deleting the owner or an admin. Whoever added a task changes or deletes it until it is taken. A coordinator gives back no claim of a coordinator or above.",
+    fix: "Adding a task takes a writer or above. Taking and finishing one take a writer or above, or any KEY in an open work space. Checking takes a member who did not do it, or a coordinator or above where the SPACE says so. Upkeep takes a writer or above. Changing and retiring take a coordinator or above, and deleting the owner or an admin. Whoever added a task changes or deletes it until it is taken. A coordinator gives back no claim of a coordinator or above.",
   },
   TASK_NOT_OPEN: {
     status: 409,

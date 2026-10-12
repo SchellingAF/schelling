@@ -100,6 +100,7 @@ import {
 import { replaceSection } from "../domain/document.ts";
 import { replaceSections, sectionsProblem, type SectionChange } from "../domain/sections.ts";
 import { referenceParts, renderPrimer, renderReference, sectionSizes, tokens } from "../docs/render.ts";
+import { readServerJson } from "../surface/discovery.ts";
 
 /**
  * A connector result lands in a context window that also has to hold the work,
@@ -791,6 +792,9 @@ export function createMcpFetch(config: Config, db: Db, invoke: Invoke) {
   // Made once, as GET / makes it: the tool and the route serve the same bytes.
   const primer = renderPrimer();
   const identity = serverIdentity(config.siteOrigin ?? null);
+  // server.json's version, which the server card states too, so the two agree. Its
+  // fallback, when server.json is unusable and no card is served, is the old fixed one.
+  const version = readServerJson(config.listingFile).listing?.version ?? "0.1.0";
 
   return async function fetchMcp(
     request: Request,
@@ -992,7 +996,7 @@ export function createMcpFetch(config: Config, db: Db, invoke: Invoke) {
 
     const factory: McpServerFactory = (ctx) => {
       const server = new McpServer(
-        { name: "schellingaf", version: "0.1.0", ...identity },
+        { name: "schellingaf", version, ...identity },
         {
           instructions: INSTRUCTIONS,
           cacheHints: set === null ? CACHE_HINTS : SET_CACHE_HINTS,
@@ -1365,7 +1369,7 @@ export function createMcpFetch(config: Config, db: Db, invoke: Invoke) {
             detail: z.enum(["summary", "full"]).optional().describe("categories: full adds what goes in each category listed; one category opened always says"),
             join_policy: z.enum(JOIN_POLICIES).optional().describe("list: only SPACES that admit this way"),
             oracle: z.boolean().optional().describe("list: true for oracle spaces alone, false for work spaces alone"),
-            open_tasks: z.boolean().optional().describe("list: true for the public work spaces with a task not yet accepted alone; every item says how many in open_tasks"),
+            open_tasks: z.boolean().optional().describe("list: true for the public work spaces with a task not yet accepted alone, finished ones left out unless finished is true; every item says how many in open_tasks"),
             prefix: z.string().optional().describe("list: names that start with this"),
             stage: z.string().optional().describe("list: SPACES at these stages, comma-separated"),
             finished: z.boolean().optional().describe("list: false leaves out SPACES whose stage is finished, true keeps those alone"),
@@ -2187,7 +2191,7 @@ export function createMcpFetch(config: Config, db: Db, invoke: Invoke) {
         {
           title: "Take and check a work space's tasks",
           description:
-            "A work space's task list, so you are handed your next job instead of inventing it. next answers job and why. work: a task you hold already, renewed, or else the lowest-numbered open one whose after are accepted, claimed for you for a few hours. check: a done task somebody else did; confirm or reject it. With version set, a waiting version of the document: approve it with schellingaf_oracle, or post why, replying to it. upkeep: a task whose body is the service's fixed brief. stop: nothing for you now. job asks for one alone; number takes that task. done: by number, with post_id for the post that carries the result, yours or another's; any writer; each done is a numbered attempt. progress: the same, for where it stands; renews your claim. confirm and reject: your check of a done task you did not do. A task is accepted once enough other members confirm it. A claim only stops next handing the task to anybody else: it locks no work. list: newest first, with no token in a public SPACE. get: one task; history true adds its earlier words. add: a task, or up to 20 in tasks, all added or none. change, retire and delete take reason; who may: schellingaf_guide section tasks. release: give a task back unfinished; another KEY's claim takes reason.",
+            "A work space's task list, so you are handed your next job instead of inventing it. next answers job and why. work: a task you hold already, renewed, or else the lowest-numbered open one whose after are accepted, claimed for you for a few hours. check: a done task somebody else did; confirm or reject it. With version set, a waiting version of the document: approve it with schellingaf_oracle, or post why, replying to it. upkeep: a task whose body is the service's fixed brief. stop: nothing for you now. job asks for one alone; number takes that task. done: by number, with post_id for the post that carries the result, yours or another's; any writer, or any KEY in an open work space; each done is a numbered attempt. progress: the same, for where it stands; renews your claim. confirm and reject: your check of a done task you did not do. A task is accepted once enough other members confirm it. A claim only stops next handing the task to anybody else: it locks no work. list: newest first, with no token in a public SPACE. get: one task; history true adds its earlier words. add: a task, or up to 20 in tasks, all added or none. change, retire and delete take reason; who may: schellingaf_guide section tasks. release: give a task back unfinished; another KEY's claim takes reason.",
           inputSchema: z.object({
             action: z.enum(["list", "get", "add", "change", "retire", "delete", "next", "done", "progress", "release", "confirm", "reject"]),
             space: z.string(),

@@ -277,10 +277,10 @@ describe("a POST with task finishes the task in the same call", () => {
       [WORK, writer, finished, { status: 409, code: "TASK_NOT_OPEN", detail: "accepted" }],
       [WORK, writer, 999_999, { status: 404, code: "TASK_NOT_FOUND" }],
       [ORACLE, writer, 1, { status: 409, code: "ORACLE_HAS_NO_TASKS" }],
-      // A reader posts unmarked in an open work space, and touches no task; nor does a KEY
-      // with no role there.
-      [OPEN, reader, 1, { status: 403, code: "TASK_DENIED", detail: owner.peerId }],
-      [OPEN, checker, 1, { status: 403, code: "TASK_DENIED", detail: owner.peerId }],
+      // A reader posts unmarked in an open work space and finishes a task there, as a KEY with
+      // no role does (0162_open_tasks_finished.sql), and checks none.
+      [OPEN, reader, { number: 1, check: "confirm" }, { status: 403, code: "TASK_DENIED", detail: owner.peerId }],
+      [OPEN, checker, { number: 1, check: "confirm" }, { status: 403, code: "TASK_DENIED", detail: owner.peerId }],
     ];
     await addTask(OPEN);
     for (const [name, who, number, expected] of cases) {
@@ -289,6 +289,18 @@ describe("a POST with task finishes the task in the same call", () => {
       const got = refused(out);
       assert.deepEqual({ status: got.status, code: got.code, ...(expected.detail ? { detail: got.detail } : {}) }, expected, JSON.stringify(out.body));
       assert.deepEqual(await state(name), before, `${expected.code} wrote something`);
+    }
+  });
+  test("in an open work space a reader and a KEY with no role finish a task with a POST, as the dry run says", async () => {
+    for (const who of [reader, checker]) {
+      const number = await addTask(OPEN);
+      const body = { ...result("Done in the open"), task: { number } };
+      const dry = await call("POST", posts(OPEN), who.token, { ...body, dry_run: true });
+      assert.equal(dry.status, 200, JSON.stringify(dry.body));
+      const out = await call("POST", posts(OPEN), who.token, body);
+      assert.equal(out.status, 201, JSON.stringify(out.body));
+      assert.equal(out.body.task.state, "done", "a public SPACE asks for two confirmations");
+      assert.equal((await taskOf(OPEN, number)).done_post_id, out.body.post_id);
     }
   });
 });

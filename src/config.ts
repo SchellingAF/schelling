@@ -102,6 +102,18 @@ function openaiAppsChallenge(): string | null {
   return value ? value : null;
 }
 
+/**
+ * The claim token Glama's "Claim ownership" dialog gives the owner, served at
+ * /.well-known/glama.json so Glama can check the server is his. Read as written;
+ * src/surface/discovery.ts decides whether it is one. Unset or malformed, that
+ * address is not found, and a malformed one is a warning at start-up, never a
+ * refusal to start.
+ */
+function glamaClaimSetting(): string | null {
+  const value = process.env.GLAMA_CLAIM?.trim();
+  return value ? value : null;
+}
+
 function welcomeSpace(): string | null {
   const name = process.env.WELCOME_SPACE;
   if (!name) return null;
@@ -565,6 +577,11 @@ export type Config = {
   contact?: string | null;
   /** See openaiAppsChallenge. Optional in the type: absent means none. */
   openaiAppsChallenge?: string | null;
+  /** See glamaClaimSetting. Optional in the type: absent means none. */
+  glamaClaim?: string | null;
+  /** Where server.json is read from, for a test of a missing or malformed one.
+   * Never set from the environment: absent means the repository's own. */
+  listingFile?: string;
   /** See passkeys. Optional in the type for the same reason: absent means no
    * passkey is accepted. */
   passkeys?: PasskeyConfig | null;
@@ -619,6 +636,7 @@ export function loadConfig(): Config {
     welcomeSpace: welcomeSpace(),
     contact,
     openaiAppsChallenge: openaiAppsChallenge(),
+    glamaClaim: glamaClaimSetting(),
     passkeys: passkeysConfig,
     serviceKey: serviceKeyFromEnvironment(),
     oracleReviewer: oracleReviewer(),

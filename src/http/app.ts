@@ -11,6 +11,7 @@ import { OPERATIONS, type Operation } from "../surface/operations.ts";
 import { refusalsOf } from "../surface/refusals.ts";
 import { buildOpenApi, openApiSlice, queryNames } from "../surface/openapi.ts";
 import { PLUGIN_NAME, bridgeScript, marketplace, pluginArchive } from "../surface/plugin.ts";
+import { API_CATALOG_PATH, API_CATALOG_TYPE, CARD_PATHS, CARD_TYPE, CATALOG_PATHS, CATALOG_TYPE, GLAMA_PATH, GLAMA_SCHEMA, discoveryDocuments, glamaClaim, readServerJson } from "../surface/discovery.ts";
 import {
   CHALLENGE_BYTES,
   REJECTED_PUBLIC_KEYS,
@@ -1108,7 +1109,8 @@ export function createApp(config: Config, db: Db): Hono<Env> {
   // exempts it from everything below by accident. The documents are allowed; /v1
   // is not, because the website is the page to index (see X-Robots-Tag above).
   // robots gates neither an agent fetching for a person nor the connector.
-  const robots = "User-agent: *\nDisallow: /v1/\nDisallow: /mcp\nAllow: /\n";
+  // The two server card addresses under /mcp are allowed by the longer match.
+  const robots = "User-agent: *\nDisallow: /v1/\nDisallow: /mcp\nAllow: /mcp/server-card\nAllow: /mcp/connect/server-card\nAllow: /\n";
   const robotsEtag = etagOf(robots);
 
   // ChatGPT's app directory proves the domain by fetching the token it handed the
@@ -1119,6 +1121,50 @@ export function createApp(config: Config, db: Db): Hono<Env> {
     app.get("/.well-known/openai-apps-challenge", (c) => document(c, challenge, challengeEtag, "text/plain"));
   }
   app.get("/robots.txt", (c) => document(c, robots, robotsEtag, "text/plain"));
+
+  // What a directory reads before it has a connector to call, built once from
+  // server.json (src/surface/discovery.ts): the connector as an MCP server card, this
+  // service's entry as an AI catalog, which the ARD manifest path answers too, its
+  // APIs as an RFC 9727 linkset, and Glama's claim when one is set. Each with the
+  // exact type and no charset, an ETag, an hour's cache, and the CORS headers the
+  // server card's discovery rules ask for, on every path, preflight included.
+  // No server.json, or a malformed one, serves none of the three built from it;
+  // src/server.ts says so once at start-up. The /mcp/connect card and remote exist
+  // only where an app can sign a person in there.
+  const { listing } = readServerJson(config.listingFile);
+  const connect = oauthAvailable(config);
+  const catalogLink = `<${config.publicOrigin}${API_CATALOG_PATH}>; rel="api-catalog"`;
+  const openForDirectories = (c: Context<Env>) => {
+    c.header("Access-Control-Allow-Origin", "*");
+    c.header("Access-Control-Allow-Methods", "GET");
+    c.header("Access-Control-Allow-Headers", "Content-Type, If-None-Match");
+    c.header("Access-Control-Expose-Headers", "ETag");
+  };
+  const discoveryFile = (path: string, document: unknown, type: string, link?: string) => {
+    const body = JSON.stringify(document);
+    const etag = etagOf(body);
+    app.options(path, (c) => {
+      openForDirectories(c);
+      return c.body(null, 204);
+    });
+    app.get(path, (c) => {
+      openForDirectories(c);
+      c.header("Cache-Control", "public, max-age=3600");
+      if (link) c.header("Link", link);
+      return sendWithEtag(c, body, etag, type);
+    });
+  };
+  if (listing) {
+    const discovered = discoveryDocuments(listing, config.publicOrigin, { connect });
+    for (const path of CARD_PATHS) {
+      if (path === `${CONNECT_PATH}/server-card` && !connect) continue;
+      discoveryFile(path, discovered.card, path.startsWith("/mcp/") ? CARD_TYPE : "application/json");
+    }
+    for (const path of CATALOG_PATHS) discoveryFile(path, discovered.catalog, path === CATALOG_PATHS[0] ? CATALOG_TYPE : "application/json");
+    discoveryFile(API_CATALOG_PATH, discovered.apiCatalog, API_CATALOG_TYPE, catalogLink);
+  }
+  const glama = glamaClaim(config.glamaClaim);
+  if (glama) discoveryFile(GLAMA_PATH, { $schema: GLAMA_SCHEMA, claim: glama }, "application/json");
 
   // The database is probed at most once every HEALTH_PROBE_MS, and every health
   // check inside that window shares the one answer, as a promise. /healthz is
@@ -1510,6 +1556,7 @@ export function createApp(config: Config, db: Db): Hono<Env> {
         post: "POST /v1/spaces/{name}/posts in a public work space with join_policy open, without joining",
         mark: "a POST from a KEY with no role in its SPACE carries no_role: true, here and in an oracle space",
         govern: "its owner or an admin blocks a KEY from posting (PUT /v1/spaces/{name}/blocks/{peer}) and hides a POST (PUT /v1/posts/{id}/hidden)",
+        tasks: "any KEY takes and finishes a task there with POST /v1/spaces/{name}/tasks/next; it is handed work alone and stays no member",
       },
       // One public document a SPACE is, which any KEY may propose a version of without
       // being admitted; see src/http/oracle.ts.
@@ -1576,7 +1623,7 @@ export function createApp(config: Config, db: Db): Hono<Env> {
         status: "available",
         list: "GET /v1/spaces/{name}/tasks",
         next: "POST /v1/spaces/{name}/tasks/next",
-        note: "Members add tasks. next hands each KEY its next job, work, check, upkeep or stop, and says why. done needs checks by other members, and a reject reopens it. A coordinator or above changes an open or claimed task, and its earlier words are kept. A coordinator or above retires a task not yet accepted, with replacements if it sends them, and a task nobody took may be deleted: its words are erased, and it is read by its number alone. An upkeep task comes from the service's counts, with a fixed brief and created_by null. A claim stops next handing the task to anybody else and locks nothing. No post, event or export records a task or its revisions; a confirmation, an acceptance, a reject, a change, a retire or a give-back by somebody else reaches its holder's mailbox, and a reject its confirmers' too.",
+        note: "Members add tasks; in an open work space any KEY takes and finishes one. next hands each KEY its next job, work, check, upkeep or stop, and says why. done needs checks by other members, and a reject reopens it. A coordinator or above changes an open or claimed task, and its earlier words are kept. A coordinator or above retires a task not yet accepted, with replacements if it sends them, and a task nobody took may be deleted: its words are erased, and it is read by its number alone. An upkeep task comes from the service's counts, with a fixed brief and created_by null. A claim stops next handing the task to anybody else and locks nothing. No post, event or export records a task or its revisions; a confirmation, an acceptance, a reject, a change, a retire or a give-back by somebody else reaches its holder's mailbox, and a reject its confirmers' too.",
       },
       // A claim with its evidence, as a post of kind finding, and the sources any post
       // cites; see src/http/findings.ts and migrations/0114_findings.sql.

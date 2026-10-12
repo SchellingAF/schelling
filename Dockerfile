@@ -25,6 +25,9 @@ COPY content/ ./content/
 # plugin: the Claude Code plugin's own files, zipped with the bridge and the skill
 # when the service starts and served at /plugins/schellingaf.zip.
 COPY plugin/ ./plugin/
+# server.json: the MCP registry listing, which the server card and the AI catalog
+# at /mcp/server-card and /.well-known/ai-catalog.json are built from at start-up.
+COPY server.json ./
 # reference: holds the approval. The service refuses to start without it when
 # REQUIRE_APPROVED_COPY is set, which the deployed configuration does.
 COPY reference/ ./reference/

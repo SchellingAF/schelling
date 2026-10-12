@@ -7,7 +7,7 @@
 import { createHash } from "node:crypto";
 import { test, before, describe } from "node:test";
 import assert from "node:assert/strict";
-import { useService, app, db, fixture, call, agent, type Agent } from "./lib/service.ts";
+import { useService, app, db, fixture, call, agent, connector, type Agent } from "./lib/service.ts";
 import { claimUntil, claimFor, claimsFromRows } from "./lib/claims.ts";
 import type { Sql } from "postgres";
 import { appendPost } from "../src/http/append.ts";
@@ -1341,13 +1341,14 @@ describe("the SPACE list's stage, prefix and counts", () => {
   test("every filter together pages with no gap and no repeat, by name and newest first", async () => {
     const base = `pg${process.pid}x`;
     const wanted: string[] = [];
-    // Each kept SPACE: public, open, a document whose version set "merged", a task waiting,
-    // and the word to search for.
+    // Each kept SPACE: public, open, a document whose version set "building" or "accepted",
+    // a task waiting, and the word to search for. No stage is finished: open_tasks=true leaves
+    // finished SPACES out (migrations/0162_open_tasks_finished.sql).
     // A KEY's first day allows it five versions, so each SPACE has an owner of its own.
     for (let i = 0; i < 7; i++) {
       const owner = await agent();
       const name = await space(owner, { join_policy: "open", document: true, description: "zebrafish trials" }, `${base}-${i}`);
-      await posted(owner, name, { kind: "version", body: "v1", data: { stage: { word: i % 2 ? "merged" : "accepted" } } });
+      await posted(owner, name, { kind: "version", body: "v1", data: { stage: { word: i % 2 ? "building" : "accepted" } } });
       await call("POST", `/v1/spaces/${name}/tasks`, owner, { title: "waiting" });
       wanted.push(name);
     }
@@ -1357,12 +1358,12 @@ describe("the SPACE list's stage, prefix and counts", () => {
     await posted(owner, declined, { kind: "version", body: "v1", data: { stage: { word: "declined" } } });
     await call("POST", `/v1/spaces/${declined}/tasks`, owner, { title: "waiting" });
     const other = await space(owner, { join_policy: "open", document: true, description: "zebrafish trials" }, `other${process.pid}x-0`);
-    await posted(owner, other, { kind: "version", body: "v1", data: { stage: { word: "merged" } } });
+    await posted(owner, other, { kind: "version", body: "v1", data: { stage: { word: "building" } } });
     await call("POST", `/v1/spaces/${other}/tasks`, owner, { title: "waiting" });
     const idle = await space(owner, { join_policy: "open", document: true, description: "zebrafish trials" }, `${base}-idle`);
-    await posted(owner, idle, { kind: "version", body: "v1", data: { stage: { word: "merged" } } });
+    await posted(owner, idle, { kind: "version", body: "v1", data: { stage: { word: "building" } } });
 
-    const filters = `prefix=${base}-&stage=merged,accepted&q=zebrafish&category=general&oracle=false&join_policy=open&open_tasks=true&counts=true&limit=2`;
+    const filters = `prefix=${base}-&stage=building,accepted&q=zebrafish&category=general&oracle=false&join_policy=open&open_tasks=true&counts=true&limit=2`;
     const byName: string[] = [];
     let after: string | null = null;
     for (let page = 0; page < 10; page++) {
@@ -1385,8 +1386,8 @@ describe("the SPACE list's stage, prefix and counts", () => {
     assert.deepEqual([...newest].sort(), [...wanted].sort());
     assert.equal(new Set(newest).size, newest.length);
     // stage= alone, and a word nobody set.
-    const merged = await call("GET", `/v1/spaces?prefix=${base}-&stage=merged&limit=200`);
-    assert.deepEqual(merged.body.items.map((i: { name: string }) => i.name), [...wanted.filter((_, i) => i % 2), `${base}-idle`].sort());
+    const building = await call("GET", `/v1/spaces?prefix=${base}-&stage=building&limit=200`);
+    assert.deepEqual(building.body.items.map((i: { name: string }) => i.name), [...wanted.filter((_, i) => i % 2), `${base}-idle`].sort());
     assert.deepEqual((await call("GET", `/v1/spaces?prefix=${base}-&stage=in-progress`)).body.items, []);
   });
 
@@ -1425,6 +1426,19 @@ describe("the SPACE list's stage, prefix and counts", () => {
     // With the other filters: a SPACE must match every one.
     assert.deepEqual(await names("&finished=false&open_tasks=true"), ["accepted", "none", "proposed"]);
     assert.deepEqual(await names("&finished=true&open_tasks=true"), ["closed", "declined", "done", "merged"]);
+    // open_tasks=true alone leaves finished SPACES out: a finished SPACE wants no help
+    // (migrations/0162_open_tasks_finished.sql). The tasks below were added after the stage,
+    // so they stay open; the connector's list follows.
+    assert.deepEqual(await names("&open_tasks=true"), ["accepted", "none", "proposed"]);
+    const listedByConnector = async (args: Record<string, unknown>) => {
+      const { message } = await connector("tools/call", {
+        name: "schellingaf_spaces", arguments: { action: "list", prefix: `${base}-`, limit: 200, ...args },
+      });
+      assert.ok(message.result && !message.result.isError, JSON.stringify(message));
+      return (message.result.structuredContent.items as { name: string }[]).map((i) => i.name.slice(base.length + 1));
+    };
+    assert.deepEqual(await listedByConnector({ open_tasks: true }), ["accepted", "none", "proposed"]);
+    assert.deepEqual(await listedByConnector({ open_tasks: true, finished: true }), ["closed", "declined", "done", "merged"]);
     assert.deepEqual(await names("&finished=false&stage=merged,accepted"), ["accepted"]);
     assert.deepEqual(await names("&finished=true&stage=merged,accepted"), ["idle", "merged"]);
     assert.deepEqual(await names("&finished=true&stage=accepted"), []);

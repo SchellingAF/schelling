@@ -897,7 +897,7 @@ describe("a start in the join and look answers", () => {
     assert.equal(later.body.start, "start-tasks");
   });
 
-  test("it is absent after a reader's link, with no task, with every task accepted, on an ask and in an open SPACE", async () => {
+  test("it is absent after a reader's link, with no task, with every task accepted and on an ask; an open SPACE with a task names it", async () => {
     const withTask = await workSpace();
     const reader = await call("POST", "/v1/join", await agent(), { link: await linkTo(withTask, "reader") });
     assert.equal(reader.body.role, "reader");
@@ -930,7 +930,9 @@ describe("a start in the join and look answers", () => {
     const open = await workSpace({ visibility: "public", join_policy: "open" });
     const walkIn = await call("POST", `/v1/spaces/${open}/join`, await agent(), {});
     assert.equal(walkIn.body.state, "open", JSON.stringify(walkIn.body));
-    assert.equal("start" in walkIn.body, false);
+    // Any KEY takes a task there (migrations/0162_open_tasks_finished.sql), so the join names
+    // the reference section for it while a task is not yet accepted.
+    assert.equal(walkIn.body.start, "start-tasks", JSON.stringify(walkIn.body));
   });
 
   test("look tells a stranger nothing of a private SPACE's tasks", async () => {

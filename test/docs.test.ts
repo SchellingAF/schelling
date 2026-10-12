@@ -31,7 +31,7 @@ const primer = () => renderPrimer();
 describe("the primer", () => {
   test("it fits the budget it publishes, measured the way it measures a page", () => {
     // A ceiling, not a target: see the review's ceiling in test/copy.test.ts.
-    assert.ok(tokens(primer()) <= 4672, `primer is ${tokens(primer())} tokens`);
+    assert.ok(tokens(primer()) <= 4745, `primer is ${tokens(primer())} tokens`);
   });
 
   test("it names the way in for each kind of client before anything else", () => {
@@ -50,11 +50,11 @@ describe("the primer", () => {
     ]) assert.ok(top.includes(way), `the primer's first lines do not name ${way}`);
   });
 
-  test("it gives every call of a first task in a work space, and says a task there needs a writer's role", () => {
+  test("it gives every call of a first task in a work space, and says who takes one in an open work space", () => {
     // Taking a task, and the POST of its result that marks it done in the same call, so an
-    // agent on HTTP reads no reference to finish one; and that in an open work space, where
-    // any KEY posts, only a writer's role or above touches tasks: a reader is refused as a
-    // KEY with no role is.
+    // agent on HTTP reads no reference to finish one; and that in an open work space any KEY
+    // takes a task without joining, while checking one needs a writer's role
+    // (migrations/0162_open_tasks_finished.sql).
     const flat = primer().replace(/\s+/g, " ");
     for (const name of ["tasks.next"]) {
       const op = OPERATIONS.find((o) => o.name === name)!;
@@ -62,7 +62,7 @@ describe("the primer", () => {
       assert.ok(flat.includes(`\`${route}\``), `the primer does not give ${route}`);
     }
     assert.ok(flat.includes('`"task":{"number":<number>}`: the post and done land together, or neither'), "the primer does not say to send task on the result");
-    assert.match(flat, /POST without joining; taking or checking a task there needs a writer's role, from an invite link/);
+    assert.match(flat, /POST without joining, and take a task with `POST \/v1\/spaces\/\{name\}\/tasks\/next` and `\{"job":"work"\}`: you get work, never a check or upkeep, and you stay no member\. Checking needs a writer's role, from an invite link\./);
   });
 
   test("it says up front that an empty first SEEK is expected", () => {
@@ -184,7 +184,7 @@ describe("the reference", () => {
       { REGISTRATION_PER_HOUR: undefined, REGISTRATION_BURST: undefined, CHALLENGE_PER_KEY: undefined },
       () => renderReference(),
     );
-    assert.ok(tokens(served) <= 61972, `reference is ${tokens(served)} tokens`);
+    assert.ok(tokens(served) <= 62484, `reference is ${tokens(served)} tokens`);
   });
 
   // A release named as the one that brought a behaviour must exist: never later than the
@@ -550,7 +550,7 @@ describe("the documents over HTTP", () => {
     const text = await (await app.request("/llms.txt")).text();
     // It lists no operations: an agent that starts from the index reads all of it
     // before its first call, and the reference has every operation a link away.
-    assert.ok(tokens(text) <= 1242, `the index is ${tokens(text)} tokens`);
+    assert.ok(tokens(text) <= 1400, `the index is ${tokens(text)} tokens`);
     assert.ok(text.includes(`(https://${HOST}/reference)`), "the index does not link the reference");
     assert.ok(text.includes("?operation="), "the index does not say OpenAPI answers one operation");
   });

@@ -38,6 +38,7 @@ import { DOCUMENT_RESOURCES, TEMPLATE_RESOURCES } from "../src/mcp/resources.ts"
 import { INSTRUCTIONS, serverIdentity } from "../src/mcp/server.ts";
 import { DRY_RUN_HINT_SECOND_LINE, DRY_RUN_STAGE_HINT, DRY_RUN_TITLE_HINT_LINE, DRY_RUN_VERSION_TITLE_HINT_LINE, HINT_FIRST_LINE, HINT_SECOND_LINE, NOTHING_POSTED, POST_HINT_FIRST_LINE, POSTED_AS_WRITTEN, STAGE_HINT, TITLE_HINT_LINE, VERSION_CHANGED_HINT_FIRST_LINE, VERSION_TITLE_HINT_LINE } from "../src/domain/voice.ts";
 import { HOW_TO_TAKE_A_TASK, INDEX_LINE } from "../src/http/openwork.ts";
+import { SEARCH_LINE, TAKE } from "../src/surface/vocabulary.ts";
 import { MORE_OPEN_WORK, NOTHING_OPEN } from "../src/mcp/render.ts";
 import { createApp } from "../src/http/app.ts";
 import { CATEGORY_MAX_DEPTH } from "../src/surface/categories.ts";
@@ -476,6 +477,11 @@ export function faceReview(): string {
     "",
   );
   for (const line of [HOW_TO_TAKE_A_TASK, INDEX_LINE, MORE_OPEN_WORK, NOTHING_OPEN]) out.push(`> ${line}`, "");
+  out.push(
+    "How to take a task where a SPACE admits by open, by request and by invite: the JSON's `take`, and a profile's `wanted.take` with the SPACE's name in place of {name}. Then where to search, said before the index.",
+    "",
+  );
+  for (const line of [TAKE.open, TAKE.request, TAKE.invite, SEARCH_LINE]) out.push(`> ${line}`, "");
 
   return out.join("\n") + "\n";
 }
@@ -859,6 +865,8 @@ export const REQUESTED: { path: string; status: number; accept?: string }[] = [
   { path: "/no-such-path", status: 404 },
   { path: "/plugins/marketplace.json", status: 200 },
   { path: "/.well-known/oauth-protected-resource/mcp/connect", status: 200 },
+  { path: "/mcp/server-card", status: 200 },
+  { path: "/.well-known/ai-catalog.json", status: 200 },
 ];
 
 /** Whether an OpenAPI string, at this path, is prose a reader reads: a description, a
@@ -1163,6 +1171,9 @@ async function renderMore(): Promise<string> {
     keywords(value, []);
   };
   listing("GET /plugins/marketplace.json", JSON.parse(await get("/plugins/marketplace.json")));
+  // The server card and the catalog a directory reads, built from server.json and src/surface/discovery.ts.
+  listing("GET /mcp/server-card", JSON.parse(await get("/mcp/server-card")));
+  listing("GET /.well-known/ai-catalog.json", JSON.parse(await get("/.well-known/ai-catalog.json")));
   for (const name of [".claude-plugin/plugin.json", "hooks/hooks.json"]) {
     const file = pluginFiles().find((f) => f.name === name);
     if (!file) throw new Error(`the plugin has no ${name}`);
@@ -1231,6 +1242,17 @@ async function renderMore(): Promise<string> {
       .map((part) => (part.startsWith("'") ? part.slice(1, -1).replace(/''/g, "'") : part === "v_name" ? "<name>" : "<dollars>"))
       .join("");
     put(`CREDIT_NEEDED: ${firstWords(text)}, ${creditFile}`, "detail the database gives, built from amounts and the SPACE's name", text);
+  }
+
+  // The reason a task retired by its SPACE's finished stage carries in retired.reason, which
+  // retire_finished_tasks() builds around the stage word: its literal parts, the word as <word>.
+  const finishedFile = "migrations/0162_open_tasks_finished.sql";
+  const finished = /close_reason = ('[^']*' \|\| p_word \|\| '[^']*')/.exec(sourceOf(finishedFile))?.[1];
+  if (finished) {
+    const text = finished.split("||").map((part) => part.trim())
+      .map((part) => (part.startsWith("'") ? part.slice(1, -1).replace(/''/g, "'") : "<word>"))
+      .join("");
+    put(`retired: ${firstWords(text)}, ${finishedFile}`, "a retired task's reason, built from the finished stage word", text);
   }
 
   // 20. Notices, guidance and health reasons inside answers.

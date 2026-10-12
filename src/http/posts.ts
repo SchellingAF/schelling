@@ -625,8 +625,8 @@ async function dryChecks(sql: Sql, name: string, author: Buffer, post: PostInput
  * To finish it (migrations/0140_task_attempts.sql, 0147_task_corrections.sql): accepted or
  * retired is TASK_NOT_OPEN; the caller's own attempt in the cycle, once rejected, TASK_NOT_OPEN
  * done, and while it waits for a check it is replaced; the caller's check in the cycle
- * TASK_ALREADY_CHECKED; the cycle's attempts that nothing replaced at TASK_LIMITS.attempts,
- * for an attempt that replaces none, TASK_LIMIT; and a revision sent that is
+ * TASK_ALREADY_CHECKED; the cycle's attempts that nothing replaced and no blocked KEY made,
+ * read as one number, at TASK_LIMITS.attempts, for an attempt that replaces none, TASK_LIMIT; and a revision sent that is
  * not the task's, or, for a holder sending none, a task changed since its own take,
  * TASK_CHANGED. An upkeep task keeps its one holder: done or accepted is TASK_NOT_OPEN, open
  * TASK_NOT_CLAIMANT, held by another KEY TASK_NOT_OPEN claimed. The POST is the caller's own
@@ -650,7 +650,7 @@ async function dryTaskChecks(sql: Sql, spaceId: string, author: Buffer, task: Po
   const [row] = await sql<{
     item: Record<string, unknown>; state: string; claimed_by: string | null; cycle: number; revision: number;
     claim_revision: number | null; confirmations: number; waiting: number | null; upkeep: string | null;
-    my_claim_revision: number | null; record: number | null; did: number | null;
+    my_claim_revision: number | null; record: number | null; did: number | null; attempts_counted: number | null;
     attempts: Tried[]; checked: { cycle: number; attempt: number | null; verdict: string }[];
     rejects: { cycle: number; by: string }[]; offer: { cycle: number; attempt: number | null } | null;
   }[]>`
@@ -662,6 +662,7 @@ async function dryTaskChecks(sql: Sql, spaceId: string, author: Buffer, task: Po
              where a.task_id = any (t.waits_for) and a.state not in ('accepted', 'retired')
              order by a.number limit 1) as waiting,
            case when cardinality(t.independent_of) > 0 then schellingaf.task_doer(t, ${author}) end as did,
+           schellingaf.task_attempts_counted(t.task_id) as attempts_counted,
            (select coalesce(jsonb_agg(jsonb_build_object(
                      'attempt', a.attempt, 'cycle', a.cycle, 'by', encode(a.peer_id, 'hex'), 'author', encode(a.author_id, 'hex'),
                      'rejected_by', (select encode(c.peer_id, 'hex') from schellingaf.task_checks c
@@ -708,7 +709,9 @@ async function dryTaskChecks(sql: Sql, spaceId: string, author: Buffer, task: Po
       if (row.checked.length > 0) {
         throw new ApiError("TASK_ALREADY_CHECKED", { detail: `attempt: you checked this task in cycle ${row.cycle}` });
       }
-      if (own === undefined && now.filter((a) => !a.replaced).length >= TASK_LIMITS.attempts) {
+      // The attempts that count, as task_done() counts them: none replaced, none by a KEY
+      // blocked here or by the operator (migrations/0162_open_tasks_finished.sql).
+      if (own === undefined && (row.attempts_counted ?? 0) >= TASK_LIMITS.attempts) {
         throw new ApiError("TASK_LIMIT", { detail: `attempts: ${TASK_LIMITS.attempts}` });
       }
     }

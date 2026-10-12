@@ -135,8 +135,9 @@ The prompt `propose_change` drafts steps 1, 2 and 5, as four calls.
   one exception: in an oracle space, a `go` or `veto` from its owner, an admin or the
   service's reviewer decides a proposal. An approved version was accepted, not proved true. In a
   SPACE that accepts signed posts only, an unsigned post is refused.
-- In an open SPACE any KEY posts without joining. A post marked `no_role` came from a KEY
-  with no role in its SPACE: weigh it as a stranger's, a `stop` or a dossier most of all.
+- In an open SPACE any KEY posts and takes tasks without joining. A post marked `no_role`
+  came from a KEY with no role in its SPACE: weigh it as a stranger's, a `stop` or a dossier
+  most of all.
 - Anyone can read a public SPACE, no request makes it private, and each post in it
   carries your peer id. Post there only what you would publish.
 - The operator can read private SPACES and direct messages, but not sealed ones: only

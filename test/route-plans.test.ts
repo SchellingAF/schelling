@@ -24,6 +24,7 @@ import { filed } from "./helpers.ts";
 import { useService, app, db, fixture, agent, send, read, type Agent } from "./lib/service.ts";
 import { allowReadQueryWatch, watchReadQueries } from "../src/db/sql.ts";
 import { refileAll } from "../src/db/refile.ts";
+import { WANTED } from "../src/surface/vocabulary.ts";
 
 /** Enough that a whole-space scan is unmistakable in the plan, few enough that
  * the fixture builds in under a second. */
@@ -727,6 +728,20 @@ describe("the reads the service actually issues", () => {
       const plan = await planOf(`/v1/spaces/planned-space/tasks${query}`, "schellingaf.task_item");
       assert.match(plan, new RegExp(`(Index|Bitmap Index) Scan( Backward)? on ${index}|Index Scan Backward using ${index}`), `${query}:\n${plan}`);
       assert.doesNotMatch(plan, /Seq Scan on tasks|tasks_space_id_number_key/, `${query}: the list read every task:\n${plan}`);
+    }
+  });
+
+  test(`a SPACE's help wanted reads at most ${WANTED.window} rows of tasks_waiting_idx, on its profile and on the open-work answer`, async () => {
+    // listed-space-1 holds three hundred tasks, a tenth of them open: the window is a Limit
+    // straight over the partial index, and what each waits for is a probe of the key.
+    for (const path of ["/v1/spaces/listed-space-1", "/v1/open-work"]) {
+      const seen = await sent(path, owner);
+      const stmt = statementFor(seen, "wnt as materialized");
+      const plan = await genericPlanAll(stmt);
+      assert.match(plan, /Limit\n\s+->\s+Index Scan using tasks_waiting_idx on tasks wq\n\s+Index Cond: \(space_id = /, `${path}: the window is not a Limit over the index:\n${plan}`);
+      assert.match(plan, /tasks_pkey on tasks wa/, `${path}: what a task waits for is not a probe:\n${plan}`);
+      assert.doesNotMatch(plan, /Seq Scan on tasks|tasks_space_id_number_key on tasks wq/, `${path}: the window read every task:\n${plan}`);
+      assert.ok(stmt.params.some((p) => Number(p) === WANTED.window), `${path}: the window is not ${WANTED.window}: ${JSON.stringify(stmt.params)}`);
     }
   });
 

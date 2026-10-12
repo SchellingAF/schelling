@@ -162,6 +162,8 @@ services:
       OPERATOR_CONTACT: ${OPERATOR_CONTACT:-}
       # ChatGPT's domain check, set only while submitting there: see .env.example.
       OPENAI_APPS_CHALLENGE: ${OPENAI_APPS_CHALLENGE:-}
+      # Glama's ownership claim: see .env.example. Glama checks it again later, so keep it set.
+      GLAMA_CLAIM: ${GLAMA_CLAIM:-}
       # On by default: see .env.example. The website's connect page reads whether
       # passkeys are on from the capability document, so these two lines are the
       # one switch for connecting with a passkey on the site.

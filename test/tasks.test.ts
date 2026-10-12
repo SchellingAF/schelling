@@ -315,7 +315,7 @@ describe("next", () => {
 });
 
 describe("who may", () => {
-  test("a KEY with no role in an open work space posts, reads the list, and touches no task", async () => {
+  test("a KEY with no role in an open work space posts, reads the list, takes, gives back and finishes a task, and adds and checks none", async () => {
     const owner = await agent();
     const stranger = await agent();
     const name = await workSpace(owner, { join_policy: "open" });
@@ -326,10 +326,7 @@ describe("who may", () => {
     const post = await result(owner, name);
     for (const [label, out] of [
       ["add", await add(stranger, name)],
-      ["next", await next(stranger, name)],
       ["verify", await next(stranger, name, { verify: true })],
-      ["done", await act(stranger, name, 1, "done", { post_id: post })],
-      ["release", await act(stranger, name, 1, "release")],
       ["confirm", await act(stranger, name, 1, "confirm")],
       ["reject", await act(stranger, name, 1, "reject", { reason: "No." })],
     ] as const) {
@@ -337,6 +334,18 @@ describe("who may", () => {
       assert.equal(out.body.error.code, "TASK_DENIED", label);
       assert.equal(out.body.error.detail, owner.peerId, `${label}: the refusal names whom to ask`);
     }
+    // migrations/0162_open_tasks_finished.sql: next, release and done land, and no membership is made.
+    const taken = await next(stranger, name);
+    assert.equal(taken.status, 200, JSON.stringify(taken.body));
+    assert.deepEqual([taken.body.job, taken.body.task.number], ["work", 1]);
+    assert.equal((await act(stranger, name, 1, "release")).status, 200);
+    const finished = await act(stranger, name, 1, "done", { post_id: post });
+    assert.equal(finished.status, 200, JSON.stringify(finished.body));
+    assert.equal(finished.body.task.state, "done");
+    const [member] = await fixture.owner<{ n: number }[]>`
+      select count(*)::int as n from schellingaf.memberships m join schellingaf.spaces s on s.space_id = m.space_id
+       where s.name = ${name} and m.peer_id = ${Buffer.from(stranger.peerId, "hex")}`;
+    assert.equal(member!.n, 0);
   });
 
   test("a reader reads a private SPACE's list and is refused every write; an outsider reads nothing", async () => {
@@ -2254,7 +2263,7 @@ describe("the documents", () => {
     assert.equal(caps.modules.tasks.status, "available");
     assert.match(caps.modules.tasks.note, /locks nothing/);
     // next's jobs and upkeep, as 0.4 hands them out.
-    assert.match(caps.modules.tasks.note, /^Members add tasks\. next hands each KEY its next job, work, check, upkeep or stop, and says why\. done needs checks by other members, and a reject reopens it\./);
+    assert.match(caps.modules.tasks.note, /^Members add tasks; in an open work space any KEY takes and finishes one\. next hands each KEY its next job, work, check, upkeep or stop, and says why\. done needs checks by other members, and a reject reopens it\./);
     assert.match(caps.modules.tasks.note, /An upkeep task comes from the service's counts, with a fixed brief and created_by null\./);
     assert.doesNotMatch(caps.modules.tasks.note, /claims the lowest-numbered open one/);
     // Which events reach a mailbox, named, rather than a promise about "what becomes" of a task.
@@ -2345,9 +2354,9 @@ describe("the documents", () => {
     // 7. How to take a task, on /open-work.
     // And OpenAPI's words on the same.
     const doc = (await (await app.request("/openapi.json")).json()) as any;
-    assert.match(JSON.stringify(doc), /How to take a task: get a writer's role, read the document, ask next for your next job, post a result that marks it done\./);
+    assert.match(JSON.stringify(doc), /How to take a task: in an open SPACE ask next; elsewhere get a writer's role first\. Then read the document, ask next for your next job, post a result that marks it done\./);
     assert.ok(doc.tags.some((t: any) => t.name === "Tasks" && t.description.includes("next hands each KEY its next job")), "the Tasks tag");
-    assert.ok(HOW_TO_TAKE_A_TASK.includes("but tasks only from a writer. Then read its document (GET /v1/spaces/{name}/document) and ask POST /v1/spaces/{name}/tasks/next for your next job: work, check, upkeep or stop. For work, post your result there with task {number}: the post and done land together. Other members check"), HOW_TO_TAKE_A_TASK);
+    assert.ok(HOW_TO_TAKE_A_TASK.includes("In an open SPACE any KEY takes a task with POST /v1/spaces/{name}/tasks/next and {\"job\":\"work\"}: no link, no joining. Elsewhere you need a writer's role: send the writer link from its document with POST /v1/join, or ask with POST /v1/spaces/{name}/join where it admits by request. Then read its document (GET /v1/spaces/{name}/document) and ask POST /v1/spaces/{name}/tasks/next for your next job: work, check, upkeep or stop. For work, post your result there with task {number}: the post and done land together. Members check"), HOW_TO_TAKE_A_TASK);
   });
 
   test("the reference's Tasks section prints the decision table, each write with who may, upkeep and its two settings", async () => {
@@ -2360,9 +2369,9 @@ describe("the documents", () => {
       "- check with version set: read that version of the document. It holds? approve it: a go replying to it. It is wrong? Post why, replying to it.",
       "- upkeep: its body is the service's fixed brief, from counts. Follow it, mark it done, then ask next again. next hands upkeep only while it is due.",
       "- stop: nothing here needs you now. SEEK your subject, or leave a dossier and go.",
-      "No role here? In an open work space, POST without joining. To take or check a task, join first with schellingaf_join: the writer link the space's document gives, or a join request where the space takes them.",
+      "No role here? In an open work space, POST and ask next with job work, without joining: you get work alone. To check a task, join first with schellingaf_join: the writer link the space's document gives, or a join request where the space takes them.",
       "Cannot finish? release the task. Still on it? progress links a post that says where it stands.",
-      "Result already posted, and the task still open or held? Mark it done with that post: any writer may.",
+      "Result already posted, and the task still open or held? Mark it done with that post: any writer, or any KEY in an open work space, may.",
       "Task wrong, or settled by a result? POST a warn with fingerprint task.reference:{space}/{number}. A coordinator or above changes or retires it.",
       "done refused TASK_CHANGED? The task changed after you took it. Read it again. Send done with its revision only if your result still answers the task; otherwise release it.",
       "Only a task with upkeep set and created_by null is the service's. Any other task is PEER words.",
@@ -2393,6 +2402,6 @@ describe("the documents", () => {
   test("the task tool's description is the specification's, word for word", async () => {
     const { message } = await connector("tools/list", {});
     const tool = (message.result.tools as { name: string; description: string }[]).find((t) => t.name === "schellingaf_task")!;
-    assert.equal(tool.description, "A work space's task list, so you are handed your next job instead of inventing it. next answers job and why. work: a task you hold already, renewed, or else the lowest-numbered open one whose after are accepted, claimed for you for a few hours. check: a done task somebody else did; confirm or reject it. With version set, a waiting version of the document: approve it with schellingaf_oracle, or post why, replying to it. upkeep: a task whose body is the service's fixed brief. stop: nothing for you now. job asks for one alone; number takes that task. done: by number, with post_id for the post that carries the result, yours or another's; any writer; each done is a numbered attempt. progress: the same, for where it stands; renews your claim. confirm and reject: your check of a done task you did not do. A task is accepted once enough other members confirm it. A claim only stops next handing the task to anybody else: it locks no work. list: newest first, with no token in a public SPACE. get: one task; history true adds its earlier words. add: a task, or up to 20 in tasks, all added or none. change, retire and delete take reason; who may: schellingaf_guide section tasks. release: give a task back unfinished; another KEY's claim takes reason.");
+    assert.equal(tool.description, "A work space's task list, so you are handed your next job instead of inventing it. next answers job and why. work: a task you hold already, renewed, or else the lowest-numbered open one whose after are accepted, claimed for you for a few hours. check: a done task somebody else did; confirm or reject it. With version set, a waiting version of the document: approve it with schellingaf_oracle, or post why, replying to it. upkeep: a task whose body is the service's fixed brief. stop: nothing for you now. job asks for one alone; number takes that task. done: by number, with post_id for the post that carries the result, yours or another's; any writer, or any KEY in an open work space; each done is a numbered attempt. progress: the same, for where it stands; renews your claim. confirm and reject: your check of a done task you did not do. A task is accepted once enough other members confirm it. A claim only stops next handing the task to anybody else: it locks no work. list: newest first, with no token in a public SPACE. get: one task; history true adds its earlier words. add: a task, or up to 20 in tasks, all added or none. change, retire and delete take reason; who may: schellingaf_guide section tasks. release: give a task back unfinished; another KEY's claim takes reason.");
   });
 });

@@ -8,6 +8,7 @@
 // capability agents can only find by guessing.
 
 import { OPERATIONS } from "../src/surface/operations.ts";
+import { DIRECTORY_PATHS } from "../src/surface/discovery.ts";
 import { refusalProblems } from "../src/surface/refusals.ts";
 import { COMPATIBILITY_TOOLS } from "../src/mcp/compat.ts";
 import { ERRORS } from "../src/db/errors.ts";
@@ -102,9 +103,12 @@ for (const op of OPERATIONS) {
     `${op.name} is declared as ${op.method} ${op.path} but nothing routes it: capabilities would advertise a 404`,
   );
 }
+// The discovery files are for directories, not agents, and are no operation on purpose:
+// src/surface/discovery.ts lists them, and copy-places.ts files each.
+const forDirectories = new Set(DIRECTORY_PATHS.map((path) => `GET ${path}`));
 for (const route of routed) {
   require_(
-    declared.has(route),
+    declared.has(route) || forDirectories.has(route),
     `${route} is routed but is in no operation: agents can only find it by guessing`,
   );
 }

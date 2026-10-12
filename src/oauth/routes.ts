@@ -47,6 +47,7 @@ import { ASSERTION_ALGORITHMS, cutToBytes, jsonObject, registerClient, resolveCl
 import { isLoopback, redirectMatches, sameResource, shownHost, withQuery } from "./uris.ts";
 import { LIMITS, clientAddress, networkOfAddress, refuseIfEmpty, spend, withinReadWindow, TOKEN_REQUESTS_PER_MINUTE } from "../http/ratelimit.ts";
 import { floorPlace, requireBearer, type Env } from "../http/app.ts";
+import { BARE_RESOURCE_PATH } from "../surface/discovery.ts";
 
 /** The scopes an app may ask for. `read` alone is a connection that may only look. */
 export const SCOPES = ["read", "write"] as const;
@@ -169,14 +170,20 @@ export function mountOAuth(app: Hono<Env>, config: Config, db: Db): void {
 
   // ── discovery ────────────────────────────────────────────────────────────────
 
-  discovery("/.well-known/oauth-protected-resource/mcp/connect", {
+  const resource = {
     resource: connectResource(config),
     authorization_servers: [issuer],
     scopes_supported: SCOPES,
     bearer_methods_supported: ["header"],
     resource_name: "Schelling Add Forward",
     resource_documentation: `${config.siteOrigin}/api`,
-  });
+  };
+  discovery("/.well-known/oauth-protected-resource/mcp/connect", resource);
+  // The origin's own path, which a directory probes and a client falls back to: the
+  // same document, since /mcp/connect is the only resource here and authorize refuses
+  // any other (RFC 9728 3.3: resource is the one the client asked about). /mcp takes a
+  // KEY's token, not OAuth, so /.well-known/oauth-protected-resource/mcp stays not found.
+  discovery(BARE_RESOURCE_PATH, resource);
 
   discovery("/.well-known/oauth-authorization-server", {
     issuer,

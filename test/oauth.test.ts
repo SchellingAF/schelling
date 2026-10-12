@@ -189,6 +189,12 @@ describe("an app finds out how to sign in", () => {
     assert.equal(out.body.resource, CONNECT);
     assert.deepEqual(out.body.authorization_servers, [ORIGIN]);
     assert.deepEqual(out.body.scopes_supported, ["read", "write"]);
+    // The origin's own path, which a directory probes and a client falls back to,
+    // answers the same document: /mcp/connect is the only resource here.
+    const atOrigin = await call("GET", "/.well-known/oauth-protected-resource");
+    assert.equal(atOrigin.status, 200);
+    assert.deepEqual(atOrigin.body, out.body);
+    assert.equal((await call("GET", "/.well-known/oauth-protected-resource/mcp")).status, 404, "/mcp takes a KEY's token, not OAuth");
   });
 
   test("the authorization server metadata offers a published document, PKCE S256 and the issuer mark", async () => {
@@ -205,6 +211,8 @@ describe("an app finds out how to sign in", () => {
 
   test("a server with no site configured says no app can sign in, and /mcp/connect is not there", async () => {
     assert.equal((await call("GET", "/.well-known/oauth-authorization-server", null, undefined, bare)).body.error.code, "OAUTH_UNAVAILABLE");
+    // The origin's own path follows the same rule as the document it repeats.
+    assert.equal((await call("GET", "/.well-known/oauth-protected-resource", null, undefined, bare)).body.error.code, "OAUTH_UNAVAILABLE");
     assert.equal((await send(bare, "POST", "/mcp/connect")).status, 404);
     // Registering is refused in OAuth's words, which the API description lists.
     const registered = await call("POST", "/oauth/register", null, { redirect_uris: ["https://app.example/cb"] }, bare);

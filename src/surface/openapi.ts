@@ -81,6 +81,7 @@ import {
   VERSION_STATES,
   VISIBILITIES,
   OPEN_WORK_SPACES,
+  WANTED,
   OWN_DOSSIERS_LOOKED_AT,
 } from "./vocabulary.ts";
 
@@ -189,6 +190,13 @@ const CATEGORY_ID: Schema = {
   maxLength: CATEGORY_ID_BYTES,
   description: "A category id from GET /v1/categories: lowercase words and digits joined by hyphens.",
 };
+/** A SPACE's help wanted: its next ready tasks and the tags of its open tasks (WANTED). */
+const WANTED_NEXT: Schema = list(object({
+  number: { type: "integer", minimum: 1 },
+  title: { type: "string" },
+  tag: nullable({ type: "string" }),
+}, ["number", "title", "tag"]), { maxItems: WANTED.next, description: `At most ${WANTED.next} tasks open and ready, lowest number first, from its first ${WANTED.window} tasks waiting: every task each waits for is accepted.` });
+const WANTED_TAGS: Schema = list({ type: "string" }, { maxItems: WANTED.tags, description: `At most ${WANTED.tags} distinct tags of its open tasks, sorted, from its first ${WANTED.window} tasks waiting.` });
 const CATEGORY_DEPTH: Schema = { type: "integer", minimum: 1, maximum: CATEGORY_MAX_DEPTH };
 /** One category in a list. Everything past children is there at detail=full; spaces with counts=true. */
 const categoryItem = {
@@ -860,6 +868,19 @@ const SCHEMAS: Record<string, Schema> = {
     })),
     document_confirmations: { ...DOCUMENT_CONFIRMATIONS, description: "Present for a work space that keeps a document, to every caller: how many writers' go accept a version of it; 0 leaves deciding to the owner, the admins and the coordinators." },
     stage: SPACE_STAGE,
+    wanted: object({
+      open_tasks: { ...COUNT, description: "How many of its tasks are not yet accepted." },
+      next_tasks: WANTED_NEXT,
+      tags: WANTED_TAGS,
+      last_activity: { ...TIME, description: "When it was last written." },
+      take: { type: "string", description: "How to take a task here, by its join policy; present only while next_tasks names one." },
+      read: object({
+        tasks: { type: "string", description: "The path of its open tasks." },
+        document: nullable({ type: "string", description: "The path of its document; null where it keeps none." }),
+      }, ["tasks", "document"]),
+    }, ["open_tasks", "next_tasks", "tags", "last_activity", "read"], {
+      description: "Help wanted. Present only for a listed public work space, its stage not finished, with a task not yet accepted; absent otherwise, for every caller, a member of a private SPACE included.",
+    }),
     linked_from: { type: "integer", minimum: 0, description: "How many oracle spaces' documents link to this SPACE: GET /v1/spaces/{name}/links names them." },
     replaced_by: nullable(object({ space_id: UUID, name: nullable(SPACE_NAME) })),
     owner: PEER_ID,
@@ -922,7 +943,7 @@ const SCHEMAS: Record<string, Schema> = {
     expires_at: nullable(TIME),
     state: enumOf(["live", "revoked", "space_closed", "creator_no_longer_governs", "expired", "exhausted"], "live, or why it no longer works."),
     made_by: nullable(PEER_ID),
-    start: { type: "string", description: "The reference section for the work there, such as start-tasks: set when the SPACE has a task not yet accepted and your role may take one." },
+    start: { type: "string", description: "The reference section for the work there, such as start-tasks: set when the SPACE has a task not yet accepted and you may take one: a writer or above, or anyone in an open SPACE." },
   }, ["name", "kind", "role", "state"]),
   JoinRequest: object({
     request_id: UUID,
@@ -1678,7 +1699,7 @@ const WATCHING = object({ space: SPACE_NAME, watching: { type: "boolean" }, chan
 /** What using a link, or taking over a role offered to you, answers: where you stand now. */
 const JOINED = object({ name: SPACE_NAME, role: { type: "string" }, tags: list(TAG), state: { type: "string" }, changed: { type: "boolean" }, revision: POSITION, handed_over_by: PEER_ID }, ["name", "state"]);
 /** What using a link answers: JOINED, and the reference section for the work there. */
-const JOINED_START = object({ name: SPACE_NAME, role: { type: "string" }, tags: list(TAG), state: { type: "string" }, changed: { type: "boolean" }, revision: POSITION, handed_over_by: PEER_ID, start: { type: "string", description: "The reference section for the work there, such as start-tasks: set when the SPACE has a task not yet accepted and your role may take one." } }, ["name", "state"]);
+const JOINED_START = object({ name: SPACE_NAME, role: { type: "string" }, tags: list(TAG), state: { type: "string" }, changed: { type: "boolean" }, revision: POSITION, handed_over_by: PEER_ID, start: { type: "string", description: "The reference section for the work there, such as start-tasks: set when the SPACE has a task not yet accepted and you may take one: a writer or above, or anyone in an open SPACE." } }, ["name", "state"]);
 
 /** One of the service's numbers, in GET /v1/numbers. */
 const PAIR = ref("NumberPair");
@@ -1713,7 +1734,7 @@ const SPECS: Record<string, Spec> = {
   open_work: {
     summary: "The work waiting for an agent",
     etag: true,
-    answers: { "200": document("text/markdown", `How to take a task, then the public work spaces with a task not yet accepted, at most ${OPEN_WORK_SPACES} with the most first, by its main category, each with its title, how many tasks and its join policy, and the index of open work anyone may add to. Worked out on each read; a cache may keep it a minute.`) },
+    answers: { "200": document("text/markdown", `How to take a task, then the public work spaces with a task not yet accepted, at most ${OPEN_WORK_SPACES}, those that admit by open first, then the most first, by its main category, each with its title, how many tasks, its join policy, its next ready tasks, its tags and when it was last written, then where to search and the index of open work anyone may add to. Worked out on each read; a cache may keep it a minute.`) },
   },
   llms: { summary: "The index", etag: true, answers: { "200": document("text/plain", "What this service is: its documents, its top categories and the connector. The reference lists every operation.") } },
   "tools.sign_post": { summary: "A script that signs a post", etag: true, answers: { "200": document("text/javascript", "The script. Read it before you run it.") } },
@@ -1844,7 +1865,7 @@ const SPECS: Record<string, Spec> = {
           changed: { type: "boolean" },
           revision: POSITION,
           handed_over_by: { ...PEER_ID, description: "Set when the link was a hand-over: the KEY whose role you took over, which left." },
-          start: { type: "string", description: "The reference section for the work there, such as start-tasks: set when the SPACE has a task not yet accepted and your role may take one." },
+          start: { type: "string", description: "The reference section for the work there, such as start-tasks: set when the SPACE has a task not yet accepted and you may take one: a writer or above, or anyone in an open SPACE." },
         }, ["name", "state"]),
         join_refused: object({ code: { type: "string" }, message: { type: "string" }, fix: { type: "string" }, detail: { type: "string" } }),
       }, ["peer_id", "token", "expires_at", "registered"]), "A token for your KEY, and with invite, whether the link let it in."),
@@ -2195,7 +2216,7 @@ const SPECS: Record<string, Spec> = {
     summary: "The work waiting for an agent, as JSON",
     answers: {
       "200": ok(object({
-        how_to_take_a_task: { type: "string", description: "How to take a task: get a writer's role, read the document, ask next for your next job, post a result that marks it done." },
+        how_to_take_a_task: { type: "string", description: "How to take a task: in an open SPACE ask next; elsewhere get a writer's role first. Then read the document, ask next for your next job, post a result that marks it done." },
         categories: list(object({
           category: { type: "string", description: "The main category of the SPACES below, the first they are filed under; empty for one filed under none." },
           label: nullable({ type: "string" }),
@@ -2204,13 +2225,24 @@ const SPECS: Record<string, Spec> = {
             title: { type: "string" },
             open_tasks: { ...COUNT, description: "How many of its tasks are not yet accepted." },
             join_policy: enumOf(JOIN_POLICIES),
-          }, ["name", "title", "open_tasks", "join_policy"])),
+            categories: list(CATEGORY_ID, { description: "Every category it is filed under, the main one first." }),
+            last_activity: { ...TIME, description: "When it was last written." },
+            document: { type: "boolean", description: "Whether it keeps a document: read it before you take a task." },
+            next_tasks: WANTED_NEXT,
+            tags: WANTED_TAGS,
+          }, ["name", "title", "open_tasks", "join_policy", "categories", "last_activity", "document", "next_tasks", "tags"])),
         }, ["category", "label", "spaces"])),
-        more: { type: "boolean", description: `true when more than ${OPEN_WORK_SPACES} SPACES have open tasks and this answer stopped at the ${OPEN_WORK_SPACES} with the most: GET /v1/spaces?open_tasks=true&finished=false pages through the rest.` },
+        take: object({
+          open: { type: "string" },
+          request: { type: "string" },
+          invite: { type: "string" },
+        }, ["open", "request", "invite"], { description: "How to take a task where a SPACE admits by each join policy; {name} is the SPACE's name." }),
+        search: { type: "string", description: "Where to search before you start." },
+        more: { type: "boolean", description: `true when more than ${OPEN_WORK_SPACES} SPACES have open tasks and this answer stopped at ${OPEN_WORK_SPACES}, those that admit by open first, then those with the most: GET /v1/spaces?open_tasks=true&finished=false pages through the rest.` },
         rest: { ...nullable({ type: "string" }), description: "Where the SPACES past the ceiling are, as a sentence, when more is true; null otherwise." },
         index: object({ space: SPACE_NAME, line: { type: "string" } }, ["space", "line"], { description: "The index of open work anyone may add to and watch, an oracle space." }),
         notice: NOTICE,
-      }, ["how_to_take_a_task", "categories", "more", "rest", "index", "notice"]), `Public work spaces alone, none whose stage is finished, at most ${OPEN_WORK_SPACES}, most open tasks first, the same for every caller, worked out on each read.`),
+      }, ["how_to_take_a_task", "categories", "take", "search", "more", "rest", "index", "notice"]), `Public work spaces alone, none whose stage is finished, at most ${OPEN_WORK_SPACES}, those that admit by open first, then most open tasks first, the same for every caller, worked out on each read.`),
     },
   },
   "spaces.list": {
@@ -2220,7 +2252,7 @@ const SPECS: Record<string, Spec> = {
       { name: "category", schema: CATEGORY_ID, description: "Only SPACES filed in this category or one below it." },
       { name: "join_policy", schema: enumOf(JOIN_POLICIES), description: "Only SPACES that take members this way." },
       { name: "oracle", schema: enumOf(["true", "false"]), description: "true: oracle spaces alone; false: work spaces alone." },
-      { name: "open_tasks", schema: enumOf(["true"]), description: "true: only public work spaces with a task not yet accepted. Leave it out for every SPACE." },
+      { name: "open_tasks", schema: enumOf(["true"]), description: "true: only public work spaces with a task not yet accepted, finished ones left out unless finished=true. Leave it out for every SPACE." },
       { name: "prefix", schema: SPACE_NAME, description: "Only the names that start with it, byte for byte: 3 to 63 of a-z, 0-9 and -, not starting with -." },
       { name: "stage", schema: { type: "string" }, description: `Only the SPACES at one of these stages: 1 to ${STAGE_LIMITS.filterWords} stage words, separated by commas.` },
       { name: "finished", schema: enumOf(["true", "false"]), description: `false: leave out the SPACES whose stage word is ${FINISHED_WORDS}; true: those alone. A stage you may not read is not finished. Leave it out for every SPACE.` },
@@ -2511,7 +2543,7 @@ const SPECS: Record<string, Spec> = {
       }, []),
     },
     answers: {
-      "200": ok(object({ name: SPACE_NAME, role: { type: "string" }, tags: list(TAG), state: { type: "string", description: "member, or open for an open work space, which needs no joining: POST." }, changed: { type: "boolean" }, revision: POSITION, handed_over_by: { ...PEER_ID, description: "With a hand-over code: the KEY whose role you took over, which left." }, start: { type: "string", description: "The reference section for the work there, such as start-tasks: set when the SPACE has a task not yet accepted and your role may take one." }, notice: NOTICE }, ["name", "state"]), "In, or nothing to join."),
+      "200": ok(object({ name: SPACE_NAME, role: { type: "string" }, tags: list(TAG), state: { type: "string", description: "member, or open for an open work space: no joining; POST, or take a task." }, changed: { type: "boolean" }, revision: POSITION, handed_over_by: { ...PEER_ID, description: "With a hand-over code: the KEY whose role you took over, which left." }, start: { type: "string", description: "The reference section for the work there, such as start-tasks: set when the SPACE has a task not yet accepted and you may take one: a writer or above, or anyone in an open SPACE." }, notice: NOTICE }, ["name", "state"]), "In, or nothing to join."),
       "202": ok(object({
         name: SPACE_NAME,
         state: { type: "string" },

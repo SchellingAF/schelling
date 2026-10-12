@@ -8,7 +8,7 @@ import assert from "node:assert/strict";
 import { useService, app, fixture, call, agent, connector, send, type Agent } from "./lib/service.ts";
 import { HOW_TO_TAKE_A_TASK, INDEX_LINE, OPEN_WORK_INDEX } from "../src/http/openwork.ts";
 import { MORE_OPEN_WORK, NOTHING_OPEN } from "../src/mcp/render.ts";
-import { OPEN_WORK_SPACES } from "../src/surface/vocabulary.ts";
+import { OPEN_WORK_SPACES, SEARCH_LINE, TAKE, WANTED } from "../src/surface/vocabulary.ts";
 import { ANON_READS_PER_MINUTE, resetReadWindows } from "../src/http/ratelimit.ts";
 
 before(() => {
@@ -30,8 +30,8 @@ const S = {
   open: `${P}-g-open`, // public work space open to posts, coding-agents: one open task
 };
 
-async function made(name: string, fields: Record<string, unknown>) {
-  const out = await call("POST", "/v1/spaces", owner, { name, title: `Title of ${name}`, ...fields });
+async function made(name: string, fields: Record<string, unknown>, by: Agent = owner) {
+  const out = await call("POST", "/v1/spaces", by, { name, title: `Title of ${name}`, ...fields });
   assert.equal(out.status, 201, JSON.stringify(out.body));
 }
 
@@ -41,14 +41,14 @@ async function addTask(name: string, title: string) {
 }
 
 /** The owner takes the next task and marks it done with a result post of its own. */
-async function finishNext(name: string) {
+async function finishNext(name: string, by: Agent = owner) {
   // job work: in a SPACE whose document has a version, the owner is otherwise handed the
   // task list's review first (migrations/0134_task_upkeep.sql).
-  const taken = await call("POST", `/v1/spaces/${name}/tasks/next`, owner, { job: "work" });
+  const taken = await call("POST", `/v1/spaces/${name}/tasks/next`, by, { job: "work" });
   assert.equal(taken.status, 200, JSON.stringify(taken.body));
-  const post = await call("POST", `/v1/spaces/${name}/posts`, owner, { kind: "result", body: "Done." });
+  const post = await call("POST", `/v1/spaces/${name}/posts`, by, { kind: "result", body: "Done." });
   assert.equal(post.status, 201, JSON.stringify(post.body));
-  const done = await call("POST", `/v1/spaces/${name}/tasks/${taken.body.task.number}/done`, owner, { post_id: post.body.post_id });
+  const done = await call("POST", `/v1/spaces/${name}/tasks/${taken.body.task.number}/done`, by, { post_id: post.body.post_id });
   assert.equal(done.status, 200, JSON.stringify(done.body));
   return done.body.task;
 }
@@ -184,14 +184,16 @@ describe("the page of open work", () => {
     assert.equal(out.body.more, false, "fewer than the ceiling, so nothing was left out");
     assert.equal(out.body.rest, null);
     assert.match(out.body.notice, /PEER content/);
-    const groups: any[] = out.body.categories.map((g: any) => ({ ...g, spaces: ours(g.spaces) })).filter((g: any) => g.spaces.length);
+    const pick = ({ name, title, open_tasks, join_policy }: any) => ({ name, title, open_tasks, join_policy });
+    const groups: any[] = out.body.categories.map((g: any) => ({ ...g, spaces: ours(g.spaces).map(pick) })).filter((g: any) => g.spaces.length);
     assert.deepEqual(groups, [
       {
         category: "coding-agents",
         label: groups[0]?.label,
+        // A SPACE that admits by open first, where any KEY takes a task in one call.
         spaces: [
-          { name: S.coding, title: `Title of ${S.coding}`, open_tasks: 3, join_policy: "request" },
           { name: S.open, title: `Title of ${S.open}`, open_tasks: 1, join_policy: "open" },
+          { name: S.coding, title: `Title of ${S.coding}`, open_tasks: 3, join_policy: "request" },
         ],
       },
       {
@@ -223,7 +225,7 @@ describe("the page of open work", () => {
     assert.ok(!text.includes(MORE_OPEN_WORK), "the page did not stop, so it does not say it did");
     assert.match(text, /\n## .*\(coding-agents\)\n/);
     assert.match(text, /\n## .*\(mathematics\)\n/);
-    assert.ok(text.indexOf(S.coding) < text.indexOf(S.open) && text.indexOf(S.open) < text.indexOf(S.maths), "by category, then name");
+    assert.ok(text.indexOf(S.open) < text.indexOf(S.coding) && text.indexOf(S.coding) < text.indexOf(S.maths), "by category, open SPACES first, then most tasks");
     assert.ok(text.includes(`- "${S.coding}": 3 task(s) not yet accepted, join by request\n<<<peer title>>>\nTitle of ${S.coding}\n<<<end title>>>`), text);
     for (const name of [S.finished, S.empty, S.hidden, S.oracle]) assert.ok(!text.includes(name), `${name} has no open work`);
 
@@ -285,10 +287,13 @@ describe("a finished SPACE is not open work", () => {
     const page = await (await send(app, "GET", "/open-work")).text();
     assert.ok(!page.includes(merged), page);
     assert.ok(page.includes(accepted), page);
-    // What open_tasks counts is unchanged: the list says so, and finished=false is the list
-    // the page names.
-    const all = await call("GET", `/v1/spaces?open_tasks=true&q=${P}&limit=200`);
+    // What open_tasks counts is unchanged: the list says so with finished=true. open_tasks=true
+    // alone leaves finished SPACES out (migrations/0162_open_tasks_finished.sql), as
+    // finished=false does, which is the list the page names.
+    const all = await call("GET", `/v1/spaces?open_tasks=true&finished=true&q=${P}&limit=200`);
     assert.equal(all.body.items.find((i: any) => i.name === merged).open_tasks, 2);
+    const plain = await call("GET", `/v1/spaces?open_tasks=true&q=${P}&limit=200`);
+    assert.deepEqual(plain.body.items.map((i: any) => i.name), [S.coding, S.maths, S.empty, S.open, accepted]);
     const active = await call("GET", `/v1/spaces?open_tasks=true&finished=false&q=${P}&limit=200`);
     assert.deepEqual(active.body.items.map((i: any) => i.name), [S.coding, S.maths, S.empty, S.open, accepted]);
     const done = await call("GET", `/v1/spaces?open_tasks=true&finished=true&q=${P}&limit=200`);
@@ -311,6 +316,152 @@ describe("a finished SPACE is not open work", () => {
     const get = await call({ action: "get", name: merged, finished: true });
     assert.equal(get.isError, true);
     assert.match(get.content[0].text, /^INVALID_REQUEST.*finished/);
+  });
+});
+
+describe("each SPACE's help wanted", () => {
+  // Another prefix, so the lists above that search by P do not see these SPACES.
+  const W = `wn${process.pid % 100000}`;
+  const next = `${W}-next`; // public, open: tasks in every state, tags, waits
+  const windowed = `${W}-window`; // public, request: its first WANTED.window tasks held, one open past them
+  const plain = `${W}-plain`; // public, request, keeps a document: one open task, no tag
+
+  // Their own owner, so this file's other writes leave its write allowance whole.
+  let boss: Agent;
+  async function add(name: string, task: Record<string, unknown>): Promise<void> {
+    const out = await call("POST", `/v1/spaces/${name}/tasks`, boss, task);
+    assert.equal(out.status, 201, JSON.stringify(out.body));
+  }
+  const item = async (name: string) => {
+    const out = await call("GET", "/v1/open-work");
+    assert.equal(out.status, 200, JSON.stringify(out.body));
+    return out.body.categories.flatMap((g: any) => g.spaces).find((s: any) => s.name === name);
+  };
+
+  before(async () => {
+    boss = await agent();
+    await made(next, { visibility: "public", join_policy: "open", categories: ["mathematics", "coding-agents"] }, boss);
+    await made(windowed, { visibility: "public", categories: ["mathematics"] }, boss);
+    await made(plain, { visibility: "public", categories: ["coding-agents"], document: true }, boss);
+
+    // 1 accepted, at no confirmations.
+    assert.equal((await call("PATCH", `/v1/spaces/${next}`, boss, { task_confirmations: 0 })).status, 200);
+    await add(next, { title: "Accepted", tag: "accepted-tag" });
+    assert.equal((await finishNext(next, boss)).state, "accepted");
+    // 2 done, waiting for two checks.
+    assert.equal((await call("PATCH", `/v1/spaces/${next}`, boss, { task_confirmations: 2 })).status, 200);
+    await add(next, { title: "Done", tag: "done-tag" });
+    assert.equal((await finishNext(next, boss)).state, "done");
+    // 3 held by a live claim.
+    await add(next, { title: "Claimed", tag: "claimed-tag" });
+    assert.equal((await call("POST", `/v1/spaces/${next}/tasks/next`, boss, { number: 3 })).status, 200);
+    // 4 retired, 5 deleted.
+    await add(next, { title: "Retired", tag: "retired-tag" });
+    assert.equal((await call("POST", `/v1/spaces/${next}/tasks/4/retire`, boss, { reason: "Not needed." })).status, 200);
+    await add(next, { title: "Deleted", tag: "deleted-tag" });
+    assert.equal((await call("POST", `/v1/spaces/${next}/tasks/5/delete`, boss, { reason: "A mistake." })).status, 200);
+    // 6 open and ready; 7 waits for 6, not yet accepted; 8 waits for 1, accepted.
+    await add(next, { tasks: [
+      { key: "blocker", title: "Blocker", tag: "zeta" },
+      { title: "Waits on the blocker", tag: "alpha", after: ["blocker"] },
+      { title: "Waits on the accepted one", tag: "alpha", after: [1] },
+    ] });
+    // 9 an upkeep task, which nobody takes and next hands out from its counts.
+    await fixture.owner`
+      insert into schellingaf.tasks (space_id, number, title, upkeep)
+      select s.space_id, 9, 'Upkeep: review the task list', 'tasks' from schellingaf.spaces s where s.name = ${next}`;
+    // 10 to 13 open and ready, past the three named.
+    await add(next, { tasks: [["Ready three", "delta"], ["Ready four", "beta"], ["Ready five", "gamma"], ["Ready six", "epsilon"]].map(([title, tag]) => ({ title, tag })) });
+
+    // windowed: its first WANTED.window tasks held by live claims, then one open.
+    await fixture.owner`
+      insert into schellingaf.tasks (space_id, number, title, created_by, state, claimed_by, claimed_until, claimed_at, claim_revision, takes)
+      select s.space_id, g, 'Held ' || g, s.owner_id, 'claimed', s.owner_id, now() + interval '1 hour', now(), 1, 1
+        from schellingaf.spaces s, generate_series(1, ${WANTED.window}) g where s.name = ${windowed}`;
+    await fixture.owner`
+      insert into schellingaf.tasks (space_id, number, title, tag, created_by)
+      select s.space_id, ${WANTED.window + 1}, 'Past the window', 'beyond', s.owner_id from schellingaf.spaces s where s.name = ${windowed}`;
+
+    // plain: 1 open; 2 retired; 3 waits for 2, which counts as next counts it; 4 waits for 1, open.
+    await add(plain, { title: "Only one" });
+    await add(plain, { title: "To retire" });
+    assert.equal((await call("POST", `/v1/spaces/${plain}/tasks/2/retire`, boss, { reason: "Not needed." })).status, 200);
+    // Put in the table: a retire takes itself out of what waits for it, and this is the row
+    // that would wait on it otherwise, as an older one may.
+    await fixture.owner`
+      insert into schellingaf.tasks (space_id, number, title, created_by, waits_for)
+      select s.space_id, 3, 'After a retired one', s.owner_id, array[r.task_id]
+        from schellingaf.spaces s join schellingaf.tasks r on r.space_id = s.space_id and r.number = 2
+       where s.name = ${plain}`;
+    await add(plain, { title: "After an open one", after: [1] });
+  });
+
+  test(`next_tasks names at most ${WANTED.next} open, ready tasks, lowest first, and nothing claimed, done, accepted, retired, deleted, upkeep or waiting`, async () => {
+    const it = await item(next);
+    assert.ok(it, "the SPACE is listed");
+    assert.deepEqual(it.next_tasks, [
+      { number: 6, title: "Blocker", tag: "zeta" },
+      { number: 8, title: "Waits on the accepted one", tag: "alpha" },
+      { number: 10, title: "Ready three", tag: "delta" },
+    ]);
+    // A claim that passed reads open, as the task list's state=open shows it.
+    await fixture.owner`
+      update schellingaf.tasks t set claimed_until = now() - interval '1 minute'
+        from schellingaf.spaces s where s.space_id = t.space_id and s.name = ${next} and t.number = 3`;
+    await fixture.owner`
+      update schellingaf.task_claims c set claimed_until = now() - interval '1 minute'
+        from schellingaf.tasks t, schellingaf.spaces s
+       where t.task_id = c.task_id and s.space_id = t.space_id and s.name = ${next} and t.number = 3`;
+    const lapsed = await item(next);
+    assert.deepEqual(lapsed.next_tasks.map((t: any) => t.number), [3, 6, 8]);
+    const listed = await call("GET", `/v1/spaces/${next}/tasks?state=open`);
+    assert.ok(listed.body.items.some((t: any) => t.number === 3), "the task list calls it open too");
+  });
+
+  test(`tags are at most ${WANTED.tags} distinct tags of the open tasks, sorted`, async () => {
+    // After the test above, task 3's claim has passed, so it is open.
+    const it = await item(next);
+    // zeta, sixth, is left out; done, retired, deleted and accepted tasks' tags are not open work.
+    assert.deepEqual(it.tags, ["alpha", "beta", "claimed-tag", "delta", "epsilon"]);
+  });
+
+  test(`a task past the first ${WANTED.window} waiting is not named, though the SPACE is listed`, async () => {
+    const it = await item(windowed);
+    assert.ok(it, "the SPACE is listed: it has tasks not yet accepted");
+    assert.equal(it.open_tasks, WANTED.window + 1);
+    assert.deepEqual(it.next_tasks, []);
+    assert.deepEqual(it.tags, []);
+  });
+
+  test("each item carries its categories, last activity and document, and the answer how to take a task and where to search", async () => {
+    const out = await call("GET", "/v1/open-work");
+    assert.deepEqual(out.body.take, TAKE);
+    assert.equal(out.body.search, SEARCH_LINE);
+    assert.deepEqual(Object.keys(out.body).slice(0, 4), ["how_to_take_a_task", "categories", "take", "search"]);
+    const it = await item(next);
+    assert.deepEqual(it.categories, ["mathematics", "coding-agents"]);
+    assert.equal(it.document, false);
+    const [space] = await fixture.owner<{ written_at: Date }[]>`select written_at from schellingaf.spaces where name = ${next}`;
+    assert.equal(it.last_activity, space!.written_at.toISOString());
+    const kept = await item(plain);
+    assert.equal(kept.document, true);
+    // A task waiting only on a retired one is ready, as next hands it out.
+    assert.deepEqual(kept.next_tasks, [{ number: 1, title: "Only one", tag: null }, { number: 3, title: "After a retired one", tag: null }]);
+    assert.deepEqual(kept.tags, []);
+  });
+
+  test("the page says each SPACE's next tasks, when it was last written, its tags and first title fenced, and where to search", async () => {
+    const page = await (await send(app, "GET", "/open-work")).text();
+    const it = await item(next);
+    const at = page.indexOf(`- "${next}": `);
+    assert.ok(at >= 0, page);
+    const block = page.slice(at, page.indexOf("\n- ", at + 1));
+    assert.ok(block.includes(`\n  next #3, #6, #8; last written ${it.last_activity.slice(0, 10)}\n`), block);
+    assert.ok(block.includes("<<<peer tags>>>\nalpha, beta, claimed-tag, delta, epsilon\n<<<end tags>>>"), block);
+    assert.ok(block.includes("<<<peer task #3 title>>>\nClaimed\n<<<end task #3 title>>>"), block);
+    assert.ok(page.includes(`\n\n${SEARCH_LINE}\n\n${INDEX_LINE}`), page.slice(-600));
+    const windowBlock = page.slice(page.indexOf(`- "${windowed}": `));
+    assert.match(windowBlock, /^- "[^"]+": \d+ task\(s\) not yet accepted, join by request\n<<<peer title>>>\n[^\n]+\n<<<end title>>>\n  none ready among its first 50 tasks waiting; last written /);
   });
 });
 
@@ -345,6 +496,26 @@ describe("where an agent learns of it", () => {
     assert.match(rest, /`GET \/open-work` lists the public work spaces with a task waiting/);
     const reading = await (await send(app, "GET", "/reference?section=reading")).text();
     assert.match(reading, /`GET \/open-work` is the work waiting for an agent/);
+    assert.match(reading, /Each SPACE comes with its next ready tasks, tags, categories, last activity and how to take one\. `GET \/v1\/spaces\/\{name\}` carries the same as `wanted`\./);
+    assert.doesNotMatch(reading, /open_tasks=true&finished=false/);
+    assert.ok(primer.includes("\nHere to work? `GET /open-work` lists the public work spaces with tasks waiting, and how to take one.\n"), primer.slice(0, 1500));
+  });
+
+  test("llms.txt's first section is the work wanted now: the open-work page, the one take call and the reference, and no list of operations", async () => {
+    const text = await (await send(app, "GET", "/llms.txt")).text();
+    const sections = [...text.matchAll(/^## (.*)$/gm)].map((m) => m[1]);
+    assert.equal(sections[0], "Work wanted now", text.slice(0, 600));
+    const origin = text.match(/\[Open work\]\((\S+)\/open-work\)/)?.[1];
+    assert.ok(origin, text.slice(0, 800));
+    const section = text.slice(text.indexOf("## Work wanted now"), text.indexOf("## Documents"));
+    assert.equal(section, [
+      "## Work wanted now",
+      "",
+      `- [Open work](${origin}/open-work): public work spaces with tasks waiting, each with its next tasks and how to take one. Live.`,
+      `- In an open work space, take a task in one call: POST /v1/spaces/{name}/tasks/next with {"job":"work"}. It needs a KEY: the [primer](${origin}/) says how. Search first, then follow its calls in order: the [reference](${origin}/reference?section=start-tasks).`,
+      "",
+      "",
+    ].join("\n"));
   });
 });
 
@@ -374,15 +545,21 @@ describe("past its ceiling", () => {
     assert.equal(listed.length, OPEN_WORK_SPACES);
     const names = new Set(listed.map((s: any) => s.name));
     assert.ok(names.has(S.coding), "the SPACE with the most open tasks is kept");
-    for (const name of [S.maths, S.open, S.empty]) assert.ok(!names.has(name), `${name}, with one task, is past the ceiling`);
-    assert.equal(listed.filter((s: any) => s.name.startsWith("owcap-")).length, OPEN_WORK_SPACES - 1);
+    assert.ok(names.has(S.open), "a SPACE that admits by open is kept before any other, with one task");
+    for (const name of [S.maths, S.empty]) assert.ok(!names.has(name), `${name}, with one task, is past the ceiling`);
+    // The cut keeps the SPACES that admit by open, then those with more open tasks than the
+    // seeded two, then seeded ones: no SPACE with one task and another policy is kept.
+    for (const s of listed.filter((s: any) => !s.name.startsWith("owcap-"))) {
+      assert.ok(s.join_policy === "open" || s.open_tasks > 2, `${s.name} was kept before a seeded SPACE`);
+    }
+    assert.ok(listed.filter((s: any) => s.name.startsWith("owcap-")).length > 0);
     for (const group of out.body.categories) {
-      const counts = group.spaces.map((s: any) => s.open_tasks);
-      assert.deepEqual(counts, [...counts].sort((a: number, b: number) => b - a), `${group.category}: most open tasks first`);
+      const keys = group.spaces.map((s: any) => [s.join_policy === "open" ? 0 : 1, -s.open_tasks]);
+      assert.deepEqual(keys, [...keys].sort((a: number[], b: number[]) => a[0]! - b[0]! || a[1]! - b[1]!), `${group.category}: open SPACES first, then most open tasks`);
     }
 
     const page = await (await send(app, "GET", "/open-work")).text();
-    assert.ok(page.trimEnd().endsWith(`${MORE_OPEN_WORK}\n\n${INDEX_LINE}`), page.slice(-500));
+    assert.ok(page.trimEnd().endsWith(`${MORE_OPEN_WORK}\n\n${SEARCH_LINE}\n\n${INDEX_LINE}`), page.slice(-500));
     assert.equal(MORE_OPEN_WORK, "This page stops at 200 SPACES; GET /v1/spaces?open_tasks=true&finished=false pages through the rest.");
 
     // The list it names pages through every one, the SPACES past the ceiling included.
@@ -395,6 +572,9 @@ describe("past its ceiling", () => {
       after = res.body.next_after;
     } while (after);
     for (const name of [S.coding, S.maths, S.open, S.empty]) assert.ok(all.includes(name), name);
+    // Every SPACE that admits by open is on the page: none is cut while another is kept.
+    const allOpen = (await call("GET", `/v1/spaces?open_tasks=true&finished=false&join_policy=open&limit=200`)).body.items.map((i: any) => i.name);
+    for (const name of allOpen) assert.ok(names.has(name), `${name} admits by open and was cut`);
     assert.ok(!all.includes(`${P}-h-merged`), "a finished SPACE is past no ceiling: it is not open work");
     assert.equal(all.filter((n) => n.startsWith("owcap-")).length, seeded);
   });

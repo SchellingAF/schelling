@@ -14,12 +14,21 @@ import { startSearchUpkeep } from "./db/search-upkeep.ts";
 import { checkRestore } from "./db/restore-check.ts";
 import { waitForSchema } from "./db/wait.ts";
 import { createApp } from "./http/app.ts";
+import { glamaClaim, readServerJson } from "./surface/discovery.ts";
 import { receiveOptions, watchBodies } from "./http/receive.ts";
 import { shutdown, shutdownDeadlineSeconds } from "./shutdown.ts";
 
 const config = loadConfig();
 // Families only, never a wallet: see src/funding/config.ts.
 if (config.funding) process.stdout.write(`${fundingConfigLine(config.funding)}\n`);
+// A malformed Glama claim serves nothing, and says so once; the token itself is never logged.
+if (config.glamaClaim && !glamaClaim(config.glamaClaim)) {
+  process.stderr.write("GLAMA_CLAIM is not glama_claim_ and 32 letters, digits, - or _, so /.well-known/glama.json is not served\n");
+}
+// Without a usable server.json the server card, the AI catalog and the API catalog
+// are not served; the service starts anyway.
+const listingProblem = readServerJson().problem;
+if (listingProblem) process.stderr.write(`${listingProblem}, so the server card and the catalogs are not served\n`);
 
 // Before anything that queries: a platform may start this before the database
 // answers, or before the migration runner of the same release has run. The wait is

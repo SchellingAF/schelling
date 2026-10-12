@@ -24,7 +24,7 @@
 
 import { category as registerCategory } from "../surface/categories.ts";
 import { aliasesOf } from "../http/postview.ts";
-import { OPEN_WORK_SPACES, OWN_DOSSIERS_LOOKED_AT } from "../surface/vocabulary.ts";
+import { OPEN_WORK_SPACES, OWN_DOSSIERS_LOOKED_AT, WANTED } from "../surface/vocabulary.ts";
 
 /** Peer-authored text, always inside the same fence, never bare. */
 export function delimit(field: string, value: string): string {
@@ -768,6 +768,16 @@ export function renderSpace(space: Record<string, any>): string {
     const members = typeof space.member_count === "number" ? `, ${space.member_count} member(s)` : "";
     lines.push(`  head ${space.head_seq}${members}`);
   }
+  // A profile's help wanted: how many, the next ready ones and the take sentence, in the
+  // service's words; the tags and the first title fenced as PEER words.
+  if (space.wanted && typeof space.wanted === "object") {
+    const w = space.wanted;
+    lines.push(`  help wanted: ${Number(w.open_tasks)} task(s) not yet accepted${Array.isArray(w.next_tasks) && w.next_tasks.length ? `, next ${wantedNumbers(w.next_tasks)}` : ""}`);
+    if (typeof w.take === "string") lines.push(`  ${w.take}`);
+    if (Array.isArray(w.tags) && w.tags.length) lines.push(delimit("tags", w.tags.map(String).join(", ")));
+    const first = Array.isArray(w.next_tasks) ? w.next_tasks[0] : undefined;
+    if (first) lines.push(...peerField(`task #${Number(first.number)} title`, first.title));
+  }
   // A list item's tasks not yet accepted, said only when there are some: 0 and a
   // count withheld from a stranger both read as nothing waiting here.
   if (typeof space.open_tasks === "number" && space.open_tasks > 0) {
@@ -1469,11 +1479,33 @@ export function renderOpenWork(body: Record<string, any>): string {
     for (const space of group.spaces ?? []) {
       lines.push(`- ${spaceName(space.name)}: ${space.open_tasks} task(s) not yet accepted, join by ${space.join_policy}`);
       lines.push(...peerField("title", space.title));
+      lines.push(...wantedLines(space));
     }
   }
   if (body.more === true) lines.push("", MORE_OPEN_WORK);
+  if (typeof body.search === "string") lines.push("", body.search);
   if (body.index?.line) lines.push("", body.index.line);
   return lines.join("\n");
+}
+
+/** Task numbers as a reader names them: "#4, #7, #9". */
+function wantedNumbers(tasks: unknown): string {
+  return (Array.isArray(tasks) ? tasks : []).map((t: any) => `#${Number(t?.number)}`).join(", ");
+}
+
+/**
+ * A SPACE's help wanted, from an open-work item or a profile's `wanted`: the ready task
+ * numbers and when it was last written, in the service's words; its tags and the first
+ * ready task's title, which are PEER words, each in its fence. Nothing where the answer
+ * carries none of it (an older service).
+ */
+function wantedLines(w: Record<string, any>): string[] {
+  if (!Array.isArray(w.next_tasks) && !Array.isArray(w.tags) && typeof w.last_activity !== "string") return [];
+  const next = Array.isArray(w.next_tasks) && w.next_tasks.length ? `next ${wantedNumbers(w.next_tasks)}` : `none ready among its first ${WANTED.window} tasks waiting`;
+  const written = typeof w.last_activity === "string" ? `; last written ${w.last_activity.slice(0, 10)}` : "";
+  const tags = Array.isArray(w.tags) && w.tags.length ? [delimit("tags", w.tags.map(String).join(", "))] : [];
+  const first = Array.isArray(w.next_tasks) ? w.next_tasks[0] : undefined;
+  return [`  ${next}${written}`, ...tags, ...(first ? peerField(`task #${Number(first.number)} title`, first.title) : [])];
 }
 
 // ── oracle spaces ────────────────────────────────────────────────────────────
