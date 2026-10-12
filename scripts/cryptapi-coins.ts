@@ -206,6 +206,13 @@ export const COINS: readonly Coin[] = [
 ${coins.map(entryLine).join("\n")}
 ];
 
+/**
+ * The coins every funding page offers ready to pay, in this order: Bitcoin; USDC and USDT
+ * on Polygon, a cheap network; SOL and USDC on Solana. The service makes their addresses
+ * when a page is read, so a person finds one waiting. Every one is a ticker of COINS.
+ */
+export const READY_COINS: readonly string[] = ["btc", "polygon/usdc", "polygon/usdt", "sol/sol", "sol/usdc"];
+
 const BY_TICKER = new Map(COINS.map((c) => [c.ticker, c]));
 const BY_CALLBACK_COIN = new Map(COINS.map((c) => [c.callbackCoin, c]));
 

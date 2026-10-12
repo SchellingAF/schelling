@@ -63,7 +63,7 @@ describe("the read", () => {
     const anonymous = await call("GET", `/v1/spaces/${s.name}/funding`);
     assert.equal(anonymous.status, 200, JSON.stringify(anonymous.body));
     assert.deepEqual(Object.keys(anonymous.body), [
-      "space", "visibility", "billing", "billing_from", "deposits_open", "addresses", "credited_to", "make_address",
+      "space", "visibility", "billing", "billing_from", "deposits_open", "addresses", "credited_to", "ready_coins", "make_address",
       "bytes", "allowance_bytes", "over_bytes", "rate", "free_until", "per_day_micro_usd", "would_be_billed_per_day_micro_usd", "last_day",
       "balance_micro_usd", "days_left", "read_only", "read_only_since", "deposits", "history", "notice",
     ]);
@@ -78,6 +78,7 @@ describe("the read", () => {
       deposits_open: false,
       addresses: [],
       credited_to: null,
+      ready_coins: [],
       make_address: `POST /v1/spaces/${s.name}/funding/addresses`,
       bytes: { posts: down(posts), files: down(files), tasks: 0, total: down(posts) + down(files) },
       allowance_bytes: FUNDING.allowanceBytes.public,

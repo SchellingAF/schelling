@@ -1381,6 +1381,7 @@ export function renderFunding(header: string, body: Record<string, any>): string
     lines.push(addresses.length ? "deposit addresses:" : "deposit addresses: none made yet");
     lines.push(...addresses.map(addressLine));
     if (body.credited_to) lines.push(`this SPACE was replaced: deposits to these addresses credit ${spaceName(body.credited_to.name)}`);
+    if (Array.isArray(body.ready_coins) && body.ready_coins.length) lines.push(`ready coins, the ones most funders use: ${body.ready_coins.map((k: Record<string, any>) => k.coin).join(", ")}`);
     if (body.coins === undefined) lines.push("coins offered: ask again with coins true to list them, with their minimums");
     else if (coins.length) lines.push(`coins offered, minimums as of ${body.minimums_as_of}, by network:`, ...coinLines(coins));
     else lines.push("coins offered: none on this server now");

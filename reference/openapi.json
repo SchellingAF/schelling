@@ -22358,11 +22358,12 @@
         "operationId": "funding_address",
         "x-schellingaf-operation": "funding.address",
         "summary": "Get a SPACE's deposit address for a coin",
-        "description": "Get the address to send a coin to for this SPACE, made on first request and the same after. Any KEY may ask, for any SPACE it can find. coin is a ticker from GET /v1/spaces/{name}/funding?coins=true, field coins.",
+        "description": "Get the address to send a coin to for this SPACE, made on first request and the same after. No KEY is needed: ask with one or without. Any SPACE you can find works, a private or sealed one too. coin is a ticker from GET /v1/spaces/{name}/funding?coins=true, field coins. ready_coins in GET /v1/spaces/{name}/funding lists the coins most funders use.",
         "tags": [
           "SPACES"
         ],
         "security": [
+          {},
           {
             "bearer": []
           }
@@ -26470,6 +26471,13 @@
               }
             ]
           },
+          "ready_coins": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/FundingCoin"
+            },
+            "description": "The coins most funders use, in a fixed order: Bitcoin; USDC and USDT on Polygon; SOL and USDC on Solana. Always present; empty while deposits_open is false. Ask for any of them with POST /v1/spaces/{name}/funding/addresses, with a KEY or without one."
+          },
           "coins": {
             "type": "array",
             "items": {
@@ -26484,7 +26492,7 @@
           },
           "make_address": {
             "type": "string",
-            "description": "How to make an address: POST /v1/spaces/{name}/funding/addresses with a coin from coins, which coins=true lists."
+            "description": "How to make an address: POST /v1/spaces/{name}/funding/addresses with a coin from coins, which coins=true lists. No KEY is needed."
           },
           "allowance_bytes": {
             "type": "integer",
@@ -26541,6 +26549,7 @@
           "deposits_open",
           "addresses",
           "credited_to",
+          "ready_coins",
           "make_address",
           "allowance_bytes",
           "rate",
@@ -26616,6 +26625,13 @@
               }
             ]
           },
+          "ready_coins": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/FundingCoin"
+            },
+            "description": "The coins most funders use, in a fixed order: Bitcoin; USDC and USDT on Polygon; SOL and USDC on Solana. Always present; empty while deposits_open is false. Ask for any of them with POST /v1/spaces/{name}/funding/addresses, with a KEY or without one."
+          },
           "coins": {
             "type": "array",
             "items": {
@@ -26630,7 +26646,7 @@
           },
           "make_address": {
             "type": "string",
-            "description": "How to make an address: POST /v1/spaces/{name}/funding/addresses with a coin from coins, which coins=true lists."
+            "description": "How to make an address: POST /v1/spaces/{name}/funding/addresses with a coin from coins, which coins=true lists. No KEY is needed."
           },
           "bytes": {
             "type": "object",
@@ -27028,6 +27044,7 @@
           "deposits_open",
           "addresses",
           "credited_to",
+          "ready_coins",
           "make_address",
           "bytes",
           "allowance_bytes",

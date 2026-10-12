@@ -354,12 +354,13 @@ describe("POST /v1/spaces/{name}/funding/addresses", () => {
     fund = serviceWith(fundingConfig(env(), ORIGIN, { timeoutMs: 300 }));
   });
 
-  test("needs a token, and a token an app was given to read is refused", async () => {
+  test("needs no token, but a token that is no good is refused, and so is one an app was given to read", async () => {
     const owner = await agent();
     const s = await space(owner);
-    const none = await ask(s.name, null, { coin: "btc" });
-    assert.equal(none.status, 401);
-    assert.equal(none.body.error.code, "TOKEN_MISSING");
+    const bad = await ask(s.name, { token: "not-a-token" } as Agent, { coin: "btc" });
+    assert.equal(bad.status, 401);
+    assert.notEqual(bad.body.error.code, "TOKEN_MISSING");
+    assert.deepEqual(await rows(s.id), []);
     const bearer = await classifyBearer(db, `Bearer ${owner.token}`, "127.0.0.1", null);
     assert.equal(bearer.state, "valid");
     const reading = await read(await fund.request(`/v1/spaces/${s.name}/funding/addresses`, {
@@ -490,6 +491,88 @@ describe("POST /v1/spaces/{name}/funding/addresses", () => {
     const sealedOut = await ask(locked.name, stranger, { coin: "trc20/usdt" });
     assert.equal(sealedOut.status, 201, JSON.stringify(sealedOut.body));
     assert.equal((await rows(locked.id)).length, 1);
+  });
+
+  test("a caller with no KEY makes an address, 201, and spends the service's allowance alone; asking again costs nothing", async () => {
+    const owner = await agent();
+    const s = await space(owner);
+    const all = (await bucket("fund-addr:all")) ?? 2000;
+    const before = creates().length;
+    const out = await ask(s.name, null, { coin: "polygon/usdc" });
+    assert.equal(out.status, 201, JSON.stringify(out.body));
+    assert.equal(out.body.created, true);
+    assert.equal(creates().length, before + 1);
+    const [row] = await rows(s.id);
+    assert.equal(row!.address_in, out.body.address.address);
+    const spent = (await bucket("fund-addr:all"))!;
+    assert.ok(all - spent > 0.5, `the service's allowance was spent: ${all} to ${spent}`);
+    const buckets = await fixture.owner<{ key: string }[]>`select key from schellingaf.rate_buckets where key like 'fund-addr:%' and key <> 'fund-addr:all' and key <> ${`fund-addr:${owner.peerId}`}`;
+    assert.deepEqual(buckets.filter((b) => b.key === "fund-addr:null" || b.key === "fund-addr:" || b.key === "fund-addr:undefined"), []);
+
+    const again = await ask(s.name, null, { coin: "polygon/usdc" });
+    assert.equal(again.status, 200, JSON.stringify(again.body));
+    assert.equal(again.body.created, false);
+    assert.equal(again.body.address.address, out.body.address.address);
+    assert.equal(creates().length, before + 1, "the provider was not asked again");
+    assert.ok((await bucket("fund-addr:all"))! - spent > -0.5, "asking again spent the service's allowance");
+    // A KEY gets the same address, and its own allowance is untouched.
+    const keyed = await ask(s.name, owner, { coin: "polygon/usdc" });
+    assert.equal(keyed.status, 200);
+    assert.equal(keyed.body.address.address, out.body.address.address);
+    assert.equal(await bucket(`fund-addr:${owner.peerId}`), null);
+  });
+
+  test("a caller with no KEY gets an address for a private SPACE and for a sealed one", async () => {
+    const owner = await agent();
+    const hidden = await space(owner, "private");
+    const out = await ask(hidden.name, null, { coin: "sol/sol" });
+    assert.equal(out.status, 201, JSON.stringify(out.body));
+    assert.equal((await rows(hidden.id)).length, 1);
+    const locked = await sealedSpace();
+    const sealedOut = await ask(locked.name, null, { coin: "btc" });
+    assert.equal(sealedOut.status, 201, JSON.stringify(sealedOut.body));
+    assert.equal((await rows(locked.id)).length, 1);
+    // The balance and the deposits stay members' alone: an outsider reads the addresses only.
+    const read1 = await call("GET", `/v1/spaces/${hidden.name}/funding`, undefined, undefined, fund);
+    assert.equal(read1.status, 200, JSON.stringify(read1.body));
+    assert.deepEqual(read1.body.members_only, ["bytes", "balance", "deposits", "history", "read_only"]);
+    assert.equal(read1.body.balance_micro_usd, undefined);
+    assert.deepEqual(read1.body.addresses.map((a: { coin: string }) => a.coin), ["sol/sol"]);
+  });
+
+  test("a caller with no KEY meets every other refusal: coin, closed, withheld, unknown, a provider that fails", async () => {
+    const owner = await agent();
+    assert.equal((await ask("no-such-space-here", null, { coin: "btc" })).body.error?.code, "SPACE_NOT_FOUND");
+    const s = await space(owner);
+    assert.equal((await ask(s.name, null, { coin: "doge" })).body.error?.code, "COIN_NOT_OFFERED");
+    await fixture.owner`update schellingaf.spaces set status = 'closed' where name = ${s.name}`;
+    assert.equal((await ask(s.name, null, { coin: "btc" })).body.error?.code, "SPACE_CLOSED");
+    const held = await space(owner);
+    await fixture.owner`insert into schellingaf.withheld_spaces (space_id, reason, note) values (${held.id}::uuid, 'abuse', 'a test')`;
+    assert.equal((await ask(held.name, null, { coin: "btc" })).body.error?.code, "READ_DENIED");
+    const t = await space(owner);
+    const all = (await bucket("fund-addr:all")) ?? 2000;
+    double.failNext(2, 500);
+    const out = await ask(t.name, null, { coin: "base/usdt" });
+    assert.equal(out.status, 503);
+    assert.equal(out.body.error.code, "FUNDING_UNAVAILABLE");
+    assert.ok((await bucket("fund-addr:all"))! - all > -0.5, "the service's allowance was not given back");
+    for (const x of [s, held, t]) assert.deepEqual(await rows(x.id), []);
+  });
+
+  test("a caller with no KEY meets the service's allowance: spent, the next new address is refused, and an address made before still answers", async () => {
+    const owner = await agent();
+    const s = await space(owner);
+    const made = await ask(s.name, null, { coin: "sol/usdc" });
+    assert.equal(made.status, 201);
+    await fixture.owner`insert into schellingaf.rate_buckets (key, tokens, updated_at) values ('fund-addr:all', 0, now()) on conflict (key) do update set tokens = 0, updated_at = now()`;
+    const refused = await ask(s.name, null, { coin: "sol/sol" });
+    assert.equal(refused.status, 429, JSON.stringify(refused.body));
+    assert.equal(refused.body.error.code, "RATE_LIMITED");
+    const again = await ask(s.name, null, { coin: "sol/usdc" });
+    assert.equal(again.status, 200);
+    assert.equal(again.body.address.address, made.body.address.address);
+    await fixture.owner`delete from schellingaf.rate_buckets where key = 'fund-addr:all'`;
   });
 
   test("two requests at once keep one row, and both answer the same address", async () => {

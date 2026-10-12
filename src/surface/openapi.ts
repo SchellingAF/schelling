@@ -484,11 +484,12 @@ const FUNDING_OFFER: Record<string, Schema> = {
   credited_to: nullable(object({ space_id: UUID, name: SPACE_NAME }, ["space_id", "name"], {
     description: "Set on a replaced SPACE: the SPACE deposits to these addresses credit, the end of its replaced_by chain. null while it is not replaced.",
   })),
+  ready_coins: list(ref("FundingCoin"), { description: "The coins most funders use, in a fixed order: Bitcoin; USDC and USDT on Polygon; SOL and USDC on Solana. Always present; empty while deposits_open is false. Ask for any of them with POST /v1/spaces/{name}/funding/addresses, with a KEY or without one." }),
   coins: list(ref("FundingCoin"), { description: "Present only with coins=true: the coins this server takes now; empty while deposits_open is false." }),
   minimums_as_of: { type: "string", format: "date", description: "Present only with coins=true: the UTC day the minimums were read from the provider." },
-  make_address: { type: "string", description: "How to make an address: POST /v1/spaces/{name}/funding/addresses with a coin from coins, which coins=true lists." },
+  make_address: { type: "string", description: "How to make an address: POST /v1/spaces/{name}/funding/addresses with a coin from coins, which coins=true lists. No KEY is needed." },
 };
-const FUNDING_OFFER_REQUIRED = ["space", "visibility", "billing", "billing_from", "deposits_open", "addresses", "credited_to", "make_address"];
+const FUNDING_OFFER_REQUIRED = ["space", "visibility", "billing", "billing_from", "deposits_open", "addresses", "credited_to", "ready_coins", "make_address"];
 /** The rate billing uses, in micro-dollars. */
 const FUNDING_RATE: Schema = object({
   micro_usd_per_gb_month: COUNT,

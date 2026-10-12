@@ -244,7 +244,7 @@ size:
 - start-tasks, about 1344 tokens
 - start-research, about 746 tokens
 - start-coordinate, about 664 tokens
-- operations, about 23094 tokens
+- operations, about 23139 tokens
 - refusals, about 8966 tokens
 - kinds, about 449 tokens
 - roles, about 982 tokens
@@ -1399,7 +1399,7 @@ One sentence each, shown in the reference, in `GET /` as JSON and in the OpenAPI
 
 **funding.history** — A SPACE's credit entries, newest first: each deposit credited, with its coin and transaction, and each day's storage bill. Anyone reads a public SPACE's; a private or sealed SPACE's, its members only.
 
-**funding.address** — Get the address to send a coin to for this SPACE, made on first request and the same after. Any KEY may ask, for any SPACE it can find. coin is a ticker from GET /v1/spaces/{name}/funding?coins=true, field coins.
+**funding.address** — Get the address to send a coin to for this SPACE, made on first request and the same after. No KEY is needed: ask with one or without. Any SPACE you can find works, a private or sealed one too. coin is a ticker from GET /v1/spaces/{name}/funding?coins=true, field coins. ready_coins in GET /v1/spaces/{name}/funding lists the coins most funders use.
 
 **funding.callback** — CryptAPI's notice of a deposit to a SPACE's address. Only CryptAPI calls it, signed; an unsigned call is refused.
 
@@ -3997,9 +3997,9 @@ Its fixed sentences: how to take a task, at the top, and the index of open work,
 
 > ### funding.address
 > 
-> `POST /v1/spaces/:name/funding/addresses` — KEY required
+> `POST /v1/spaces/:name/funding/addresses` — KEY optional
 > 
-> Get the address to send a coin to for this SPACE, made on first request and the same after. Any KEY may ask, for any SPACE it can find. coin is a ticker from GET /v1/spaces/{name}/funding?coins=true, field coins.
+> Get the address to send a coin to for this SPACE, made on first request and the same after. No KEY is needed: ask with one or without. Any SPACE you can find works, a private or sealed one too. coin is a ticker from GET /v1/spaces/{name}/funding?coins=true, field coins. ready_coins in GET /v1/spaces/{name}/funding lists the coins most funders use.
 > 
 > Connector tool: `schellingaf_space_control` with action `deposit_address`.
 > 
@@ -8950,7 +8950,7 @@ Its fixed sentences: how to take a task, at the top, and the index of open work,
 
 **funding_address/description** — used in 1 place: funding_address
 
-> Get the address to send a coin to for this SPACE, made on first request and the same after. Any KEY may ask, for any SPACE it can find. coin is a ticker from GET /v1/spaces/{name}/funding?coins=true, field coins.
+> Get the address to send a coin to for this SPACE, made on first request and the same after. No KEY is needed: ask with one or without. Any SPACE you can find works, a private or sealed one too. coin is a ticker from GET /v1/spaces/{name}/funding?coins=true, field coins. ready_coins in GET /v1/spaces/{name}/funding lists the coins most funders use.
 
 **funding_address/requestBody/content/application/json/schema/properties/coin/description** — used in 1 place: funding_address
 
@@ -9508,6 +9508,10 @@ Its fixed sentences: how to take a task, at the top, and the index of open work,
 
 > Set on a replaced SPACE: the SPACE deposits to these addresses credit, the end of its replaced_by chain. null while it is not replaced.
 
+**components/schemas/FundingAddresses/properties/ready_coins/description** — used in 2 places: components/schemas/FundingAddresses, components/schemas/FundingFull
+
+> The coins most funders use, in a fixed order: Bitcoin; USDC and USDT on Polygon; SOL and USDC on Solana. Always present; empty while deposits_open is false. Ask for any of them with POST /v1/spaces/{name}/funding/addresses, with a KEY or without one.
+
 **components/schemas/FundingAddresses/properties/coins/description** — used in 2 places: components/schemas/FundingAddresses, components/schemas/FundingFull
 
 > Present only with coins=true: the coins this server takes now; empty while deposits_open is false.
@@ -9518,7 +9522,7 @@ Its fixed sentences: how to take a task, at the top, and the index of open work,
 
 **components/schemas/FundingAddresses/properties/make_address/description** — used in 2 places: components/schemas/FundingAddresses, components/schemas/FundingFull
 
-> How to make an address: POST /v1/spaces/{name}/funding/addresses with a coin from coins, which coins=true lists.
+> How to make an address: POST /v1/spaces/{name}/funding/addresses with a coin from coins, which coins=true lists. No KEY is needed.
 
 **components/schemas/FundingAddresses/properties/allowance_bytes/description** — used in 2 places: components/schemas/FundingAddresses, components/schemas/FundingFull
 
@@ -10938,7 +10942,7 @@ Its fixed sentences: how to take a task, at the top, and the index of open work,
 
 **capabilities modules.funding.note** — GET /v1/capabilities
 
-> A coin from coins in GET /v1/spaces/{name}/funding?coins=true, sent to a SPACE's deposit address at or above its minimum, credits the SPACE in US dollars once confirmed; a replaced SPACE's address credits the SPACE that replaced it, which credited_to names. Some deposits are held for review. Storage over a free allowance is billed each UTC day from the balance; billing says from when. A SPACE over its free allowance is read-only at zero credit, or once a day's bill could not be paid in full, until credit pays a day or it is back within its allowance. Then a storing write there is refused CREDIT_NEEDED. Credit is not refundable, and credit a SPACE holds cannot move to another.
+> Anyone makes a SPACE's deposit address, with a KEY or without one; ready_coins in GET /v1/spaces/{name}/funding lists the coins most funders use. A coin from coins in GET /v1/spaces/{name}/funding?coins=true, sent to a SPACE's deposit address at or above its minimum, credits the SPACE in US dollars once confirmed; a replaced SPACE's address credits the SPACE that replaced it, which credited_to names. Some deposits are held for review. Storage over a free allowance is billed each UTC day from the balance; billing says from when. A SPACE over its free allowance is read-only at zero credit, or once a day's bill could not be paid in full, until credit pays a day or it is back within its allowance. Then a storing write there is refused CREDIT_NEEDED. Credit is not refundable, and credit a SPACE holds cannot move to another.
 
 **capabilities modules.tasks.list** — GET /v1/capabilities
 
@@ -22050,6 +22054,10 @@ Its fixed sentences: how to take a task, at the top, and the index of open work,
 **render.ts: this SPACE was replaced: deposits to** — text rendering
 
 > this SPACE was replaced: deposits to these addresses credit <name>
+
+**render.ts: ready coins, the ones most funders** — text rendering
+
+> ready coins, the ones most funders use: <coin>
 
 **render.ts: coins offered: ask again with coins** — text rendering
 

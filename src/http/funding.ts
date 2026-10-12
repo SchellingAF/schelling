@@ -39,10 +39,9 @@ import { ApiError, toApiError } from "../db/errors.ts";
 import { cursor, readDenied } from "./postview.ts";
 import { optionalBearer, requireBearer, type Env } from "./app.ts";
 import { OWN, SHARED, giveBack, spend } from "./ratelimit.ts";
-import { toHex } from "../domain/keys.ts";
 import { asObject, parseStrictJson, queryFlag } from "../domain/validate.ts";
 import { FUNDING, dailyMicroUsd, type Funding } from "../surface/vocabulary.ts";
-import { COINS, COINS_AS_OF, COIN_FAMILIES, coinByCallbackCoin, coinByTicker, type Coin } from "../funding/coins.ts";
+import { COINS, COINS_AS_OF, COIN_FAMILIES, READY_COINS, coinByCallbackCoin, coinByTicker, type Coin } from "../funding/coins.ts";
 import { depositsOpen, type FundingConfig } from "../funding/config.ts";
 import { callbackMac, callbackUrl } from "../funding/callback-url.ts";
 import { createAddress } from "../funding/cryptapi.ts";
@@ -238,6 +237,18 @@ export function coinsOffered(funding: FundingConfig | undefined) {
   return COINS.filter((coin) => funding.wallets[coin.family] !== undefined).map(coinEntry);
 }
 
+/**
+ * The coins a page shows ready to pay, READY_COINS in its order, while deposits are open
+ * and the server has a wallet for the coin's family; none otherwise. Always in the answer,
+ * unlike coins, so a page need not ask for the 98 to find them.
+ */
+export function readyCoinsOffered(funding: FundingConfig | undefined) {
+  if (!depositsOpen(funding)) return [];
+  return READY_COINS.map((ticker) => coinByTicker(ticker))
+    .filter((coin): coin is Coin => coin !== undefined && funding.wallets[coin.family] !== undefined)
+    .map(coinEntry);
+}
+
 /** The configured wallet of each family, in COIN_FAMILIES' order, null where none: what funding_addresses_of() compares. */
 export function walletsOf(funding: FundingConfig | undefined): (string | null)[] {
   return COIN_FAMILIES.map((family) => funding?.wallets[family] ?? null);
@@ -245,13 +256,15 @@ export function walletsOf(funding: FundingConfig | undefined): (string | null)[]
 
 /**
  * What every funding.get answer carries, whoever asks: the addresses made, where their
- * deposits are credited, and how to make one. The coins and the day their minimums were
- * read only when asked for with coins=true.
+ * deposits are credited, the ready coins (the few a page shows to pay at once) and how to
+ * make an address. The coins and the day their minimums were read only when asked for
+ * with coins=true.
  */
 export type Offer = {
   deposits_open: boolean;
   addresses: ReturnType<typeof addressEntry>[];
   credited_to: CreditedTo;
+  ready_coins: ReturnType<typeof coinEntry>[];
   coins?: ReturnType<typeof coinEntry>[];
   minimums_as_of?: string;
   make_address: string;
@@ -262,6 +275,7 @@ export function offerOf(name: string, addresses: AddressRow[], funding: FundingC
     deposits_open: depositsOpen(funding),
     addresses: addresses.map(addressEntry),
     credited_to: creditedTo,
+    ready_coins: readyCoinsOffered(funding),
     ...(withCoins ? { coins: coinsOffered(funding), minimums_as_of: COINS_AS_OF } : {}),
     make_address: `POST /v1/spaces/${name}/funding/addresses`,
   };
@@ -530,14 +544,16 @@ export function mountFunding(app: Hono<Env>, config: Config, db: Db) {
   });
 
   // The deposit address for a coin: made by the provider on the first request for this
-  // SPACE, coin and wallet, and the same after. Any KEY may ask, for any SPACE it can
-  // find, private and sealed ones too: an address is public, and pays only into the SPACE.
+  // SPACE, coin and wallet, and the same after. Anyone may ask, with a KEY or without one,
+  // for any SPACE they can find, private and sealed ones too: an address is public, and
+  // pays only into the SPACE. A KEY that is asking spends its own daily allowance as well
+  // as the service's; a caller with none spends the service's alone. A token that is
+  // presented and is no good is refused, as on any route that reads one.
   // In order, each a refusal of its own: the token, the coin, deposits open, the SPACE,
   // then an address already made (which spends nothing and calls nobody), the KEY's daily
-  // allowance and the service's, the provider, and the row kept.
+  // allowance (when there is a KEY) and the service's, the provider, and the row kept.
   app.post("/v1/spaces/:name/funding/addresses", async (c) => {
-    const bearer = requireBearer(c.get("bearer"));
-    const me = toHex(bearer.peerId);
+    const me = optionalBearer(c.get("bearer"));
     const name = c.req.param("name");
     const text = await c.req.text().catch(() => {
       throw new ApiError("INVALID_REQUEST");
@@ -579,11 +595,11 @@ export function mountFunding(app: Hono<Env>, config: Config, db: Db) {
     // Found or kept for the wallet configured now, so current.
     if (made) return answer({ coin: coin.ticker, family: coin.family, address_in: made.address_in, current: true, created_at: made.created_at }, false);
 
-    await spend(c, db, OWN.fundingAddresses(me));
+    if (me !== null) await spend(c, db, OWN.fundingAddresses(me));
     await spend(c, db, SHARED.fundingAddresses());
     // Spent before the provider answers. When it fails, the service's own allowance is given
     // back, so an outage at the provider cannot empty it for the day; the KEY's is not: one
-    // KEY's loss is bounded by its own allowance.
+    // KEY's loss is bounded by its own allowance, and a caller with no KEY has none.
     let address: Awaited<ReturnType<typeof createAddress>>;
     try {
       address = await createAddress(funding, coin, url, wallet);
@@ -596,7 +612,7 @@ export function mountFunding(app: Hono<Env>, config: Config, db: Db) {
       [kept] = await db.write<{ address_in: string; created_at: Date; created: boolean }[]>`
         select f.address_in, f.created_at, f.created
           from schellingaf.funding_address_add(
-            ${bearer.peerId}, ${space.space_id}::uuid, 'cryptapi', ${coin.ticker}, ${coin.family},
+            decode(${me}::text, 'hex'), ${space.space_id}::uuid, 'cryptapi', ${coin.ticker}, ${coin.family},
             ${address.addressIn}, ${address.addressOut}, ${url}, ${mac}, ${address.minimum}::numeric) f`;
     } catch (error) {
       // Another row holds the address, URL or mac the provider answered.

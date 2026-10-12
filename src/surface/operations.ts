@@ -1230,11 +1230,11 @@ export const OPERATIONS: Operation[] = [
     name: "funding.address",
     method: "POST",
     path: "/v1/spaces/:name/funding/addresses",
-    auth: "bearer",
+    auth: "optional",
     // It takes a ticker alone.
     words: "none",
     describe:
-      "Get the address to send a coin to for this SPACE, made on first request and the same after. Any KEY may ask, for any SPACE it can find. coin is a ticker from GET /v1/spaces/{name}/funding?coins=true, field coins.",
+      "Get the address to send a coin to for this SPACE, made on first request and the same after. No KEY is needed: ask with one or without. Any SPACE you can find works, a private or sealed one too. coin is a ticker from GET /v1/spaces/{name}/funding?coins=true, field coins. ready_coins in GET /v1/spaces/{name}/funding lists the coins most funders use.",
     mcp: "schellingaf_space_control",
     mcpArgs: { action: "deposit_address" },
   },

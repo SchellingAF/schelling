@@ -19,7 +19,7 @@ import { SUPERUSER } from "./bootstrap.ts";
 import { useService, fixture, db, call, agent, connector, testConfig, config, type Agent, type App } from "./lib/service.ts";
 import { createApp } from "../src/http/app.ts";
 import { startCryptapiDouble, type CryptapiDouble } from "./support/cryptapi-double.ts";
-import { COINS, COINS_AS_OF, coinByCallbackCoin } from "../src/funding/coins.ts";
+import { COINS, COINS_AS_OF, READY_COINS, coinByCallbackCoin } from "../src/funding/coins.ts";
 import { fundingConfig, type FundingConfig } from "../src/funding/config.ts";
 import { FUNDING, dailyMicroUsd } from "../src/surface/vocabulary.ts";
 import { FUNDING_DEPOSIT_NOTICE, NOT_STARTED_NOTICE, addressesAnswer, fundingFigures, historyAnswer, offerOf, REPLACED_NOTICE, type FundingRow } from "../src/http/funding.ts";
@@ -188,13 +188,13 @@ describe("who reads what", () => {
       const out = await get(s.name, who);
       assert.equal(out.status, 200, JSON.stringify(out.body));
       assert.deepEqual(Object.keys(out.body), [
-        "space", "visibility", "billing", "billing_from", "allowance_bytes", "rate", "deposits_open", "addresses", "credited_to", "make_address", "members_only", "notice",
+        "space", "visibility", "billing", "billing_from", "allowance_bytes", "rate", "deposits_open", "addresses", "credited_to", "ready_coins", "make_address", "members_only", "notice",
       ]);
       assert.deepEqual(out.body.members_only, ["bytes", "balance", "deposits", "history", "read_only"]);
       assert.deepEqual(out.body.addresses.map((x: any) => x.address), [a.address_in]);
       const all = await get(s.name, who, fund, COINS_TOO);
       assert.deepEqual(Object.keys(all.body), [
-        "space", "visibility", "billing", "billing_from", "allowance_bytes", "rate", "deposits_open", "addresses", "credited_to", "coins", "minimums_as_of", "make_address", "members_only", "notice",
+        "space", "visibility", "billing", "billing_from", "allowance_bytes", "rate", "deposits_open", "addresses", "credited_to", "ready_coins", "coins", "minimums_as_of", "make_address", "members_only", "notice",
       ]);
       assert.deepEqual(all.body.coins, OFFERED);
       for (const key of ["bytes", "balance_micro_usd", "deposits"]) assert.equal(key in out.body, false, key);
@@ -273,6 +273,38 @@ describe("who reads what", () => {
     assert.ok(rows.addresses.some((r: any) => r.address_in === a.address_in && r.address_out_current === false), "no wallet passed is no current address");
     assert.equal("address_out" in rows.addresses[0]!, false, "the wallet leaves SQL");
     for (const key of ["state", "deposits", "confirmed", "history"] as const) assert.equal(rows[key].length, 0, key);
+  });
+});
+
+describe("the ready coins", () => {
+  const READY = ["btc", "polygon/usdc", "polygon/usdt", "sol/sol", "sol/usdc"];
+
+  test("the list is one place, in coins.ts, of tickers the table has", () => {
+    assert.deepEqual([...READY_COINS], READY);
+    for (const ticker of READY_COINS) assert.ok(COINS.some((c) => c.ticker === ticker), ticker);
+  });
+
+  test("every answer carries them, to a stranger and to nobody too, without coins=true", async () => {
+    const want = READY.map((t) => OFFERED.find((c) => c.coin === t));
+    for (const visibility of ["public", "private"] as const) {
+      const s = await space(visibility);
+      for (const who of [null, await agent(), s.owner]) {
+        const out = await get(s.name, who);
+        assert.equal(out.status, 200, JSON.stringify(out.body));
+        assert.deepEqual(out.body.ready_coins, want);
+      }
+    }
+    const sealedOne = await sealedSpace();
+    assert.deepEqual((await get(sealedOne.name, null)).body.ready_coins, want);
+  });
+
+  test("none while deposits are closed, and a coin of a family with no wallet here is left out", async () => {
+    const s = await space("public");
+    const closed = await get(s.name, null, createApp(config, db));
+    assert.deepEqual(closed.body.ready_coins, []);
+    const noSolana = serviceWith(fundingConfig(env({ FUNDING_WALLET_SOLANA: undefined }), ORIGIN));
+    const out = await get(s.name, null, noSolana);
+    assert.deepEqual(out.body.ready_coins.map((c: any) => c.coin), ["btc", "polygon/usdc", "polygon/usdt"]);
   });
 });
 
