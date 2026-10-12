@@ -420,7 +420,7 @@ describe("the crossing", () => {
         RETURNS TABLE (micro_usd_per_gb_month bigint, days_per_month integer, bytes_per_gb bigint,
                        public_bytes bigint, private_bytes bigint, sealed_bytes bigint)
         LANGUAGE sql IMMUTABLE SET search_path = pg_catalog, schellingaf, pg_temp
-        AS $$ SELECT 5000000::bigint, 30, 1000000000::bigint, 25000000::bigint, 10000000::bigint, 1000000::bigint $$`);
+        AS $$ SELECT 5000000::bigint, 30, 1000000000::bigint, 1000000000::bigint, 1000000000::bigint, 1000000000::bigint $$`);
     }
     const [r] = await fixture.api<{ pub: string }[]>`select public_bytes::text as pub from schellingaf.billing_rates()`;
     assert.equal(Number(r!.pub), PUB, "the rates are back");

@@ -302,7 +302,7 @@ export const ATTACHMENT_LIMITS = {
 } as const;
 
 /** Storage billing. Decimal units: a MB is 10^6 bytes, a GB 10^9. The bill takes its numbers
- *  from billing_rates() in SQL (migrations/0155_billing_real.sql), never from here, so an api
+ *  from billing_rates() in SQL (migrations/0155_billing_real.sql, 0160), never from here, so an api
  *  role cannot pass a rate; test/billing-real.test.ts holds the two equal. Each bill row
  *  stores the rate and allowance it used. spacesOverBytes is passed to billing_summary(). */
 export const FUNDING = {
@@ -311,10 +311,10 @@ export const FUNDING = {
   /** A day's bill is a thirtieth of the monthly rate. */
   daysPerMonth: 30,
   bytesPerGb: 1_000_000_000,
-  /** The bytes a SPACE stores free, by visibility. */
-  allowanceBytes: { public: 25_000_000, private: 10_000_000, sealed: 1_000_000 },
+  /** The bytes a SPACE stores free, by visibility: 1 GB each (0160). */
+  allowanceBytes: { public: 1_000_000_000, private: 1_000_000_000, sealed: 1_000_000_000 },
   /** The sizes the billing day's line counts SPACES above, by visibility: its spaces_over. */
-  spacesOverBytes: [1_000_000, 5_000_000, 10_000_000, 25_000_000, 100_000_000],
+  spacesOverBytes: [1_000_000, 5_000_000, 10_000_000, 25_000_000, 100_000_000, 1_000_000_000],
   /** A single confirmed deposit worth more than this, in micro-dollars, is held until the
    *  operator releases it (runbooks/credit.md): $100. Passed to funding_callback() (0152). */
   depositReviewMicro: 100_000_000,

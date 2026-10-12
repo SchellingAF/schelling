@@ -289,7 +289,7 @@ describe("the days", () => {
       const lines: string[] = [];
       await run(new Date("2026-10-02T03:00:00Z"), lines);
       const [line] = dayLines(lines);
-      assert.deepEqual(Object.keys(line!.visibility.public.spaces_over), ["1000000", "5000000", "10000000", "25000000", "100000000"]);
+      assert.deepEqual(Object.keys(line!.visibility.public.spaces_over), ["1000000", "5000000", "10000000", "25000000", "100000000", "1000000000"]);
       for (const v of ["public", "private", "sealed"] as const) {
         assert.deepEqual(line!.visibility[v].spaces_over, expected(v, FUNDING.spacesOverBytes), v);
       }

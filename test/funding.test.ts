@@ -210,9 +210,10 @@ describe("the read", () => {
 describe("the answer, worked out", () => {
   // Chosen so each rounding shows: the parts' remainders sum past 100,000, so rounding the
   // total is not rounding the parts; the shown and exact bytes over the allowance cost
-  // different sums; the last day's allowance, 100, is not a multiple of 100,000.
+  // different sums; the last day's allowance, 100, is not a multiple of 100,000. The bytes stored
+  // sit just over the 1 GB public allowance.
   const row: FundingRow = {
-    post_bytes: "25385670", file_bytes: "137890", last_day: "2026-09-09",
+    post_bytes: "1000385670", file_bytes: "137890", last_day: "2026-09-09",
     bill_billable: "1206150", bill_due: "201", bill_allowance: "100", bill_rate: "5000000", bill_days: 30, bill_bytes_per_gb: "1000000000",
     task_bytes: "0", bill_taken: "201", bill_free: false, bill_shadow: false, billing: "started", billing_from: "2026-09-01",
     free_until: null, read_only: false, read_only_since: null, own_per_day: "87", per_day: "87", pays_for: [],
@@ -226,7 +227,7 @@ describe("the answer, worked out", () => {
 
   test("a member sees the exact figures and the day's own due", () => {
     const out = fundingAnswer("s", "public", row, true);
-    assert.deepEqual(out.bytes, { posts: 25_385_670, files: 137_890, tasks: 0, total: 25_523_560 });
+    assert.deepEqual(out.bytes, { posts: 1_000_385_670, files: 137_890, tasks: 0, total: 1_000_523_560 });
     assert.equal(out.over_bytes, 523_560);
     assert.equal(out.would_be_billed_per_day_micro_usd, 87);
     assert.equal(out.per_day_micro_usd, 87);
@@ -235,7 +236,7 @@ describe("the answer, worked out", () => {
 
   test("anyone else sees every figure worked from the rounded post and file bytes", () => {
     const out = fundingAnswer("s", "public", row, false);
-    assert.deepEqual(out.bytes, { posts: 25_300_000, files: 100_000, tasks: 0, total: 25_400_000 }, "not the exact total rounded, 25,500,000");
+    assert.deepEqual(out.bytes, { posts: 1_000_300_000, files: 100_000, tasks: 0, total: 1_000_400_000 }, "not the exact total rounded, 1,000,500,000");
     assert.equal(out.over_bytes, 400_000);
     assert.equal(out.would_be_billed_per_day_micro_usd, 66, "from the shown total, not the exact one");
     assert.equal(out.per_day_micro_usd, 66, "from the shown total too");
